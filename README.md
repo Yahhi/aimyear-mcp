@@ -43,3 +43,17 @@ AIMYEAR_TOKENS="sometoken=<uid>" PORT=8787 node dist/index.js --http
 npm test                 # attention weighting, goal rubric
 npx tsx test/smoke.ts    # end-to-end against Firestore with a throwaway uid (cleans up)
 ```
+
+## Hosted (Cloud Run, Phase 1)
+
+```bash
+gcloud run deploy aimyear-mcp --source . --project aimyear-app --region us-central1 \
+  --allow-unauthenticated --set-env-vars "AIMYEAR_TOKENS=<token>=<uid>,AIMYEAR_TZ=America/Buenos_Aires,AIMYEAR_PROJECT=aimyear-app"
+```
+
+Service: https://aimyear-mcp-688197867396.us-central1.run.app (health at `/health`).
+claude.ai custom connector URL: `https://<service>/c/<token>/mcp` (no auth in the
+connector UI; the token in the path is the auth). Claude Code / scripts:
+`POST /mcp` with `Authorization: Bearer <token>`. The token lives in
+`~/.aimyear/remote-token` on Valentina's Mac. Firestore access in the container comes
+from the runtime service account (no key file). Replace with OAuth 2.1 (issue #19).

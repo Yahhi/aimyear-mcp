@@ -25,32 +25,35 @@ async function stdio() {
   await server.connect(new StdioServerTransport());
 }
 
-/** Phase-1 HTTP mode: bearer tokens from AIMYEAR_TOKENS="token=uid,token2=uid2". OAuth comes later. */
+/**
+ * Phase-1 HTTP mode, stateless (safe on Cloud Run): every request builds a fresh server.
+ * Auth, until OAuth lands:
+ *   - Authorization: Bearer <token>   → POST /mcp            (Claude Code, scripts)
+ *   - secret path segment              → POST /c/<token>/mcp  (claude.ai custom connector, which cannot send headers)
+ * AIMYEAR_TOKENS="token=uid,token2=uid2".
+ */
 async function http() {
   const port = Number(process.env.PORT ?? 8787);
   const tokens = new Map((process.env.AIMYEAR_TOKENS ?? '').split(',').filter(Boolean).map(p => p.split('=') as [string, string]));
   if (tokens.size === 0) { console.error('AIMYEAR_TOKENS is required in http mode'); process.exit(2); }
   const app = express();
   app.use(express.json({ limit: '1mb' }));
-  const transports = new Map<string, StreamableHTTPServerTransport>();
 
   app.get('/health', (_req, res) => { res.json({ ok: true, version: VERSION }); });
-  app.all('/mcp', async (req, res) => {
-    const auth = req.header('authorization') ?? '';
-    const uid = tokens.get(auth.replace(/^Bearer\s+/i, ''));
+
+  const handle = async (req: express.Request, res: express.Response, token: string) => {
+    const uid = tokens.get(token);
     if (!uid) { res.status(401).json({ error: 'unauthorized' }); return; }
-    const sid = req.header('mcp-session-id');
-    let transport = sid ? transports.get(sid) : undefined;
-    if (!transport) {
-      if (req.method !== 'POST') { res.status(400).json({ error: 'no session' }); return; }
-      const workplace = (req.header('x-aimyear-workplace') as Workplace) ?? 'mobile';
-      transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID(), onsessioninitialized: id => { transports.set(id, transport!); } });
-      transport.onclose = () => { if (transport?.sessionId) transports.delete(transport.sessionId); };
-      const server = buildServer(uid, randomUUID(), workplace);
-      await server.connect(transport);
-    }
+    if (req.method === 'GET' || req.method === 'DELETE') { res.status(405).set('Allow', 'POST').json({ error: 'stateless server: POST only' }); return; }
+    const workplace = (req.header('x-aimyear-workplace') as Workplace) ?? 'mobile';
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    const server = buildServer(uid, `remote:${token.slice(0, 6)}`, workplace);
+    res.on('close', () => { transport.close().catch(() => {}); server.close().catch(() => {}); });
+    await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
-  });
+  };
+  app.all('/mcp', (req, res) => handle(req, res, (req.header('authorization') ?? '').replace(/^Bearer\s+/i, '')).catch(e => { console.error(e); if (!res.headersSent) res.status(500).end(); }));
+  app.all('/c/:token/mcp', (req, res) => handle(req, res, String(req.params.token)).catch(e => { console.error(e); if (!res.headersSent) res.status(500).end(); }));
   app.listen(port, () => console.error(`aimyear-mcp http on :${port}`));
 }
 
