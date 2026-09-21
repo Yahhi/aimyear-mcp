@@ -1,0 +1,14 @@
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+const t = new StdioClientTransport({ command: 'node', args: ['dist/index.js'], env: { ...process.env as Record<string, string>, AIMYEAR_UID: 'k2u28fssQidqypYLUKmXFQLun0t1' } });
+const c = new Client({ name: 'check', version: '0' });
+await c.connect(t);
+const tools = await c.listTools();
+console.log('tools:', tools.tools.length, tools.tools.map(x => x.name).join(' '));
+const prompts = await c.listPrompts();
+console.log('prompts:', prompts.prompts.map(p => p.name).join(' '));
+const r = await c.callTool({ name: 'get_goal', arguments: {} });
+console.log('get_goal →', (r.content as any)[0].text.slice(0, 200));
+const s = await c.callTool({ name: 'status', arguments: {} });
+console.log('status →', JSON.parse((s.content as any)[0].text).speak);
+await c.close();
