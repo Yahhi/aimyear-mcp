@@ -27,18 +27,29 @@ export interface Step { id: string; milestoneId: string; title: string; leverId?
 export interface Path { milestones: Milestone[]; steps: Step[] }
 
 /** A recurring weekly commitment: fixed time that is already spoken for. */
+export type CommitmentKind =
+  | 'commitment'  // unavailable, and it belongs to one of the five areas
+  | 'overhead'    // unavailable, belongs to no area: sleep, meals, hygiene, moving between places
+  | 'window';     // available for focus work: the positive space in the week
+
 export interface Commitment {
   id: string;
   title: string;
-  area: Area;
+  kind: CommitmentKind;
+  /** Ignored for kind 'overhead' and 'window'. */
+  area?: Area;
   /** ISO weekdays 1=Mon..7=Sun. Empty when the commitment has no fixed days. */
   days: number[];
   /** Used instead of `days` when it happens N times a week without fixed days. */
   timesPerWeek?: number;
   start?: string;      // HH:MM, optional
   minutes: number;     // per occurrence
-  /** True when this time can be used for focus work anyway (waiting, commuting as a passenger). */
+  /** Kept for compatibility: a commitment that is nonetheless workable. Prefer kind 'window'. */
   usableForWork?: boolean;
+  /** Set when the number is Claude's inference rather than something the user stated. */
+  assumed?: boolean;
+  /** Id of a kind:'window' commitment this one is carved out of, so the window is not counted twice. */
+  insideWindowId?: string;
   projectId?: string;
   note?: string;
 }

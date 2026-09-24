@@ -3,7 +3,7 @@ import { addDays, daysBetween, endOfDay, isValidDate, localDate, localTime, minu
 import { computeAttention, findGaps } from './domain/attention.js';
 import { checkGoal, checkStepTitle, type GoalDraft } from './domain/goal.js';
 import { classify, decideVerdict, isGoalWork } from './domain/classify.js';
-import type { Area, Block, Classification, Commitment, Day, Goal, Lever, Milestone, Mode, Path, PlanItem, Profile, Project, Session, Step, Workplace } from './types.js';
+import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Goal, Lever, Milestone, Mode, Path, PlanItem, Profile, Project, Session, Step, Workplace } from './types.js';
 
 export class AimError extends Error {}
 
@@ -205,17 +205,19 @@ export class AimService {
   // ---------- commitments & capacity ----------
   async getCommitments() {
     const items = await this.store.getCommitments();
-    return { commitments: items, speak: items.length ? items.map(c => `${c.title} (${c.area}): ${describeWhen(c)}, ${c.minutes} min${c.usableForWork ? ', usable for work' : ''}`).join('; ') : 'No recurring commitments recorded.' };
+    return { commitments: items, speak: items.length ? items.map(c => `${c.title} [${c.kind}${c.area ? ' ' + c.area : ''}]: ${describeWhen(c)}, ${c.minutes} min${c.assumed ? ' (assumed)' : ''}`).join('; ') : 'No recurring commitments recorded.' };
   }
 
-  async setCommitments(items: (Omit<Commitment, 'id' | 'days'> & { id?: string; days?: number[] })[]) {
+  async setCommitments(items: (Omit<Commitment, 'id' | 'days' | 'kind'> & { id?: string; days?: number[]; kind?: CommitmentKind })[]) {
     const problems: string[] = [];
     const out: Commitment[] = items.map(c => {
       if (!c.title?.trim()) problems.push('a commitment has no title');
       if (!c.minutes || c.minutes < 1) problems.push(`"${c.title}" needs minutes per occurrence`);
       const days = (c.days ?? []).filter(d => d >= 1 && d <= 7);
       if (!days.length && !c.timesPerWeek) problems.push(`"${c.title}" needs days (1=Mon..7=Sun) or timesPerWeek`);
-      return { id: c.id ?? slug(c.title), title: c.title.trim(), area: c.area, days, timesPerWeek: c.timesPerWeek, start: c.start, minutes: c.minutes, usableForWork: c.usableForWork, projectId: c.projectId, note: c.note };
+      const kind: CommitmentKind = c.kind ?? 'commitment';
+      if (kind === 'commitment' && !c.area) problems.push(`"${c.title}" needs an area (or kind overhead/window)`);
+      return { id: c.id ?? slug(c.title), title: c.title.trim(), kind, area: kind === 'commitment' ? c.area : undefined, days, timesPerWeek: c.timesPerWeek, start: c.start, minutes: c.minutes, usableForWork: c.usableForWork, assumed: c.assumed, insideWindowId: c.insideWindowId, projectId: c.projectId, note: c.note };
     });
     if (problems.length) return { ok: false, problems, speak: problems.join('; ') };
     await this.store.saveCommitments(out);
@@ -223,27 +225,35 @@ export class AimService {
     return { ok: true, commitments: out, capacity: cap, speak: `${out.length} commitments saved. ${cap.speak}` };
   }
 
-  /** Weekly time budget from the recorded commitments. */
-  async capacity(wakingHoursPerDay = 16) {
+  /** Weekly time budget. Nothing is assumed: only what has been recorded is counted. */
+  async capacity() {
     const items = await this.store.getCommitments();
+    const occ = (c: Commitment) => c.days.length || c.timesPerWeek || 0;
     const perArea: Record<string, number> = {};
-    let committed = 0, usable = 0;
+    let overhead = 0, committed = 0, windows = 0;
+    const windowList: string[] = [], assumedList: string[] = [];
     for (const c of items) {
-      const occurrences = c.days.length || c.timesPerWeek || 0;
-      const min = occurrences * c.minutes;
-      perArea[c.area] = (perArea[c.area] ?? 0) + min;
+      const min = occ(c) * c.minutes;
+      if (c.assumed) assumedList.push(`${c.title} (${Math.round(c.minutes)} min)`);
+      if (c.kind === 'overhead') { overhead += min; continue; }
+      if (c.kind === 'window') { windows += min; windowList.push(`${c.title}: ${describeWhen(c)}, ${Math.round((min / 60) * 10) / 10} h/week`); continue; }
+      perArea[c.area ?? 'work'] = (perArea[c.area ?? 'work'] ?? 0) + min;
       committed += min;
-      if (c.usableForWork) usable += min;
+      if (c.usableForWork) windows += min;
     }
-    const wakingMin = wakingHoursPerDay * 7 * 60;
     const h = (m: number) => Math.round((m / 60) * 10) / 10;
-    const byArea = Object.fromEntries(Object.entries(perArea).map(([k, v]) => [k, h(v)]));
-    const free = wakingMin - committed;
-    const usableList = items.filter(c => c.usableForWork).map(c => `${c.title} (${h((c.days.length || c.timesPerWeek || 0) * c.minutes)} h/week)`);
+    const weekMin = 7 * 24 * 60;
+    // Commitments carved out of a declared window must not be counted twice.
+    const carved = items.filter(c => c.insideWindowId && c.kind === 'commitment').reduce((sum, c) => sum + occ(c) * c.minutes, 0);
+    const netWindows = Math.max(0, windows - carved);
+    const carvedList = items.filter(c => c.insideWindowId && c.kind === 'commitment').map(c => `${c.title} (${h(occ(c) * c.minutes)} h/week)`);
+    const unaccounted = weekMin - overhead - committed - netWindows;
     return {
-      waking_hours_per_week: h(wakingMin), committed_hours_per_week: h(committed), free_hours_per_week: h(free),
-      usable_within_commitments_hours: h(usable), usable_commitments: usableList, by_area_hours: byArea,
-      speak: `Per week: ${h(committed)} h already committed (${Object.entries(byArea).map(([k, v]) => `${k} ${v}h`).join(', ')}), ${h(free)} h left of ${h(wakingMin)} waking hours — and paid work still comes out of that.${usable ? ` ${h(usable)} h of the committed time is usable for focus work: ${usableList.join(', ')}.` : ''}`,
+      hours_in_a_week: 168, overhead_hours: h(overhead), committed_hours: h(committed),
+      focus_window_hours_gross: h(windows), carved_out_of_windows_hours: h(carved), focus_window_hours_net: h(netWindows), carved_out_by: carvedList,
+      unaccounted_hours: h(unaccounted), by_area_hours: Object.fromEntries(Object.entries(perArea).map(([k, v]) => [k, h(v)])),
+      focus_windows: windowList, assumed_entries: assumedList,
+      speak: `Per week: ${h(overhead)} h overhead (sleep, meals, hygiene, moving), ${h(committed)} h committed to areas (${Object.entries(perArea).map(([k, v]) => `${k} ${h(v)}h`).join(', ') || 'none'}), ${h(windows)} h of focus windows minus ${h(carved)} h carved out of them (${carvedList.join(', ') || 'nothing'}) = ${h(netWindows)} h genuinely free for the goal, ${h(unaccounted)} h not yet accounted for.${windowList.length ? ` Windows: ${windowList.join('; ')}.` : ' No focus windows recorded yet, so the planner has nowhere to put the main step.'}${assumedList.length ? ` Assumed by Claude, please confirm: ${assumedList.join(', ')}.` : ''}`,
     };
   }
 
