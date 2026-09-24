@@ -41,13 +41,14 @@ export interface VerdictResult { verdict: Verdict; message: string; note?: strin
  * The stop rule. One `stop` per day; a confirmed override is stored on the session.
  * `override` = the user confirmed after a stop.
  */
-export function decideVerdict(cls: Classification, day: Day | null, goal: Goal | null, override: boolean): VerdictResult {
+export function decideVerdict(cls: Classification, day: Day | null, goal: Goal | null, override: boolean, requiresMainStep = true): VerdictResult {
   if (day?.mode === 'off') return { verdict: 'ok', message: 'Tracking is off today. Timer only.' };
   if (!goal) return { verdict: 'ok', message: 'No goal set yet. Logged as plain time; run the goal setup when ready.' };
 
   const mainItem = day?.plan.find(p => p.isMainStep);
   const mainDone = !!mainItem?.done;
 
+  if (!requiresMainStep) return { verdict: 'ok', message: 'No focus window today, so nothing is expected. Logged.' };
   if (!day || day.plan.length === 0) {
     if (cls === 'goal_hard' || cls === 'life') return { verdict: 'ok', message: 'No plan for today yet, but this counts anyway.' };
     return { verdict: 'plan_first', message: 'There is no plan for today. Before anything else: what is the one step toward the goal today? Set it with set_plan (or say "no plan today" to set mode off).' };

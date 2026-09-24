@@ -257,6 +257,18 @@ export class AimService {
     };
   }
 
+  /** Minutes of declared focus window on that weekday, net of commitments carved out of them. */
+  private async windowMinutesFor(date: string): Promise<number> {
+    const items = await this.store.getCommitments();
+    const [y, m, d] = date.split('-').map(Number);
+    const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+    const iso = dow === 0 ? 7 : dow;
+    const on = (c: Commitment) => c.days.includes(iso);
+    const gross = items.filter(c => c.kind === 'window' && on(c)).reduce((s, c) => s + c.minutes, 0);
+    const carved = items.filter(c => c.kind === 'commitment' && c.insideWindowId && on(c)).reduce((s, c) => s + c.minutes, 0);
+    return Math.max(0, gross - carved);
+  }
+
   private async commitmentsFor(date: string): Promise<Commitment[]> {
     const items = await this.store.getCommitments();
     const [y, m, d] = date.split('-').map(Number);
@@ -277,10 +289,13 @@ export class AimService {
     const day = await this.store.getOrCreateDay(d, (await this.profile()).defaultMode);
     const mains = items.filter(i => i.isMainStep);
     const warnings: string[] = [];
-    if (day.mode !== 'off') {
+    const windowMin = await this.windowMinutesFor(d);
+    if (day.mode !== 'off' && windowMin > 0) {
       if (mains.length === 0) return { ok: false, problems: ['plan has no main step'], speak: 'Every day needs exactly one step toward the goal marked as the main step. Which item is it? (Use next_steps for candidates.)' };
       if (mains.length > 1) return { ok: false, problems: ['more than one main step'], speak: 'Only one item can be the main step. Which one?' };
       if (!mains[0].stepId) warnings.push('main step is free text, not linked to a path step; link it with stepId so the path advances when it is done');
+    } else if (windowMin === 0 && day.mode !== 'off') {
+      warnings.push('no focus window on this day, so no main step is required');
     }
     const path = await this.store.getPath();
     for (const it of items) if (it.stepId && !path.steps.some(s => s.id === it.stepId)) return { ok: false, problems: [`stepId "${it.stepId}" not found in path`], speak: `Step ${it.stepId} is not in the path.` };
@@ -317,13 +332,14 @@ export class AimService {
     const commitments = await this.commitmentsFor(d);
     const cap = await this.capacity();
     const committedToday = commitments.reduce((sum, c) => sum + c.minutes, 0);
+    const windowMinutes = await this.windowMinutesFor(d);
     return {
-      date: d, commitments, committed_minutes_that_day: committedToday, capacity: cap, goal: goal.goal ? { title: goal.goal.title, metric: goal.goal.metric, current: goal.current_value, target: goal.goal.target, days_left: goal.days_left, levers: goal.goal.levers, projects: goal.goal.projects } : null,
+      date: d, commitments, committed_minutes_that_day: committedToday, focus_window_minutes: windowMinutes, capacity: cap, goal: goal.goal ? { title: goal.goal.title, metric: goal.goal.metric, current: goal.current_value, target: goal.goal.target, days_left: goal.days_left, levers: goal.goal.levers, projects: goal.goal.projects } : null,
       milestone: next.milestone ?? null, next_steps: next.steps,
       yesterday: { date: yesterday, main_step_done: ySum.main_step.done, goal_attention_min: ySum.goal_attention_min, by_area: ySum.by_area, undone_items: undone },
       week: { main_step_days: week.main_step_days, goal_share: week.goal_share, hard_share: week.hard_share, by_area: week.by_area },
       days_since_hard_lever: daysSinceHard, existing_plan: existing?.plan ?? [],
-      speak: `Planning ${d}. Fixed that day: ${commitments.length ? commitments.map(c => `${c.title} ${c.minutes}min${c.usableForWork ? ' (usable)' : ''}`).join(', ') : 'nothing recorded'} = ${Math.round(committedToday / 6) / 10} h. ${goal.speak} Days since a hard lever: ${daysSinceHard ?? 'never'}. Yesterday main step ${ySum.main_step.done ? 'done' : 'NOT done'}${undone.length ? `, ${undone.length} items left undone` : ''}. Pick the main step from next_steps (hard first), then fit paid work, family, workout.`,
+      speak: `Planning ${d}. ${windowMinutes === 0 ? 'NO focus window that day: do not plan goal work, and do not ask for a main step. ' : `Focus window: ${Math.round(windowMinutes / 6) / 10} h. `}Fixed that day: ${commitments.length ? commitments.map(c => `${c.title} ${c.minutes}min${c.usableForWork ? ' (usable)' : ''}`).join(', ') : 'nothing recorded'} = ${Math.round(committedToday / 6) / 10} h. ${goal.speak} Days since a hard lever: ${daysSinceHard ?? 'never'}. Yesterday main step ${ySum.main_step.done ? 'done' : 'NOT done'}${undone.length ? `, ${undone.length} items left undone` : ''}. Pick the main step from next_steps (hard first), then fit paid work, family, workout.`,
     };
   }
 
@@ -395,7 +411,7 @@ export class AimService {
     const goal = await this.store.getGoal();
     const area = input.area ?? 'work';
     const cls = classify({ area, projectId: input.projectId, leverId: input.leverId, stepId: input.stepId, itemId: input.itemId, task: input.task }, goal, day);
-    const verdict = decideVerdict(cls.classification, day, goal, !!input.override);
+    const verdict = decideVerdict(cls.classification, day, goal, !!input.override, (await this.windowMinutesFor(today)) > 0);
     const workplace = input.workplace ?? this.clientWorkplace ?? prof.defaultWorkplace;
 
     if (verdict.verdict === 'stop') {
@@ -477,7 +493,7 @@ export class AimService {
     const goal = await this.store.getGoal();
     const area = input.area ?? 'work';
     const cls = classify({ area, projectId: input.projectId, leverId: input.leverId, stepId: input.stepId, itemId: input.itemId, task: input.task }, goal, day);
-    const v = decideVerdict(cls.classification, day, goal, true);
+    const v = decideVerdict(cls.classification, day, goal, true, (await this.windowMinutesFor(date)) > 0);
     const session: Session = {
       id: newId(), start: start.toISOString(), end: end.toISOString(), source: 'manual', clientSessionId: this.clientSessionId, weight: input.weight ?? 1, exclusive: input.exclusive, workplace: input.workplace ?? prof.defaultWorkplace,
       area, projectId: cls.projectId ?? input.projectId, leverId: cls.leverId ?? input.leverId, stepId: input.stepId, itemId: input.itemId, task: input.task.trim(), notes: [], classification: cls.classification, unclassified: cls.unclassified, verdictAtStart: v.verdict, outcome: 'done',
@@ -611,12 +627,15 @@ export class AimService {
     const tz = await this.tz();
     const hour = Number(localTime(new Date(), tz).slice(0, 2));
     let nudge = '';
-    if (s.mode !== 'off') {
+    const windowMin = await this.windowMinutesFor(s.date);
+    if (s.mode !== 'off' && windowMin > 0) {
       if (!s.main_step.planned) nudge = 'No main step planned today. Set one with set_plan.';
       else if (!s.main_step.done && hour >= 14) nudge = `Main step still pending: "${s.main_step.title}". Do 25 minutes on it next.`;
       else if (s.main_step.done && !s.hard_lever_touched) nudge = 'Main step done. A hard lever has not been touched today.';
+    } else if (windowMin === 0 && s.mode !== 'off') {
+      nudge = 'No focus window today. Nothing is expected of you toward the goal.';
     }
-    return { ...cur, today: { date: s.date, main_step: s.main_step, total_attention_min: s.total_attention_min, goal_attention_min: s.goal_attention_min, goal_share_of_work: s.goal_share_of_work, hard_share_of_goal: s.hard_share_of_goal, by_area: s.by_area, overrides: s.overrides }, streak_days: st.streak_days, nudge, speak: `${s.speak} ${cur.speak} Streak ${st.streak_days}. ${nudge}` };
+    return { ...cur, focus_window_minutes_today: windowMin, today: { date: s.date, main_step: s.main_step, total_attention_min: s.total_attention_min, goal_attention_min: s.goal_attention_min, goal_share_of_work: s.goal_share_of_work, hard_share_of_goal: s.hard_share_of_goal, by_area: s.by_area, overrides: s.overrides }, streak_days: st.streak_days, nudge, speak: `${s.speak} ${cur.speak} Streak ${st.streak_days}. ${nudge}` };
   }
 }
 
