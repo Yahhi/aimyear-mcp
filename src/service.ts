@@ -3,7 +3,7 @@ import { addDays, daysBetween, endOfDay, isValidDate, localDate, localTime, minu
 import { computeAttention, findGaps } from './domain/attention.js';
 import { checkGoal, checkStepTitle, type GoalDraft } from './domain/goal.js';
 import { classify, decideVerdict, isGoalWork } from './domain/classify.js';
-import type { Area, Block, Classification, Day, Goal, Lever, Milestone, Mode, Path, PlanItem, Profile, Project, Session, Step, Workplace } from './types.js';
+import type { Area, Block, Classification, Commitment, Day, Goal, Lever, Milestone, Mode, Path, PlanItem, Profile, Project, Session, Step, Workplace } from './types.js';
 
 export class AimError extends Error {}
 
@@ -40,20 +40,20 @@ export class AimService {
     return { ...check, ok: check.problems.length === 0, speak: check.problems.length === 0 ? `Goal passes the rubric. Pace needed: ${check.pace_per_week} per week for ${check.weeks_left} weeks.` : check.next_question ?? check.problems.join('; ') };
   }
 
-  async setGoal(draft: Required<Pick<GoalDraft, 'title' | 'metric' | 'baseline' | 'target' | 'deadline'>> & { why?: string }) {
+  async setGoal(draft: Required<Pick<GoalDraft, 'title' | 'metric' | 'baseline' | 'target' | 'deadline'>> & { why?: string; area?: Area }) {
     const check = checkGoal(draft, await this.tz());
     if (check.problems.length) return { ok: false, ...check, speak: `Not saved: ${check.problems.join('; ')}. ${check.next_question ?? ''}` };
     const existing = await this.store.getGoal();
     const now = new Date().toISOString();
     const goal: Goal = {
-      title: draft.title.trim(), why: (draft.why ?? existing?.why ?? '').trim(), metric: draft.metric.trim(),
+      title: draft.title.trim(), area: draft.area ?? existing?.area ?? 'money', why: (draft.why ?? existing?.why ?? '').trim(), metric: draft.metric.trim(),
       baseline: draft.baseline, target: draft.target, deadline: draft.deadline,
       baselineHistory: existing?.baselineHistory?.length ? existing.baselineHistory : [{ value: draft.baseline, date: await this.today() }],
       levers: existing?.levers ?? [], projects: existing?.projects ?? [],
       createdAt: existing?.createdAt ?? now, updatedAt: now,
     };
     await this.store.saveGoal(goal);
-    return { ok: true, goal, pace_per_week: check.pace_per_week, weeks_left: check.weeks_left, speak: `Goal saved: "${goal.title}" — ${goal.metric} from ${goal.baseline} to ${goal.target} by ${goal.deadline}. That is ${check.pace_per_week} per week. Next: milestones (set_milestones), then steps for the first one (add_steps), then levers (set_levers).` };
+    return { ok: true, goal, pace_per_week: check.pace_per_week, weeks_left: check.weeks_left, speak: `Goal saved [${goal.area}]: "${goal.title}" — ${goal.metric} from ${goal.baseline} to ${goal.target} by ${goal.deadline}. That is ${check.pace_per_week} per week.${goal.levers.length ? '' : ' Next: milestones (set_milestones), steps for the first one (add_steps), then levers (set_levers).'}` };
   }
 
   async getGoal() {
@@ -67,7 +67,7 @@ export class AimService {
     const elapsed = Math.min(1, Math.max(0, daysBetween(goal.createdAt.slice(0, 10), today) / totalDays));
     return {
       goal, current_value: latest.value, days_left: daysLeft, progress_fraction: Math.round(progress * 100) / 100, time_elapsed_fraction: Math.round(elapsed * 100) / 100,
-      speak: `Goal: "${goal.title}". ${goal.metric}: ${latest.value} of ${goal.target} (started at ${goal.baseline}), ${daysLeft} days left. Levers: ${goal.levers.map(l => `${l.name} (${l.kind})`).join(', ') || 'none yet'}.`,
+      speak: `Goal [${goal.area ?? 'money'}]: "${goal.title}". ${goal.metric}: ${latest.value} of ${goal.target} (started at ${goal.baseline}), ${daysLeft} days left. Levers: ${goal.levers.map(l => `${l.name} (${l.kind})`).join(', ') || 'none yet'}.`,
     };
   }
 
@@ -202,6 +202,59 @@ export class AimService {
     return { ok: true, date: d, mode, speak: mode === 'off' ? `Tracking off for ${d}: timer and reminders only, nothing stored.` : `Mode for ${d}: ${mode}.` };
   }
 
+  // ---------- commitments & capacity ----------
+  async getCommitments() {
+    const items = await this.store.getCommitments();
+    return { commitments: items, speak: items.length ? items.map(c => `${c.title} (${c.area}): ${describeWhen(c)}, ${c.minutes} min${c.usableForWork ? ', usable for work' : ''}`).join('; ') : 'No recurring commitments recorded.' };
+  }
+
+  async setCommitments(items: (Omit<Commitment, 'id' | 'days'> & { id?: string; days?: number[] })[]) {
+    const problems: string[] = [];
+    const out: Commitment[] = items.map(c => {
+      if (!c.title?.trim()) problems.push('a commitment has no title');
+      if (!c.minutes || c.minutes < 1) problems.push(`"${c.title}" needs minutes per occurrence`);
+      const days = (c.days ?? []).filter(d => d >= 1 && d <= 7);
+      if (!days.length && !c.timesPerWeek) problems.push(`"${c.title}" needs days (1=Mon..7=Sun) or timesPerWeek`);
+      return { id: c.id ?? slug(c.title), title: c.title.trim(), area: c.area, days, timesPerWeek: c.timesPerWeek, start: c.start, minutes: c.minutes, usableForWork: c.usableForWork, projectId: c.projectId, note: c.note };
+    });
+    if (problems.length) return { ok: false, problems, speak: problems.join('; ') };
+    await this.store.saveCommitments(out);
+    const cap = await this.capacity();
+    return { ok: true, commitments: out, capacity: cap, speak: `${out.length} commitments saved. ${cap.speak}` };
+  }
+
+  /** Weekly time budget from the recorded commitments. */
+  async capacity(wakingHoursPerDay = 16) {
+    const items = await this.store.getCommitments();
+    const perArea: Record<string, number> = {};
+    let committed = 0, usable = 0;
+    for (const c of items) {
+      const occurrences = c.days.length || c.timesPerWeek || 0;
+      const min = occurrences * c.minutes;
+      perArea[c.area] = (perArea[c.area] ?? 0) + min;
+      committed += min;
+      if (c.usableForWork) usable += min;
+    }
+    const wakingMin = wakingHoursPerDay * 7 * 60;
+    const h = (m: number) => Math.round((m / 60) * 10) / 10;
+    const byArea = Object.fromEntries(Object.entries(perArea).map(([k, v]) => [k, h(v)]));
+    const free = wakingMin - committed;
+    const usableList = items.filter(c => c.usableForWork).map(c => `${c.title} (${h((c.days.length || c.timesPerWeek || 0) * c.minutes)} h/week)`);
+    return {
+      waking_hours_per_week: h(wakingMin), committed_hours_per_week: h(committed), free_hours_per_week: h(free),
+      usable_within_commitments_hours: h(usable), usable_commitments: usableList, by_area_hours: byArea,
+      speak: `Per week: ${h(committed)} h already committed (${Object.entries(byArea).map(([k, v]) => `${k} ${v}h`).join(', ')}), ${h(free)} h left of ${h(wakingMin)} waking hours — and paid work still comes out of that.${usable ? ` ${h(usable)} h of the committed time is usable for focus work: ${usableList.join(', ')}.` : ''}`,
+    };
+  }
+
+  private async commitmentsFor(date: string): Promise<Commitment[]> {
+    const items = await this.store.getCommitments();
+    const [y, m, d] = date.split('-').map(Number);
+    const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+    const iso = dow === 0 ? 7 : dow;
+    return items.filter(c => c.days.includes(iso));
+  }
+
   // ---------- planning ----------
   async getPlan(date?: string) {
     const d = date ?? await this.today(); this.assertDate(d);
@@ -251,13 +304,16 @@ export class AimService {
     const week = await this.weekSummary(addDays(d, -1));
     const daysSinceHard = await this.daysSinceHardLever(d);
     const existing = await this.store.getDay(d);
+    const commitments = await this.commitmentsFor(d);
+    const cap = await this.capacity();
+    const committedToday = commitments.reduce((sum, c) => sum + c.minutes, 0);
     return {
-      date: d, goal: goal.goal ? { title: goal.goal.title, metric: goal.goal.metric, current: goal.current_value, target: goal.goal.target, days_left: goal.days_left, levers: goal.goal.levers, projects: goal.goal.projects } : null,
+      date: d, commitments, committed_minutes_that_day: committedToday, capacity: cap, goal: goal.goal ? { title: goal.goal.title, metric: goal.goal.metric, current: goal.current_value, target: goal.goal.target, days_left: goal.days_left, levers: goal.goal.levers, projects: goal.goal.projects } : null,
       milestone: next.milestone ?? null, next_steps: next.steps,
       yesterday: { date: yesterday, main_step_done: ySum.main_step.done, goal_attention_min: ySum.goal_attention_min, by_area: ySum.by_area, undone_items: undone },
       week: { main_step_days: week.main_step_days, goal_share: week.goal_share, hard_share: week.hard_share, by_area: week.by_area },
       days_since_hard_lever: daysSinceHard, existing_plan: existing?.plan ?? [],
-      speak: `Planning ${d}. ${goal.speak} Days since a hard lever: ${daysSinceHard ?? 'never'}. Yesterday main step ${ySum.main_step.done ? 'done' : 'NOT done'}${undone.length ? `, ${undone.length} items left undone` : ''}. Pick the main step from next_steps (hard first), then fit paid work, family, workout.`,
+      speak: `Planning ${d}. Fixed that day: ${commitments.length ? commitments.map(c => `${c.title} ${c.minutes}min${c.usableForWork ? ' (usable)' : ''}`).join(', ') : 'nothing recorded'} = ${Math.round(committedToday / 6) / 10} h. ${goal.speak} Days since a hard lever: ${daysSinceHard ?? 'never'}. Yesterday main step ${ySum.main_step.done ? 'done' : 'NOT done'}${undone.length ? `, ${undone.length} items left undone` : ''}. Pick the main step from next_steps (hard first), then fit paid work, family, workout.`,
     };
   }
 
@@ -552,6 +608,12 @@ export class AimService {
     }
     return { ...cur, today: { date: s.date, main_step: s.main_step, total_attention_min: s.total_attention_min, goal_attention_min: s.goal_attention_min, goal_share_of_work: s.goal_share_of_work, hard_share_of_goal: s.hard_share_of_goal, by_area: s.by_area, overrides: s.overrides }, streak_days: st.streak_days, nudge, speak: `${s.speak} ${cur.speak} Streak ${st.streak_days}. ${nudge}` };
   }
+}
+
+const DOW = ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+function describeWhen(c: { days: number[]; timesPerWeek?: number; start?: string }): string {
+  const when = c.days.length ? c.days.map(d => DOW[d]).join('/') : `${c.timesPerWeek ?? 0}×/week`;
+  return c.start ? `${when} at ${c.start}` : when;
 }
 
 function slug(s: string) { return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || newId(); }

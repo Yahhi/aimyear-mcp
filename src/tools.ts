@@ -29,8 +29,8 @@ export function registerTools(server: McpServer, svc: AimService) {
   t('validate_goal', 'Check a goal draft against the rubric (countable metric, baseline, target, deadline within 12 months, pace per week). Returns problems[] and next_question. Loop until problems is empty, then call set_goal.', {
     title: z.string().optional(), metric: z.string().optional().describe('the one number and its unit, e.g. "paying customers"'), baseline: z.number().optional().describe('value today'), target: z.number().optional(), deadline: date.optional(),
   }, a => svc.validateGoal(a));
-  t('set_goal', 'Save the yearly goal. Rejects with problems[] if the rubric fails. Keeps existing levers/projects.', {
-    title: z.string(), why: z.string().optional(), metric: z.string(), baseline: z.number(), target: z.number(), deadline: date,
+  t('set_goal', 'Save the yearly goal. Rejects with problems[] if the rubric fails. Keeps existing levers/projects. area tags which of the five life areas the goal belongs to.', {
+    title: z.string(), why: z.string().optional(), metric: z.string(), baseline: z.number(), target: z.number(), deadline: date, area: area.optional().describe('default money'),
   }, a => svc.setGoal(a));
   t('update_baseline', 'Record the current value of the goal metric (real progress), e.g. "I now have 4 customers".', { value: z.number(), date: date.optional() }, a => svc.updateBaseline(a.value, a.date));
   t('set_levers', 'Set the recurring kinds of goal work. At least one must be kind=hard (the work the user avoids). keywords/repos are match hints used to classify sessions from task text.', {
@@ -41,6 +41,13 @@ export function registerTools(server: McpServer, svc: AimService) {
   }, a => svc.addProject(a.name, a.area, a.keywords ?? [], a.repos ?? []));
   t('set_pomodoro', 'Pomodoro settings.', { workMin: z.number().int().min(5).max(120).optional(), breakMin: z.number().int().min(1).max(60).optional(), longBreakEvery: z.number().int().min(1).max(10).optional(), longBreakMin: z.number().int().min(5).max(60).optional(), standup: z.boolean().optional() }, a => svc.setPomodoro(a));
   t('set_workplace', 'Default workplace for reminders: desktop or mobile.', { workplace: z.enum(['desktop', 'mobile']) }, a => svc.setWorkplace(a.workplace));
+
+  // ---- commitments ----
+  t('get_commitments', 'Recurring weekly commitments: the time already spoken for (school runs, training, classes, waiting).', {}, () => svc.getCommitments());
+  t('set_commitments', 'Replace the list of recurring weekly commitments. days are ISO weekdays 1=Mon..7=Sun; use timesPerWeek instead when there are no fixed days. usableForWork=true marks time that is committed but still workable (waiting, being a passenger).', {
+    commitments: z.array(z.object({ id: z.string().optional(), title: z.string(), area, days: z.array(z.number().int().min(1).max(7)).optional(), timesPerWeek: z.number().int().min(1).max(7).optional(), start: hhmm.optional(), minutes: z.number().int().min(1), usableForWork: z.boolean().optional(), projectId: z.string().optional(), note: z.string().optional() })),
+  }, a => svc.setCommitments(a.commitments));
+  t('capacity', 'Weekly time budget: hours already committed per area, hours left, and which committed hours are still usable for focus work.', { wakingHoursPerDay: z.number().min(8).max(20).optional() }, a => svc.capacity(a.wakingHoursPerDay));
 
   // ---- path ----
   t('get_path', 'Milestones with pace (ahead/on_pace/behind) and their steps. current_milestone_id is the one to work on.', {}, () => svc.getPath());

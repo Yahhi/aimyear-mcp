@@ -1,4 +1,4 @@
-export const AREAS = ['health', 'finance', 'relations', 'work', 'happiness'] as const;
+export const AREAS = ['health', 'relations', 'work', 'money', 'happiness'] as const;
 export type Area = (typeof AREAS)[number];
 
 export type LeverKind = 'hard' | 'comfortable';
@@ -8,6 +8,7 @@ export interface Project { id: string; name: string; area: Area; match: MatchHin
 
 export interface Goal {
   title: string;
+  area: Area;
   why: string;
   metric: string;
   baseline: number;
@@ -24,6 +25,23 @@ export type ItemStatus = 'todo' | 'doing' | 'done';
 export interface Milestone { id: string; title: string; metric: string; target: number; due: string; status: ItemStatus; createdAt: string; doneAt?: string }
 export interface Step { id: string; milestoneId: string; title: string; leverId?: string; estimateMin: number; order: number; status: ItemStatus; doneAt?: string }
 export interface Path { milestones: Milestone[]; steps: Step[] }
+
+/** A recurring weekly commitment: fixed time that is already spoken for. */
+export interface Commitment {
+  id: string;
+  title: string;
+  area: Area;
+  /** ISO weekdays 1=Mon..7=Sun. Empty when the commitment has no fixed days. */
+  days: number[];
+  /** Used instead of `days` when it happens N times a week without fixed days. */
+  timesPerWeek?: number;
+  start?: string;      // HH:MM, optional
+  minutes: number;     // per occurrence
+  /** True when this time can be used for focus work anyway (waiting, commuting as a passenger). */
+  usableForWork?: boolean;
+  projectId?: string;
+  note?: string;
+}
 
 export type Mode = 'full' | 'focus' | 'off';
 export type Workplace = 'desktop' | 'mobile';
