@@ -53,15 +53,32 @@ export async function deliver(p: Pending, notif: Notifications): Promise<{ sent:
   return { sent: res.successCount, failed: res.failureCount };
 }
 
-/** One poll: deliver everything due and clear it. */
+/** One poll: deliver everything due, clear it, and keep the cadence going. */
 export async function tick(notif: Notifications, now = new Date()) {
   const due = await notif.due(now.toISOString());
-  const results: { id: string; kind: string; sent: number; failed: number; reason?: string }[] = [];
+  const results: { id: string; kind: string; sent: number; failed: number; reason?: string; continued?: string }[] = [];
   for (const p of due) {
     let r: { sent: number; failed: number; reason?: string };
     try { r = await deliver(p, notif); } catch (e) { r = { sent: 0, failed: 0, reason: (e as Error).message }; }
     await notif.remove(p.id);
-    results.push({ id: p.id, kind: p.kind, ...r });
+    let continued: string | undefined;
+    // The break is over and she is still in a session, so the timer should keep
+    // cycling. Otherwise one block is all she ever gets reminded about.
+    if (p.kind === 'break_end') {
+      try {
+        const running = await notif.runningSessionsOf(p.uid);
+        if (running.length) {
+          const prof = await notif.profileOf(p.uid);
+          continued = await notif.continueCadence(
+            p.uid, p.workplace,
+            prof?.pomodoro.workMin ?? p.minutes,
+            prof?.pomodoro.breakMin ?? p.breakMin,
+            prof?.pomodoro.standup ?? true,
+          );
+        }
+      } catch (e) { console.error('[tick] cadence continue failed', e); }
+    }
+    results.push({ id: p.id, kind: p.kind, ...r, continued });
   }
   return { processed: due.length, results };
 }

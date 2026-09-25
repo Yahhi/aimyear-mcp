@@ -51,6 +51,29 @@ export class Notifications {
     const main = plan.find(p => p.isMainStep);
     return main ? { title: main.title, done: main.done } : null;
   }
+  /** Sessions still open for a user, ignoring ones stale enough to be a forgotten timer. */
+  async runningSessionsOf(uid: string, maxAgeHours = 6): Promise<Session[]> {
+    const lower = new Date(Date.now() - maxAgeHours * 3600000).toISOString();
+    const snap = await this.db.collection('users').doc(uid).collection('sessions').where('start', '>=', lower).get();
+    return snap.docs.map(d => d.data() as Session).filter(x => !x.end);
+  }
+
+  /** Starts the next work block of a cadence and queues its reminders. */
+  async continueCadence(uid: string, workplace: Workplace, minutes: number, breakMin: number, standup: boolean): Promise<string> {
+    const id = newId();
+    const start = new Date();
+    const endsAt = new Date(start.getTime() + minutes * 60000).toISOString();
+    await this.db.collection('users').doc(uid).collection('blocks').doc(id).set({
+      id, start: start.toISOString(), endsAt, kind: 'work', minutes, workplace, ended: false, cancelled: false, autoContinued: true,
+    });
+    const base = { uid, blockId: id, workplace, minutes, breakMin };
+    await this.db.collection(PENDING).doc(`${id}-end`).set({ ...base, id: `${id}-end`, dueAt: endsAt, kind: 'block_end' });
+    if (standup) {
+      await this.db.collection(PENDING).doc(`${id}-break`).set({ ...base, id: `${id}-break`, dueAt: new Date(new Date(endsAt).getTime() + breakMin * 60000).toISOString(), kind: 'break_end' });
+    }
+    return id;
+  }
+
   async profileOf(uid: string): Promise<Profile | null> {
     const snap = await this.db.collection('users').doc(uid).collection('aim').doc('profile').get();
     return snap.exists ? (snap.data() as Profile) : null;
