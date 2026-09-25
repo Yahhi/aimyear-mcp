@@ -21,17 +21,24 @@ export function classify(input: ClassInput, goal: Goal | null, day: Day | null):
     if (lever) return { classification: lever.kind === 'hard' ? 'goal_hard' : 'goal_comfortable', leverId: lever.id, unclassified: false, matchedBy: 'lever id' };
   }
   if (input.stepId) return { classification: 'goal_comfortable', unclassified: false, matchedBy: 'step id (no lever)' };
-  if (input.projectId && input.projectId !== 'goal') return { classification: input.area === 'work' ? 'other_project' : 'life', projectId: input.projectId, unclassified: false, matchedBy: 'project id' };
+  if (input.projectId && input.projectId !== 'goal') {
+    const proj = goal?.projects.find(p => p.id === input.projectId);
+    return { classification: fromProject(proj?.area ?? input.area), projectId: input.projectId, unclassified: false, matchedBy: `project id${proj ? ` (${proj.area})` : ''}` };
+  }
 
   if (goal) {
     const lever: Lever | undefined = goal.levers.find(l => matches(input.task, l.match, l.name));
     if (lever) return { classification: lever.kind === 'hard' ? 'goal_hard' : 'goal_comfortable', leverId: lever.id, unclassified: false, matchedBy: `lever keyword "${lever.name}"` };
     const project: Project | undefined = goal.projects.find(p => matches(input.task, p.match, p.name));
-    if (project) return { classification: project.area === 'work' ? 'other_project' : 'life', projectId: project.id, unclassified: false, matchedBy: `project keyword "${project.name}"` };
+    if (project) return { classification: fromProject(project.area), projectId: project.id, unclassified: false, matchedBy: `project keyword "${project.name}" (${project.area})` };
   }
   if (input.area !== 'work') return { classification: 'life', unclassified: false, matchedBy: 'area' };
   return { classification: 'other_project', unclassified: true, matchedBy: 'nothing matched; treated as other work' };
 }
+
+/** A project in the money area is one of her own products, so work on it is goal work. */
+const fromProject = (area: Area | undefined): Classification =>
+  area === 'money' ? 'goal_comfortable' : area === 'work' ? 'other_project' : 'life';
 
 export const isGoalWork = (c: Classification) => c === 'main_step' || c === 'goal_hard' || c === 'goal_comfortable';
 
