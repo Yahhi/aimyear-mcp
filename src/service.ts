@@ -3,7 +3,7 @@ import { addDays, daysBetween, endOfDay, isValidDate, localDate, localTime, minu
 import { computeAttention, findGaps } from './domain/attention.js';
 import { checkGoal, checkStepTitle, type GoalDraft } from './domain/goal.js';
 import { classify, decideVerdict, isGoalWork } from './domain/classify.js';
-import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Goal, Lever, Milestone, Mode, Path, PlanItem, Profile, Project, Session, Step, Workplace } from './types.js';
+import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Pending, Goal, Lever, Milestone, Mode, Path, PlanItem, Profile, Project, Session, Step, Workplace } from './types.js';
 
 export class AimError extends Error {}
 
@@ -202,6 +202,22 @@ export class AimService {
     return { ok: true, date: d, mode, speak: mode === 'off' ? `Tracking off for ${d}: timer and reminders only, nothing stored.` : `Mode for ${d}: ${mode}.` };
   }
 
+  // ---------- devices ----------
+  async registerDevice(token: string, platform: Device['platform'], label?: string) {
+    const now = new Date().toISOString();
+    await this.store.saveDevice({ token, platform, lastSeen: now, foregroundAt: now, label });
+    const all = await this.store.getDevices();
+    return { ok: true, devices: all.map(d => ({ platform: d.platform, label: d.label, lastSeen: d.lastSeen, token: `…${d.token.slice(-8)}` })), speak: `Registered a ${platform} device. Reminders will reach ${all.length} device(s).` };
+  }
+  async listDevices() {
+    const all = await this.store.getDevices();
+    return { devices: all.map(d => ({ platform: d.platform, label: d.label, lastSeen: d.lastSeen, token: `…${d.token.slice(-8)}` })), speak: all.length ? `Devices: ${all.map(d => `${d.platform}${d.label ? ` (${d.label})` : ''}`).join(', ')}.` : 'No devices registered, so server reminders have nowhere to go. Sign in on the phone app to register one.' };
+  }
+  async forgetDevice(token: string) {
+    await this.store.removeDevice(token);
+    return { ok: true, speak: 'Device removed.' };
+  }
+
   // ---------- commitments & capacity ----------
   async getCommitments() {
     const items = await this.store.getCommitments();
@@ -362,6 +378,12 @@ export class AimService {
     const start = new Date();
     const block: Block = { id: newId(), start: start.toISOString(), endsAt: new Date(start.getTime() + mins * 60000).toISOString(), kind: 'work', minutes: mins, workplace, ended: false, cancelled: false };
     await this.store.saveBlock(block);
+    const breakMin = prof.pomodoro.breakMin;
+    const base = { uid: this.store.uid, blockId: block.id, workplace, minutes: mins, breakMin };
+    await this.store.savePending({ id: `${block.id}-end`, ...base, dueAt: block.endsAt, kind: 'block_end' });
+    if (prof.pomodoro.standup) {
+      await this.store.savePending({ id: `${block.id}-break`, ...base, dueAt: new Date(new Date(block.endsAt).getTime() + breakMin * 60000).toISOString(), kind: 'break_end' });
+    }
     return { block, joined: false };
   }
   private blockView(b: Block | null) {
@@ -373,6 +395,7 @@ export class AimService {
     if (!b) return { ok: false, speak: 'No block is running.' };
     if (cancel) b.cancelled = true; else b.ended = true;
     await this.store.saveBlock(b);
+    await this.store.clearPendings(b.id);
     const prof = await this.profile();
     const { start, end } = await this.dayWindow(await this.today());
     const blocksToday = (await this.store.getBlocksInRange(start.toISOString(), end.toISOString())).filter(x => x.kind === 'work' && !x.cancelled).length;
@@ -429,10 +452,13 @@ export class AimService {
     };
     await this.store.saveSession(session);
     const running = await this.runningView();
+    const devices = await this.store.getDevices();
+    const reachable = devices.filter(d => (workplace === 'desktop' ? ['macos', 'web'] : ['ios', 'android']).includes(d.platform));
+    const notifyVia = joined ? 'the reminder already set for this block' : devices.length ? `push to ${(reachable.length ? reachable : devices).map(d => d.platform).join(', ')}` : 'no registered device: local hook only';
     return {
       verdict: verdict.verdict, message: verdict.message, note: verdict.note, classification: cls.classification, matched_by: cls.matchedBy, unclassified: cls.unclassified,
       session: { id: session.id, task: session.task, area, lever_id: session.leverId, project_id: session.projectId, step_id: session.stepId, item_id: session.itemId, weight: session.weight },
-      block: { ...this.blockView(block), joined }, running_sessions: running, notify_via: 'hook',
+      block: { ...this.blockView(block), joined }, running_sessions: running, notify_via: notifyVia,
       speak: `${verdict.message} Session [${session.id}] "${session.task}" → ${cls.classification}${cls.unclassified ? ' (unclassified: tell me the lever or project)' : ''}. Timer ${joined ? 'joined, ' : 'started, '}${this.blockView(block)?.minutes_left} min left${running.length > 1 ? `; ${running.length} sessions share attention` : ''}.`,
     };
   }

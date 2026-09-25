@@ -2,7 +2,7 @@ import { initializeApp, cert, getApps, applicationDefault } from 'firebase-admin
 import { getFirestore, Firestore, FieldValue } from 'firebase-admin/firestore';
 import { readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import type { Goal, Path, Profile, Day, Block, Session, Mode, Workplace, Commitment } from './types.js';
+import type { Goal, Path, Profile, Day, Block, Session, Mode, Workplace, Commitment, Device, Pending } from './types.js';
 
 let dbSingleton: Firestore | null = null;
 function initFirestore(): Firestore {
@@ -23,6 +23,39 @@ function initFirestore(): Firestore {
 }
 
 export const newId = () => randomUUID().slice(0, 12);
+
+/** Reminders live in one top-level collection so /tick needs a single-field index only. */
+export const PENDING = 'pending_notifications';
+
+/** Cross-user helpers used by the /tick endpoint. */
+export class Notifications {
+  private db: Firestore;
+  constructor(db?: Firestore) { this.db = db ?? initFirestore(); }
+  async due(nowIso: string, limit = 50): Promise<Pending[]> {
+    const snap = await this.db.collection(PENDING).where('dueAt', '<=', nowIso).limit(limit).get();
+    return snap.docs.map(d => d.data() as Pending);
+  }
+  async remove(id: string) { await this.db.collection(PENDING).doc(id).delete(); }
+  async devicesOf(uid: string): Promise<Device[]> {
+    const snap = await this.db.collection('users').doc(uid).collection('devices').get();
+    return snap.docs.map(d => d.data() as Device).filter(d => !!d.token);
+  }
+  async dropDevice(uid: string, token: string) {
+    const snap = await this.db.collection('users').doc(uid).collection('devices').where('token', '==', token).get();
+    await Promise.all(snap.docs.map(d => d.ref.delete()));
+  }
+  async mainStepOf(uid: string, date: string): Promise<{ title: string; done: boolean } | null> {
+    const snap = await this.db.collection('users').doc(uid).collection('days').doc(date).get();
+    if (!snap.exists) return null;
+    const plan = (snap.data() as Day).plan ?? [];
+    const main = plan.find(p => p.isMainStep);
+    return main ? { title: main.title, done: main.done } : null;
+  }
+  async profileOf(uid: string): Promise<Profile | null> {
+    const snap = await this.db.collection('users').doc(uid).collection('aim').doc('profile').get();
+    return snap.exists ? (snap.data() as Profile) : null;
+  }
+}
 
 export const DEFAULT_PROFILE = (tz: string): Profile => ({
   timezone: tz,
@@ -112,6 +145,22 @@ export class Store {
     const lowerBound = new Date(Date.now() - 2 * 86400000).toISOString();
     const snap = await this.sessions().where('start', '>=', lowerBound).get();
     return snap.docs.map(d => d.data() as Session).filter(s => !s.end);
+  }
+
+  // --- devices ---
+  private devices() { return this.user().collection('devices'); }
+  async saveDevice(d: Device) { await this.devices().doc(d.token.slice(-40)).set(d, { merge: true }); }
+  async getDevices(): Promise<Device[]> {
+    const snap = await this.devices().get();
+    return snap.docs.map(x => x.data() as Device).filter(x => !!x.token);
+  }
+  async removeDevice(token: string) { await this.devices().doc(token.slice(-40)).delete(); }
+
+  // --- pending reminders ---
+  async savePending(p: Pending) { await this.db.collection(PENDING).doc(p.id).set(p); }
+  async clearPendings(blockId: string) {
+    const snap = await this.db.collection(PENDING).where('uid', '==', this.uid).where('blockId', '==', blockId).get();
+    await Promise.all(snap.docs.map(d => d.ref.delete()));
   }
 
   // --- blocks ---

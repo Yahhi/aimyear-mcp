@@ -4,9 +4,10 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { randomUUID } from 'node:crypto';
 import express from 'express';
-import { Store } from './store.js';
+import { Store, Notifications } from './store.js';
 import { AimService } from './service.js';
 import { registerTools } from './tools.js';
+import { tick } from './notifier.js';
 import type { Workplace } from './types.js';
 
 const VERSION = '0.1.0';
@@ -40,6 +41,16 @@ async function http() {
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/health', (_req, res) => { res.json({ ok: true, version: VERSION }); });
+
+  // Cloud Scheduler polls this every minute. The secret lives in the path, as with /c/:token/mcp.
+  app.post('/tick/:token', async (req, res) => {
+    if (!tokens.has(String(req.params.token))) { res.status(401).json({ error: 'unauthorized' }); return; }
+    try {
+      const result = await tick(new Notifications());
+      if (result.processed) console.error('[tick]', JSON.stringify(result));
+      res.json(result);
+    } catch (e) { console.error('[tick] failed', e); res.status(500).json({ error: (e as Error).message }); }
+  });
 
   const handle = async (req: express.Request, res: express.Response, token: string) => {
     const uid = tokens.get(token);

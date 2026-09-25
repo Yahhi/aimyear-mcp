@@ -101,3 +101,23 @@ export interface Session {
 }
 
 export type Verdict = 'ok' | 'stop' | 'plan_first';
+
+export interface Device {
+  token: string;
+  platform: 'ios' | 'android' | 'macos' | 'web';
+  lastSeen: string;
+  foregroundAt?: string;
+  label?: string;
+}
+
+/** A reminder the server owes a user at a point in time. Polled by /tick. */
+export interface Pending {
+  id: string;
+  uid: string;
+  blockId: string;
+  dueAt: string;
+  kind: 'block_end' | 'break_end';
+  workplace: Workplace;
+  minutes: number;
+  breakMin: number;
+}

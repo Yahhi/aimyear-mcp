@@ -42,6 +42,13 @@ export function registerTools(server: McpServer, svc: AimService) {
   t('set_pomodoro', 'Pomodoro settings.', { workMin: z.number().int().min(5).max(120).optional(), breakMin: z.number().int().min(1).max(60).optional(), longBreakEvery: z.number().int().min(1).max(10).optional(), longBreakMin: z.number().int().min(5).max(60).optional(), standup: z.boolean().optional() }, a => svc.setPomodoro(a));
   t('set_workplace', 'Default workplace for reminders: desktop or mobile.', { workplace: z.enum(['desktop', 'mobile']) }, a => svc.setWorkplace(a.workplace));
 
+  // ---- devices ----
+  t('register_device', 'Register a device token so server reminders (stand up, break over) can reach it. The phone app registers itself; use this for testing or a manual token.', {
+    token: z.string().min(20), platform: z.enum(['ios', 'android', 'macos', 'web']), label: z.string().optional(),
+  }, a => svc.registerDevice(a.token, a.platform, a.label));
+  t('list_devices', 'Which devices can receive reminders, and when each was last seen.', {}, () => svc.listDevices());
+  t('forget_device', 'Remove a device so it stops receiving reminders.', { token: z.string() }, a => svc.forgetDevice(a.token));
+
   // ---- commitments ----
   t('get_commitments', 'Recurring weekly commitments: the time already spoken for (school runs, training, classes, waiting).', {}, () => svc.getCommitments());
   t('set_commitments', 'Replace the list of recurring weekly commitments. days are ISO weekdays 1=Mon..7=Sun; use timesPerWeek instead when there are no fixed days. usableForWork=true marks time that is committed but still workable (waiting, being a passenger).', {
