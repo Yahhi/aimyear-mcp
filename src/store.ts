@@ -36,6 +36,15 @@ export class Notifications {
     return snap.docs.map(d => d.data() as Pending);
   }
   async remove(id: string) { await this.db.collection(PENDING).doc(id).delete(); }
+
+  /** Due reminders for one user's desktop, claimed and removed so they fire once. */
+  async claimDesktop(uid: string, nowIso: string): Promise<Pending[]> {
+    const snap = await this.db.collection(PENDING)
+      .where('uid', '==', uid).where('workplace', '==', 'desktop').where('dueAt', '<=', nowIso).limit(20).get();
+    const rows = snap.docs.map(d => d.data() as Pending);
+    await Promise.all(snap.docs.map(d => d.ref.delete()));
+    return rows;
+  }
   async devicesOf(uid: string): Promise<Device[]> {
     const snap = await this.db.collection('users').doc(uid).collection('devices').get();
     return snap.docs.map(d => d.data() as Device).filter(d => !!d.token);

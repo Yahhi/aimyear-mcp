@@ -7,7 +7,8 @@ import express from 'express';
 import { Store, Notifications } from './store.js';
 import { AimService } from './service.js';
 import { registerTools } from './tools.js';
-import { tick } from './notifier.js';
+import { tick, textFor } from './notifier.js';
+import { localDate } from './dates.js';
 import type { Workplace } from './types.js';
 
 const VERSION = '0.1.0';
@@ -41,6 +42,23 @@ async function http() {
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/health', (_req, res) => { res.json({ ok: true, version: VERSION }); });
+
+  // The Mac agent polls this every minute: reminders it claims are spoken locally.
+  app.post('/pull/:token', async (req, res) => {
+    const uid = tokens.get(String(req.params.token));
+    if (!uid) { res.status(401).json({ error: 'unauthorized' }); return; }
+    try {
+      const notif = new Notifications();
+      const rows = await notif.claimDesktop(uid, new Date().toISOString());
+      const profile = await notif.profileOf(uid);
+      const out = [];
+      for (const p of rows) {
+        const main = await notif.mainStepOf(uid, localDate(new Date(p.dueAt), profile?.timezone ?? 'UTC'));
+        out.push({ kind: p.kind, ...textFor(p, main) });
+      }
+      res.json({ reminders: out });
+    } catch (e) { console.error('[pull] failed', e); res.status(500).json({ error: (e as Error).message }); }
+  });
 
   // Cloud Scheduler polls this every minute. The secret lives in the path, as with /c/:token/mcp.
   app.post('/tick/:token', async (req, res) => {

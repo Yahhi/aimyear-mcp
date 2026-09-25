@@ -55,7 +55,12 @@ export async function deliver(p: Pending, notif: Notifications): Promise<{ sent:
 
 /** One poll: deliver everything due, clear it, and keep the cadence going. */
 export async function tick(notif: Notifications, now = new Date()) {
-  const due = await notif.due(now.toISOString());
+  const all = await notif.due(now.toISOString());
+  // Desktop reminders are pulled by the Mac agent, not pushed. Drop only the ones
+  // too old to be worth saying out loud, so the queue cannot grow without bound.
+  const stale = new Date(now.getTime() - 30 * 60000).toISOString();
+  const due = all.filter(p => p.workplace !== 'desktop');
+  for (const p of all) if (p.workplace === 'desktop' && p.dueAt < stale) await notif.remove(p.id);
   const results: { id: string; kind: string; sent: number; failed: number; reason?: string; continued?: string }[] = [];
   for (const p of due) {
     let r: { sent: number; failed: number; reason?: string };
@@ -67,7 +72,10 @@ export async function tick(notif: Notifications, now = new Date()) {
     if (p.kind === 'break_end') {
       try {
         const running = await notif.runningSessionsOf(p.uid);
-        if (running.length) {
+        // A break is recorded as a session too. Do not start another work block
+        // just because she is still walking.
+        const working = running.filter(x => x.area !== 'health');
+        if (working.length) {
           const prof = await notif.profileOf(p.uid);
           continued = await notif.continueCadence(
             p.uid, p.workplace,
