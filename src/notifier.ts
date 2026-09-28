@@ -53,6 +53,27 @@ export async function deliver(p: Pending, notif: Notifications): Promise<{ sent:
   return { sent: res.successCount, failed: res.failureCount };
 }
 
+/**
+ * The break is over and a work session is still open, so the timer should keep
+ * cycling. Shared by the push path (tick) and the desktop pull path, which is
+ * why it lives here rather than inside tick.
+ */
+export async function continueCadence(p: Pending, notif: Notifications): Promise<string | undefined> {
+  if (p.kind !== 'break_end') return undefined;
+  const running = await notif.runningSessionsOf(p.uid);
+  // A break is recorded as a session too. Do not start another work block
+  // just because she is still walking.
+  const working = running.filter(x => x.area !== 'health');
+  if (!working.length) return undefined;
+  const prof = await notif.profileOf(p.uid);
+  return notif.continueCadence(
+    p.uid, p.workplace,
+    prof?.pomodoro.workMin ?? p.minutes,
+    prof?.pomodoro.breakMin ?? p.breakMin,
+    prof?.pomodoro.standup ?? true,
+  );
+}
+
 /** One poll: deliver everything due, clear it, and keep the cadence going. */
 export async function tick(notif: Notifications, now = new Date()) {
   const all = await notif.due(now.toISOString());
@@ -67,25 +88,7 @@ export async function tick(notif: Notifications, now = new Date()) {
     try { r = await deliver(p, notif); } catch (e) { r = { sent: 0, failed: 0, reason: (e as Error).message }; }
     await notif.remove(p.id);
     let continued: string | undefined;
-    // The break is over and she is still in a session, so the timer should keep
-    // cycling. Otherwise one block is all she ever gets reminded about.
-    if (p.kind === 'break_end') {
-      try {
-        const running = await notif.runningSessionsOf(p.uid);
-        // A break is recorded as a session too. Do not start another work block
-        // just because she is still walking.
-        const working = running.filter(x => x.area !== 'health');
-        if (working.length) {
-          const prof = await notif.profileOf(p.uid);
-          continued = await notif.continueCadence(
-            p.uid, p.workplace,
-            prof?.pomodoro.workMin ?? p.minutes,
-            prof?.pomodoro.breakMin ?? p.breakMin,
-            prof?.pomodoro.standup ?? true,
-          );
-        }
-      } catch (e) { console.error('[tick] cadence continue failed', e); }
-    }
+    try { continued = await continueCadence(p, notif); } catch (e) { console.error('[tick] cadence continue failed', e); }
     results.push({ id: p.id, kind: p.kind, ...r, continued });
   }
   return { processed: due.length, results };

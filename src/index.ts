@@ -7,7 +7,7 @@ import express from 'express';
 import { Store, Notifications } from './store.js';
 import { AimService } from './service.js';
 import { registerTools } from './tools.js';
-import { tick, textFor } from './notifier.js';
+import { tick, textFor, continueCadence } from './notifier.js';
 import { localDate } from './dates.js';
 import type { Workplace } from './types.js';
 
@@ -43,6 +43,25 @@ async function http() {
 
   app.get('/health', (_req, res) => { res.json({ ok: true, version: VERSION }); });
 
+  // Read-only: what is running right now. Drives the desktop countdown window.
+  app.get('/now/:token', async (req, res) => {
+    const uid = tokens.get(String(req.params.token));
+    if (!uid) { res.status(401).json({ error: 'unauthorized' }); return; }
+    try {
+      const svc = new AimService(new Store(uid), 'now', 'desktop');
+      const cur = await svc.getCurrent();
+      const b = cur.block;
+      res.json({
+        running: !!b,
+        ends_at: b?.ends_at ?? null,
+        seconds_left: b ? Math.max(0, Math.round((new Date(b.ends_at).getTime() - Date.now()) / 1000)) : 0,
+        kind: b?.kind ?? null,
+        sessions: cur.running_sessions.map(s => s.task),
+        main_step: cur.main_step,
+      });
+    } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+  });
+
   // The Mac agent polls this every minute: reminders it claims are spoken locally.
   app.post('/pull/:token', async (req, res) => {
     const uid = tokens.get(String(req.params.token));
@@ -52,11 +71,15 @@ async function http() {
       const rows = await notif.claimDesktop(uid, new Date().toISOString());
       const profile = await notif.profileOf(uid);
       const out = [];
+      let continued: string | undefined;
       for (const p of rows) {
         const main = await notif.mainStepOf(uid, localDate(new Date(p.dueAt), profile?.timezone ?? 'UTC'));
         out.push({ kind: p.kind, ...textFor(p, main) });
+        // The push path keeps the cadence going in tick(); the desktop path has
+        // to do it here, or the timer stops after exactly one block and one break.
+        try { continued = (await continueCadence(p, notif)) ?? continued; } catch (e) { console.error('[pull] cadence failed', e); }
       }
-      res.json({ reminders: out });
+      res.json({ reminders: out, continued_block: continued ?? null });
     } catch (e) { console.error('[pull] failed', e); res.status(500).json({ error: (e as Error).message }); }
   });
 

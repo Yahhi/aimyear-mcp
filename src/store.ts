@@ -37,12 +37,19 @@ export class Notifications {
   }
   async remove(id: string) { await this.db.collection(PENDING).doc(id).delete(); }
 
-  /** Due reminders for one user's desktop, claimed and removed so they fire once. */
+  /**
+   * Due reminders for one user's desktop, claimed and removed so they fire once.
+   * Filters in memory on purpose: uid + workplace + dueAt would need a composite
+   * index, and a missing index fails the whole endpoint silently.
+   */
   async claimDesktop(uid: string, nowIso: string): Promise<Pending[]> {
-    const snap = await this.db.collection(PENDING)
-      .where('uid', '==', uid).where('workplace', '==', 'desktop').where('dueAt', '<=', nowIso).limit(20).get();
-    const rows = snap.docs.map(d => d.data() as Pending);
-    await Promise.all(snap.docs.map(d => d.ref.delete()));
+    const snap = await this.db.collection(PENDING).where('dueAt', '<=', nowIso).limit(100).get();
+    const mine = snap.docs.filter(d => {
+      const p = d.data() as Pending;
+      return p.uid === uid && p.workplace === 'desktop';
+    });
+    const rows = mine.map(d => d.data() as Pending);
+    await Promise.all(mine.map(d => d.ref.delete()));
     return rows;
   }
   async devicesOf(uid: string): Promise<Device[]> {
