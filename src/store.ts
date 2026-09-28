@@ -2,7 +2,7 @@ import { initializeApp, cert, getApps, applicationDefault } from 'firebase-admin
 import { getFirestore, Firestore, FieldValue } from 'firebase-admin/firestore';
 import { readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import type { Goal, Path, Profile, Day, Block, Session, Mode, Workplace, Commitment, Device, Pending } from './types.js';
+import type { Goal, Path, Profile, Day, Block, Session, Mode, Workplace, Commitment, Device, Pending, Direction } from './types.js';
 
 let dbSingleton: Firestore | null = null;
 function initFirestore(): Firestore {
@@ -74,19 +74,21 @@ export class Notifications {
     return snap.docs.map(d => d.data() as Session).filter(x => !x.end);
   }
 
-  /** Starts the next work block of a cadence and queues its reminders. */
-  async continueCadence(uid: string, workplace: Workplace, minutes: number, breakMin: number, standup: boolean): Promise<string> {
-    const id = newId();
-    const start = new Date();
-    const endsAt = new Date(start.getTime() + minutes * 60000).toISOString();
-    await this.db.collection('users').doc(uid).collection('blocks').doc(id).set({
-      id, start: start.toISOString(), endsAt, kind: 'work', minutes, workplace, ended: false, cancelled: false, autoContinued: true,
+  /**
+   * Queues the NEXT stand-up on the same running block. It does not create a
+   * block and does not end one: the timer keeps running until she stops it.
+   */
+  async queueNextStandup(p: Pending, workMin: number): Promise<string | undefined> {
+    const block = await this.db.collection('users').doc(p.uid).collection('blocks').doc(p.blockId).get();
+    if (!block.exists) return undefined;
+    const b = block.data() as Block;
+    if (b.ended || b.cancelled || b.direction !== 'up') return undefined;
+    const id = `${p.blockId}-standup-${Date.now()}`;
+    await this.db.collection(PENDING).doc(id).set({
+      id, uid: p.uid, blockId: p.blockId, workplace: p.workplace,
+      minutes: workMin, breakMin: p.breakMin, kind: 'standup',
+      dueAt: new Date(Date.now() + workMin * 60000).toISOString(),
     });
-    const base = { uid, blockId: id, workplace, minutes, breakMin };
-    await this.db.collection(PENDING).doc(`${id}-end`).set({ ...base, id: `${id}-end`, dueAt: endsAt, kind: 'block_end' });
-    if (standup) {
-      await this.db.collection(PENDING).doc(`${id}-break`).set({ ...base, id: `${id}-break`, dueAt: new Date(new Date(endsAt).getTime() + breakMin * 60000).toISOString(), kind: 'break_end' });
-    }
     return id;
   }
 
@@ -205,10 +207,12 @@ export class Store {
   // --- blocks ---
   async saveBlock(b: Block) { await this.blocks().doc(b.id).set(b); }
   async getRunningBlock(): Promise<Block | null> {
-    const lowerBound = new Date(Date.now() - 6 * 3600000).toISOString();
+    const lowerBound = new Date(Date.now() - 24 * 3600000).toISOString();
     const snap = await this.blocks().where('start', '>=', lowerBound).get();
     const now = Date.now();
-    const running = snap.docs.map(d => d.data() as Block).filter(b => !b.ended && !b.cancelled && new Date(b.endsAt).getTime() > now);
+    const running = snap.docs.map(d => d.data() as Block)
+      // An up-timer has no end: it runs until it is ended or cancelled.
+      .filter(b => !b.ended && !b.cancelled && (b.direction === 'up' || !b.endsAt || new Date(b.endsAt).getTime() > now));
     running.sort((a, b) => b.start.localeCompare(a.start));
     return running[0] ?? null;
   }

@@ -70,7 +70,17 @@ export interface Profile {
   defaultWorkplace: Workplace;
 }
 
-export interface Block { id: string; start: string; endsAt: string; kind: 'work' | 'break'; minutes: number; workplace: Workplace; ended: boolean; cancelled: boolean }
+export type Direction = 'up' | 'down';
+/**
+ * An `up` timer runs until she stops it and has no endsAt: pomodoro solves
+ * starting boring work, and that is not her problem. `down` stays for a break
+ * or a deliberate timebox.
+ */
+export interface Block {
+  id: string; start: string; endsAt?: string; direction: Direction;
+  kind: 'work' | 'break'; minutes: number; workplace: Workplace;
+  ended: boolean; cancelled: boolean;
+}
 
 export type Classification = 'main_step' | 'goal_hard' | 'goal_comfortable' | 'other_project' | 'life';
 export type Source = 'agent' | 'manual' | 'app';
@@ -116,7 +126,7 @@ export interface Pending {
   uid: string;
   blockId: string;
   dueAt: string;
-  kind: 'block_end' | 'break_end';
+  kind: 'block_end' | 'break_end' | 'standup';
   workplace: Workplace;
   minutes: number;
   breakMin: number;

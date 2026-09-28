@@ -7,7 +7,7 @@ import express from 'express';
 import { Store, Notifications } from './store.js';
 import { AimService } from './service.js';
 import { registerTools } from './tools.js';
-import { tick, textFor, continueCadence } from './notifier.js';
+import { tick, textFor, queueNextStandup } from './notifier.js';
 import { localDate } from './dates.js';
 import type { Workplace } from './types.js';
 
@@ -53,8 +53,11 @@ async function http() {
       const b = cur.block;
       res.json({
         running: !!b,
+        direction: b?.direction ?? null,
+        started_at: b?.started_at ?? null,
+        elapsed_seconds: b ? Math.max(0, Math.round((Date.now() - new Date(b.started_at).getTime()) / 1000)) : 0,
         ends_at: b?.ends_at ?? null,
-        seconds_left: b ? Math.max(0, Math.round((new Date(b.ends_at).getTime() - Date.now()) / 1000)) : 0,
+        seconds_left: b?.ends_at ? Math.max(0, Math.round((new Date(b.ends_at).getTime() - Date.now()) / 1000)) : null,
         kind: b?.kind ?? null,
         sessions: cur.running_sessions.map(s => s.task),
         main_step: cur.main_step,
@@ -77,7 +80,7 @@ async function http() {
         out.push({ kind: p.kind, ...textFor(p, main) });
         // The push path keeps the cadence going in tick(); the desktop path has
         // to do it here, or the timer stops after exactly one block and one break.
-        try { continued = (await continueCadence(p, notif)) ?? continued; } catch (e) { console.error('[pull] cadence failed', e); }
+        try { continued = (await queueNextStandup(p, notif)) ?? continued; } catch (e) { console.error('[pull] standup re-arm failed', e); }
       }
       res.json({ reminders: out, continued_block: continued ?? null });
     } catch (e) { console.error('[pull] failed', e); res.status(500).json({ error: (e as Error).message }); }

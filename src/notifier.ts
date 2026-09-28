@@ -14,6 +14,9 @@ export function pickDevices(devices: Device[], workplace: Workplace): Device[] {
 }
 
 export function textFor(p: Pending, mainStep: { title: string; done: boolean } | null): { title: string; body: string } {
+  if (p.kind === 'standup') {
+    return { title: 'Stand up', body: `${p.minutes} minutes sitting. Walk a little. The timer keeps running.` };
+  }
   if (p.kind === 'block_end') {
     return {
       title: 'Stand up',
@@ -54,27 +57,17 @@ export async function deliver(p: Pending, notif: Notifications): Promise<{ sent:
 }
 
 /**
- * The break is over and a work session is still open, so the timer should keep
- * cycling. Shared by the push path (tick) and the desktop pull path, which is
- * why it lives here rather than inside tick.
+ * A stand-up came due on a running up-timer, so queue the next one on the SAME
+ * block. It never creates a block and never ends one: the timer runs until she
+ * stops it. This replaces the old auto-restarting pomodoro cadence.
  */
-export async function continueCadence(p: Pending, notif: Notifications): Promise<string | undefined> {
-  if (p.kind !== 'break_end') return undefined;
-  const running = await notif.runningSessionsOf(p.uid);
-  // A break is recorded as a session too. Do not start another work block
-  // just because she is still walking.
-  const working = running.filter(x => x.area !== 'health');
-  if (!working.length) return undefined;
+export async function queueNextStandup(p: Pending, notif: Notifications): Promise<string | undefined> {
+  if (p.kind !== 'standup') return undefined;
   const prof = await notif.profileOf(p.uid);
-  return notif.continueCadence(
-    p.uid, p.workplace,
-    prof?.pomodoro.workMin ?? p.minutes,
-    prof?.pomodoro.breakMin ?? p.breakMin,
-    prof?.pomodoro.standup ?? true,
-  );
+  return notif.queueNextStandup(p, prof?.pomodoro.workMin ?? p.minutes);
 }
 
-/** One poll: deliver everything due, clear it, and keep the cadence going. */
+/** One poll: deliver everything due, clear it, and re-arm the next stand-up. */
 export async function tick(notif: Notifications, now = new Date()) {
   const all = await notif.due(now.toISOString());
   // Desktop reminders are pulled by the Mac agent, not pushed. Drop only the ones
@@ -88,7 +81,7 @@ export async function tick(notif: Notifications, now = new Date()) {
     try { r = await deliver(p, notif); } catch (e) { r = { sent: 0, failed: 0, reason: (e as Error).message }; }
     await notif.remove(p.id);
     let continued: string | undefined;
-    try { continued = await continueCadence(p, notif); } catch (e) { console.error('[tick] cadence continue failed', e); }
+    try { continued = await queueNextStandup(p, notif); } catch (e) { console.error('[tick] standup re-arm failed', e); }
     results.push({ id: p.id, kind: p.kind, ...r, continued });
   }
   return { processed: due.length, results };

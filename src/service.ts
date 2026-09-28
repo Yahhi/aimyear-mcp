@@ -3,13 +3,14 @@ import { addDays, daysBetween, endOfDay, isValidDate, localDate, localTime, minu
 import { computeAttention, findGaps } from './domain/attention.js';
 import { checkGoal, checkStepTitle, type GoalDraft } from './domain/goal.js';
 import { classify, decideVerdict, isGoalWork } from './domain/classify.js';
-import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Pending, Goal, Lever, Milestone, Mode, Path, PlanItem, Profile, Project, Session, Step, Workplace } from './types.js';
+import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, Mode, Path, PlanItem, Profile, Project, Session, Step, Workplace } from './types.js';
 
 export class AimError extends Error {}
 
 const round = (n: number) => Math.round(n);
 
 export interface SessionInput {
+  direction?: Direction;
   task: string; area?: Area; projectId?: string; leverId?: string; stepId?: string; itemId?: string;
   weight?: number; exclusive?: boolean; workplace?: Workplace; override?: boolean;
 }
@@ -370,25 +371,41 @@ export class AimService {
   }
 
   // ---------- blocks ----------
-  private async ensureBlock(minutes: number | undefined, workplace: Workplace): Promise<{ block: Block; joined: boolean }> {
+  private async ensureBlock(minutes: number | undefined, workplace: Workplace, direction: Direction = 'up'): Promise<{ block: Block; joined: boolean }> {
     const running = await this.store.getRunningBlock();
     if (running) return { block: running, joined: true };
     const prof = await this.profile();
     const mins = minutes ?? prof.pomodoro.workMin;
     const start = new Date();
-    const block: Block = { id: newId(), start: start.toISOString(), endsAt: new Date(start.getTime() + mins * 60000).toISOString(), kind: 'work', minutes: mins, workplace, ended: false, cancelled: false };
+    const block: Block = {
+      id: newId(), start: start.toISOString(), direction, kind: 'work', minutes: mins, workplace,
+      endsAt: direction === 'down' ? new Date(start.getTime() + mins * 60000).toISOString() : undefined,
+      ended: false, cancelled: false,
+    };
     await this.store.saveBlock(block);
-    const breakMin = prof.pomodoro.breakMin;
-    const base = { uid: this.store.uid, blockId: block.id, workplace, minutes: mins, breakMin };
-    await this.store.savePending({ id: `${block.id}-end`, ...base, dueAt: block.endsAt, kind: 'block_end' });
-    if (prof.pomodoro.standup) {
-      await this.store.savePending({ id: `${block.id}-break`, ...base, dueAt: new Date(new Date(block.endsAt).getTime() + breakMin * 60000).toISOString(), kind: 'break_end' });
+    const base = { uid: this.store.uid, blockId: block.id, workplace, minutes: mins, breakMin: prof.pomodoro.breakMin };
+    if (direction === 'down' && block.endsAt) {
+      await this.store.savePending({ id: `${block.id}-end`, ...base, dueAt: block.endsAt, kind: 'block_end' });
+      if (prof.pomodoro.standup) {
+        await this.store.savePending({ id: `${block.id}-break`, ...base, dueAt: new Date(new Date(block.endsAt).getTime() + prof.pomodoro.breakMin * 60000).toISOString(), kind: 'break_end' });
+      }
+    } else if (prof.pomodoro.standup) {
+      // One stand-up at a time; the next is queued when this one fires.
+      await this.store.savePending({ id: `${block.id}-standup-0`, ...base, dueAt: new Date(start.getTime() + mins * 60000).toISOString(), kind: 'standup' });
     }
     return { block, joined: false };
   }
+
   private blockView(b: Block | null) {
     if (!b) return null;
-    return { id: b.id, kind: b.kind, ends_at: b.endsAt, minutes_left: minutesBetween(new Date(), new Date(b.endsAt)), workplace: b.workplace };
+    const now = new Date();
+    return {
+      id: b.id, kind: b.kind, direction: b.direction ?? 'down', workplace: b.workplace,
+      started_at: b.start,
+      elapsed_min: minutesBetween(new Date(b.start), now),
+      ends_at: b.endsAt ?? null,
+      minutes_left: b.endsAt ? minutesBetween(now, new Date(b.endsAt)) : null,
+    };
   }
   async endBlock(cancel = false) {
     const b = await this.store.getRunningBlock();
@@ -441,8 +458,8 @@ export class AimService {
       day.stopIssuedAt = new Date().toISOString(); await this.store.saveDay(day);
       return { verdict: verdict.verdict, message: verdict.message, classification: cls.classification, session: null, block: this.blockView(await this.store.getRunningBlock()), speak: verdict.message };
     }
-    const { block, joined } = await this.ensureBlock(input.minutes, workplace);
-    if (day.mode === 'off') return { verdict: 'ok', message: verdict.message, session: null, block: { ...this.blockView(block), joined }, notify_via: 'hook', speak: `Timer ${joined ? 'joined' : 'started'}: ${this.blockView(block)?.minutes_left} min left. Nothing stored (mode off).` };
+    const { block, joined } = await this.ensureBlock(input.minutes, workplace, input.direction ?? 'up');
+    if (day.mode === 'off') return { verdict: 'ok', message: verdict.message, session: null, block: { ...this.blockView(block), joined }, notify_via: 'hook', speak: `Timer ${joined ? 'joined' : 'started'}. Nothing stored (mode off).` };
 
     const mainItem = day.plan.find(p => p.isMainStep);
     const session: Session = {
@@ -459,7 +476,7 @@ export class AimService {
       verdict: verdict.verdict, message: verdict.message, note: verdict.note, classification: cls.classification, matched_by: cls.matchedBy, unclassified: cls.unclassified,
       session: { id: session.id, task: session.task, area, lever_id: session.leverId, project_id: session.projectId, step_id: session.stepId, item_id: session.itemId, weight: session.weight },
       block: { ...this.blockView(block), joined }, running_sessions: running, notify_via: notifyVia,
-      speak: `${verdict.message} Session [${session.id}] "${session.task}" → ${cls.classification}${cls.unclassified ? ' (unclassified: tell me the lever or project)' : ''}. Timer ${joined ? 'joined, ' : 'started, '}${this.blockView(block)?.minutes_left} min left${running.length > 1 ? `; ${running.length} sessions share attention` : ''}.`,
+      speak: `${verdict.message} Session [${session.id}] "${session.task}" → ${cls.classification}${cls.unclassified ? ' (unclassified: tell me the lever or project)' : ''}. Timer ${joined ? 'joined' : 'started'}${running.length > 1 ? `; ${running.length} sessions share attention` : ''}.`,
     };
   }
 
