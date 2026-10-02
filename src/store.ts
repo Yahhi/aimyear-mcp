@@ -78,15 +78,21 @@ export class Notifications {
    * Queues the NEXT stand-up on the same running block. It does not create a
    * block and does not end one: the timer keeps running until she stops it.
    */
-  async queueNextStandup(p: Pending, workMin: number): Promise<string | undefined> {
+  async queueNextStandup(p: Pending, workMin: number, giveUpAfterMin = 240): Promise<string | undefined> {
     const block = await this.db.collection('users').doc(p.uid).collection('blocks').doc(p.blockId).get();
     if (!block.exists) return undefined;
     const b = block.data() as Block;
     if (b.ended || b.cancelled || b.direction !== 'up') return undefined;
+    // A timer running for hours was forgotten, not worked through. Send one last
+    // reminder that says so and then stop: a missed stop should cost one message,
+    // not fifty into an empty room.
+    if (p.final) return undefined;
+    const elapsed = Math.round((Date.now() - new Date(b.start).getTime()) / 60000) + workMin;
     const id = `${p.blockId}-standup-${Date.now()}`;
     await this.db.collection(PENDING).doc(id).set({
       id, uid: p.uid, blockId: p.blockId, workplace: p.workplace,
       minutes: workMin, breakMin: p.breakMin, kind: 'standup',
+      elapsedMin: elapsed, final: elapsed >= giveUpAfterMin,
       dueAt: new Date(Date.now() + workMin * 60000).toISOString(),
     });
     return id;

@@ -15,7 +15,12 @@ export function pickDevices(devices: Device[], workplace: Workplace): Device[] {
 
 export function textFor(p: Pending, mainStep: { title: string; done: boolean } | null): { title: string; body: string } {
   if (p.kind === 'standup') {
-    return { title: 'Stand up', body: `${p.minutes} minutes sitting. Walk a little. The timer keeps running.` };
+    const mins = p.elapsedMin ?? p.minutes;
+    if (p.final) {
+      const h = Math.floor(mins / 60);
+      return { title: 'Timer still running', body: `${h} hours since you started. Did you forget to stop it? This is the last reminder.` };
+    }
+    return { title: 'Stand up', body: `${mins} minutes sitting. Walk a little. The timer keeps running.` };
   }
   if (p.kind === 'block_end') {
     return {

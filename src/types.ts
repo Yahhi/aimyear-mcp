@@ -130,4 +130,8 @@ export interface Pending {
   workplace: Workplace;
   minutes: number;
   breakMin: number;
+  /** Minutes the timer had been running when this reminder was queued. */
+  elapsedMin?: number;
+  /** The last reminder this timer will send: it looks forgotten. */
+  final?: boolean;
 }

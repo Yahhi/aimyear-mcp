@@ -17,3 +17,28 @@ test('vague steps are rejected, concrete steps pass', () => {
   assert.equal(checkStepTitle('Email 10 people from the waitlist'), null);
   assert.equal(checkStepTitle('Publish the landing page rewrite'), null);
 });
+
+import { classify } from '../src/domain/classify.js';
+import type { Goal } from '../src/types.js';
+
+const goal = {
+  title: 'g', area: 'money', why: '', metric: 'customers', baseline: 0, target: 15,
+  deadline: '2026-12-31', baselineHistory: [], createdAt: '', updatedAt: '',
+  levers: [
+    { id: 'posting-publicly', name: 'posting publicly', kind: 'hard' as const, examples: [], match: { keywords: ['habr', 'post'], repos: [] } },
+    { id: 'building', name: 'building', kind: 'comfortable' as const, examples: [], match: { keywords: ['refactor'], repos: [] } },
+  ],
+  projects: [{ id: 'worklore', name: 'worklore', area: 'money' as const, match: { keywords: ['worklore'], repos: [] } }],
+} as unknown as Goal;
+
+test('naming a project does not stop a hard lever from matching the task text', () => {
+  const r = classify({ area: 'work', task: 'Russian Habr version of the article', projectId: 'worklore' }, goal, null);
+  assert.equal(r.classification, 'goal_hard');
+  assert.equal(r.leverId, 'posting-publicly');
+  assert.equal(r.projectId, 'worklore');
+});
+
+test('a project with no lever match still classifies by its area', () => {
+  const r = classify({ area: 'work', task: 'tidy the backlog', projectId: 'worklore' }, goal, null);
+  assert.equal(r.classification, 'goal_comfortable');
+});

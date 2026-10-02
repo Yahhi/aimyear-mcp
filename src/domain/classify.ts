@@ -20,6 +20,19 @@ export function classify(input: ClassInput, goal: Goal | null, day: Day | null):
     const lever = goal.levers.find(l => l.id === input.leverId);
     if (lever) return { classification: lever.kind === 'hard' ? 'goal_hard' : 'goal_comfortable', leverId: lever.id, unclassified: false, matchedBy: 'lever id' };
   }
+
+  // A project says WHICH product; a lever says WHAT KIND of work. They are
+  // orthogonal, so naming the project must not stop the lever from matching —
+  // doing that silently filed hard work (writing, posting) as comfortable.
+  const leverByText: Lever | undefined = goal?.levers.find(l => matches(input.task, l.match, l.name));
+  if (leverByText) {
+    return {
+      classification: leverByText.kind === 'hard' ? 'goal_hard' : 'goal_comfortable',
+      leverId: leverByText.id, projectId: input.projectId,
+      unclassified: false, matchedBy: `lever keyword "${leverByText.name}"`,
+    };
+  }
+
   if (input.stepId) return { classification: 'goal_comfortable', unclassified: false, matchedBy: 'step id (no lever)' };
   if (input.projectId && input.projectId !== 'goal') {
     const proj = goal?.projects.find(p => p.id === input.projectId);
@@ -27,8 +40,6 @@ export function classify(input: ClassInput, goal: Goal | null, day: Day | null):
   }
 
   if (goal) {
-    const lever: Lever | undefined = goal.levers.find(l => matches(input.task, l.match, l.name));
-    if (lever) return { classification: lever.kind === 'hard' ? 'goal_hard' : 'goal_comfortable', leverId: lever.id, unclassified: false, matchedBy: `lever keyword "${lever.name}"` };
     const project: Project | undefined = goal.projects.find(p => matches(input.task, p.match, p.name));
     if (project) return { classification: fromProject(project.area), projectId: project.id, unclassified: false, matchedBy: `project keyword "${project.name}" (${project.area})` };
   }
