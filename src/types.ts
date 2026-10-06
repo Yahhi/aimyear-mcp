@@ -108,6 +108,8 @@ export interface Session {
   outcome?: 'done' | 'partial' | 'abandoned';
   summary?: string;
   attentionShareOverride?: number;
+  /** Closed by the server because the timer was forgotten, not by the user. */
+  autoClosed?: boolean;
 }
 
 export type Verdict = 'ok' | 'stop' | 'plan_first';

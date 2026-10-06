@@ -86,7 +86,22 @@ export class Notifications {
     // A timer running for hours was forgotten, not worked through. Send one last
     // reminder that says so and then stop: a missed stop should cost one message,
     // not fifty into an empty room.
-    if (p.final) return undefined;
+    if (p.final) {
+      // She has forgotten to stop it. End the block and mark the open sessions
+      // auto-closed rather than letting them run all night.
+      await this.db.collection('users').doc(p.uid).collection('blocks').doc(p.blockId)
+        .set({ ended: true, autoClosed: true, autoClosedAt: new Date().toISOString() }, { merge: true });
+      const lower = new Date(Date.now() - 24 * 3600000).toISOString();
+      const snap = await this.db.collection('users').doc(p.uid).collection('sessions')
+        .where('start', '>=', lower).get();
+      await Promise.all(snap.docs
+        .filter(d => !(d.data() as Session).end)
+        .map(d => d.ref.set({
+          end: new Date().toISOString(), outcome: 'partial', autoClosed: true,
+          summary: 'Auto-closed: the timer ran for hours with no stop. Confirm the real end time.',
+        }, { merge: true })));
+      return undefined;
+    }
     const elapsed = Math.round((Date.now() - new Date(b.start).getTime()) / 60000) + workMin;
     const id = `${p.blockId}-standup-${Date.now()}`;
     await this.db.collection(PENDING).doc(id).set({
