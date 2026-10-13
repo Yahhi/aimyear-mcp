@@ -1,6 +1,6 @@
 {
-  "version": "0.2.0",
-  "sha256": "4f4232dae51063b724be27b8b3c1368192b0d278db47c151100280acc871a6bd",
+  "version": "0.2.1",
+  "sha256": "ad9485499fa2470942ebc7895534853c039a671a7539ae2414d9dcd30abc4f0e",
   "tools": 40,
   "prompts": 2
 }

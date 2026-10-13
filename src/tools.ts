@@ -126,8 +126,8 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null) {
     summary: z.string(), outcome: z.enum(['done', 'partial', 'abandoned']), session_id: z.string().optional(), attention_share: z.number().min(0).max(1).optional(),
   }, a => svc.endFocus(a.summary, a.outcome, a.session_id, a.attention_share));
   t('cancel_focus', 'Discard the running session (not counted).', { session_id: z.string().optional() }, a => svc.cancelFocus(a.session_id));
-  t('end_block', 'End the pomodoro timer now (stand up). Returns the break length.', {}, () => svc.endBlock(false));
-  t('cancel_block', 'Cancel the pomodoro timer.', {}, () => svc.endBlock(true));
+  t('end_block', 'End the timer now (stand up). Also closes every running session: there is no paused session, so "pause" means end_block. Returns the break length.', {}, () => svc.endBlock(false));
+  t('cancel_block', 'Cancel the timer. Also closes every running session.', {}, () => svc.endBlock(true));
   t('log_session', 'Log past time: minutes (ending now, or at end) or start+end as HH:MM on date. For calls, children, workout, paid work. exclusive=true means nothing else was happening then.', {
     task: z.string(), minutes: z.number().int().min(1).optional(), start: hhmm.optional(), end: hhmm.optional(), date: date.optional(), area: area.optional(), projectId: z.string().optional(), leverId: z.string().optional(), stepId: z.string().optional(), itemId: z.string().optional(), weight: z.number().min(0).optional(), exclusive: z.boolean().optional(),
   }, a => svc.logSession(a));

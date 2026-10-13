@@ -50,7 +50,7 @@ on their AimYear account, on every device.
 | `/aim path` | `get_path`. Add or reorder stages and steps. |
 | `/aim plan` (today / tomorrow) | `get_planning_context`, propose, confirm, `set_plan`. |
 | `/aim focus <task>` | `start_focus`. Honor the verdict (below). |
-| `/aim pause` | `end_block`. It ends the timer block and returns the break length. The session stays open. |
+| `/aim pause` | `end_block`. It ends the timer and closes every running session; there is no paused session. Resume = `start_focus`. |
 | `/aim done [summary]` | `end_focus` with an outcome and a real summary (what changed, not the task name). |
 | `/aim log <minutes> <what>` | `log_session` with the right area. Use it for past work, calls, kids, workout. |
 | `/aim split 70/30` | `split_attention` across running sessions. |

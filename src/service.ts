@@ -413,11 +413,17 @@ export class AimService {
     if (cancel) b.cancelled = true; else b.ended = true;
     await this.store.saveBlock(b);
     await this.store.clearPendings(b.id);
+    // A session only counts while the timer runs, so stopping the timer closes them all.
+    // Otherwise they stay open overnight and split today's attention with yesterday's work.
+    const now = new Date().toISOString();
+    const closed = await this.store.getRunningSessions();
+    for (const s of closed) { s.end = now; s.outcome = 'partial'; s.summary ??= 'Closed when the timer stopped.'; await this.store.saveSession(s); }
+    const closedNote = closed.length ? ` Closed ${closed.map(s => `"${s.task}"`).join(', ')}.` : '';
     const prof = await this.profile();
     const { start, end } = await this.dayWindow(await this.today());
     const blocksToday = (await this.store.getBlocksInRange(start.toISOString(), end.toISOString())).filter(x => x.kind === 'work' && !x.cancelled).length;
     const long = blocksToday % prof.pomodoro.longBreakEvery === 0;
-    return { ok: true, blocks_today: blocksToday, next_break_min: long ? prof.pomodoro.longBreakMin : prof.pomodoro.breakMin, speak: cancel ? 'Block cancelled.' : `Block ${blocksToday} done. Stand up and walk for ${long ? prof.pomodoro.longBreakMin : prof.pomodoro.breakMin} minutes.` };
+    return { ok: true, blocks_today: blocksToday, next_break_min: long ? prof.pomodoro.longBreakMin : prof.pomodoro.breakMin, closed_sessions: closed.map(s => s.id), speak: (cancel ? 'Block cancelled.' : `Block ${blocksToday} done. Stand up and walk for ${long ? prof.pomodoro.longBreakMin : prof.pomodoro.breakMin} minutes.`) + closedNote };
   }
 
   // ---------- sessions ----------
