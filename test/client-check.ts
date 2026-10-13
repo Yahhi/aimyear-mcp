@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-const t = new StdioClientTransport({ command: 'node', args: ['dist/index.js'], env: { ...process.env as Record<string, string>, AIMYEAR_UID: 'k2u28fssQidqypYLUKmXFQLun0t1' } });
+const t = new StdioClientTransport({ command: 'node', args: ['dist/index.js'], env: { ...process.env as Record<string, string>, AIMYEAR_UID: process.env.AIMYEAR_UID ?? '' } });
 const c = new Client({ name: 'check', version: '0' });
 await c.connect(t);
 const tools = await c.listTools();

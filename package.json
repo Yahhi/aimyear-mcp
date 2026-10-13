@@ -1,6 +1,6 @@
 {
   "name": "aimyear-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AimYear MCP server: one measurable yearly goal, a path of steps, focus sessions with attention shares, and a stop rule for comfortable work.",
   "type": "module",
   "bin": {
@@ -11,7 +11,11 @@
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test test/*.test.ts"
+    "test": "tsx --test test/*.test.ts",
+    "test:conformance": "tsx test/conformance.ts",
+    "test:oauth": "tsx test/oauth-e2e.ts",
+    "access-doc": "tsx scripts/access-doc.ts",
+    "surface-lock": "tsx scripts/surface-lock.ts"
   },
   "license": "UNLICENSED",
   "private": true,

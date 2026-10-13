@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import type { Goal, Path, Profile, Day, Block, Session, Mode, Workplace, Commitment, Device, Pending, Direction } from './types.js';
 
 let dbSingleton: Firestore | null = null;
-function initFirestore(): Firestore {
+export function initFirestore(): Firestore {
   if (dbSingleton) return dbSingleton;
   if (getApps().length === 0) {
     const saPath = process.env.AIMYEAR_SERVICE_ACCOUNT ?? `${process.env.HOME}/.aimyear/service-account.json`;

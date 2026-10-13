@@ -2,14 +2,51 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { AimService, AimError } from './service.js';
 import { AREAS } from './types.js';
+import { levelOfTool } from './access.js';
 
 const area = z.enum(AREAS);
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('YYYY-MM-DD in the user\'s timezone');
 const hhmm = z.string().regex(/^\d{1,2}:\d{2}$/).describe('HH:MM local time');
 
 type Handler = (args: any) => Promise<unknown>;
-function wrap(fn: Handler) {
+
+/** What each tool does to the person's data. Clients show these before they approve a call. */
+type Kind = 'read' | 'write' | 'idempotent' | 'destructive';
+const READ = ['get_goal', 'validate_goal', 'list_devices', 'get_commitments', 'capacity', 'get_path', 'next_steps',
+  'get_planning_context', 'get_plan', 'get_current', 'get_gaps', 'status', 'day_summary', 'week_summary', 'leaks', 'streak', 'history'];
+// Replaces a whole list or discards something: an earlier value is gone after the call.
+const DESTRUCTIVE = ['set_goal', 'set_levers', 'set_milestones', 'set_commitments', 'set_plan', 'forget_device', 'cancel_focus', 'cancel_block'];
+// Calling twice with the same arguments leaves the same result.
+const IDEMPOTENT = ['set_pomodoro', 'set_workplace', 'register_device', 'update_step', 'complete_item', 'set_mode', 'split_attention', 'update_baseline'];
+export function kindOf(name: string): Kind {
+  if (READ.includes(name)) return 'read';
+  if (DESTRUCTIVE.includes(name)) return 'destructive';
+  if (IDEMPOTENT.includes(name)) return 'idempotent';
+  return 'write';
+}
+const title = (name: string) => name.split('_').map((w, i) => i === 0 ? w[0].toUpperCase() + w.slice(1) : w).join(' ');
+function annotationsFor(name: string) {
+  const k = kindOf(name);
+  return {
+    title: title(name),
+    readOnlyHint: k === 'read',
+    destructiveHint: k === 'destructive',
+    idempotentHint: k === 'read' || k === 'idempotent' || (k === 'destructive' && name.startsWith('set_')),
+    openWorldHint: false,
+  };
+}
+
+export const INSTRUCTIONS = `AimYear keeps one person's big aim for the year, the path of stages toward it, today's plan, a focus timer and an honest record of where the time went. Every tool acts as the signed-in person.
+
+Typical flow: get_goal (or validate_goal → set_goal), get_path, get_planning_context → set_plan with one main step, start_focus before work (honor its verdict: ok, plan_first or stop), end_focus with a real summary, day_summary / week_summary / leaks for reviews. Every result has a "speak" field: say it to the user in your own words. Start, pause or stop the timer only when the user asks; logging past time with log_session is always fine.`;
+
+function wrap(name: string, fn: Handler, signedIn: boolean) {
   return async (args: any) => {
+    // Second check behind the HTTP gate: no tool runs without a person to act as.
+    if (!signedIn && levelOfTool(name) !== 'public') {
+      const msg = 'Sign in to AimYear first: this tool acts on your own aim and history.';
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: msg, speak: msg }) }], isError: true };
+    }
     try {
       const result = await fn(args ?? {});
       return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
@@ -20,9 +57,11 @@ function wrap(fn: Handler) {
   };
 }
 
-export function registerTools(server: McpServer, svc: AimService) {
+/** svc is null for an anonymous caller: the tools are listed, and every call is refused. */
+export function registerTools(server: McpServer, maybeSvc: AimService | null) {
+  const svc = maybeSvc as AimService;
   const t = (name: string, description: string, shape: Record<string, z.ZodTypeAny>, fn: Handler) =>
-    server.registerTool(name, { description, inputSchema: shape }, wrap(fn));
+    server.registerTool(name, { title: title(name), description, inputSchema: shape, annotations: annotationsFor(name) }, wrap(name, fn, maybeSvc !== null));
 
   // ---- goal ----
   t('get_goal', 'The one yearly goal with metric, baseline, current value, target, deadline, levers (hard/comfortable) and other projects. Call first in most flows.', {}, () => svc.getGoal());
