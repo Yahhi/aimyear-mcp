@@ -17,7 +17,7 @@
     "access-doc": "tsx scripts/access-doc.ts",
     "surface-lock": "tsx scripts/surface-lock.ts"
   },
-  "license": "UNLICENSED",
+  "license": "SEE LICENSE IN LICENSE.md",
   "private": true,
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

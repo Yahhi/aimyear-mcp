@@ -89,3 +89,7 @@ Health: `/health`. The legacy URL `https://<service>/c/<token>/mcp` still works.
 
 Call analytics: `scripts/mcp-calls.sh [1d]` prints calls per tool and the call sequences
 per person and client.
+
+## License
+
+[FSL-1.1-MIT](LICENSE.md): you can read, run, self-host and change this server, but not offer it as a competing commercial service. Each release becomes MIT two years after it is published. The hosted service is at https://mcp.aimyear.com/mcp.
