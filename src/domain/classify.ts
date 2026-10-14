@@ -13,8 +13,13 @@ function matches(text: string, hints: { repos: string[]; keywords: string[] }, n
 /** Decide what a session is, from explicit ids first, then from match hints on the task text. */
 export function classify(input: ClassInput, goal: Goal | null, day: Day | null): ClassResult {
   const mainItem = day?.plan.find(p => p.isMainStep);
-  if (input.itemId && mainItem && mainItem.id === input.itemId) return { classification: 'main_step', leverId: mainItem.leverId, unclassified: false, matchedBy: 'plan item' };
-  if (input.stepId && mainItem?.stepId && mainItem.stepId === input.stepId) return { classification: 'main_step', leverId: mainItem.leverId, unclassified: false, matchedBy: 'main step id' };
+  // Accept the main item's plan id or step id in either field: get_current used to
+  // return the plan item id as main_step.id, and agents passed it as stepId.
+  if (mainItem) {
+    const ids = [mainItem.id, mainItem.stepId].filter(Boolean);
+    if (input.itemId && ids.includes(input.itemId)) return { classification: 'main_step', leverId: mainItem.leverId, unclassified: false, matchedBy: 'plan item' };
+    if (input.stepId && ids.includes(input.stepId)) return { classification: 'main_step', leverId: mainItem.leverId, unclassified: false, matchedBy: 'main step id' };
+  }
 
   if (input.leverId && goal) {
     const lever = goal.levers.find(l => l.id === input.leverId);

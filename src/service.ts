@@ -558,7 +558,7 @@ export class AimService {
     const today = await this.today();
     const day = await this.store.getDay(today);
     const main = day?.plan.find(p => p.isMainStep);
-    return { running_sessions: running, block: this.blockView(block), mode: day?.mode ?? 'full', main_step: main ? { id: main.id, title: main.title, done: main.done } : null, speak: `${running.length ? `Running: ${running.map(r => `[${r.id}] ${r.task} (${Math.round(r.share * 100)}%)`).join(', ')}.` : 'Nothing running.'} ${block ? `Timer: ${this.blockView(block)?.minutes_left} min left.` : 'No timer.'} ${main ? `Main step today: "${main.title}" ${main.done ? 'done' : 'pending'}.` : 'No main step planned today.'}` };
+    return { running_sessions: running, block: this.blockView(block), mode: day?.mode ?? 'full', main_step: main ? { item_id: main.id, step_id: main.stepId ?? null, title: main.title, done: main.done } : null, speak: `${running.length ? `Running: ${running.map(r => `[${r.id}] ${r.task} (${Math.round(r.share * 100)}%)`).join(', ')}.` : 'Nothing running.'} ${block ? `Timer: ${this.blockView(block)?.minutes_left} min left.` : 'No timer.'} ${main ? `Main step today: "${main.title}" ${main.done ? 'done' : 'pending'}.` : 'No main step planned today.'}` };
   }
 
   async getGaps(date?: string) {

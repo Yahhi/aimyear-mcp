@@ -42,3 +42,11 @@ test('a project with no lever match still classifies by its area', () => {
   const r = classify({ area: 'work', task: 'tidy the backlog', projectId: 'worklore' }, goal, null);
   assert.equal(r.classification, 'goal_comfortable');
 });
+
+test("the main item matches by plan id or step id, whichever field carries it", () => {
+  const day = { date: '2026-10-14', mode: 'full', plan: [{ id: 'item-1', stepId: 'step-1', title: 'decide pricing', isMainStep: true, done: false }] } as any;
+  for (const input of [{ itemId: 'item-1' }, { stepId: 'item-1' }, { stepId: 'step-1' }, { itemId: 'step-1' }]) {
+    const r = classify({ area: 'work', task: 'building the pricing page', ...input }, goal, day);
+    assert.equal(r.classification, 'main_step', JSON.stringify(input));
+  }
+});
