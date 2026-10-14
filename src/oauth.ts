@@ -184,6 +184,10 @@ const esc = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt
 
 function consentPage(rid: string, clientName: string, redirectHost: string): string {
   const data = JSON.stringify({ rid, firebase: FIREBASE_WEB }).replace(/</g, '\\u003c');
+  // Claude Code registers as "Claude Code (<server name>)"; the server name is noise on our own page.
+  const displayName = clientName.replace(/\s*\(aimyear\)\s*$/i, '') || clientName;
+  // A loopback return address only says "an app on this computer" — not worth showing.
+  const localReturn = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(redirectHost);
   return `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -203,7 +207,8 @@ input{border:1px solid var(--line);background:var(--bg);color:var(--fg);padding:
 hr{border:0;border-top:1px solid var(--line);margin:16px 0}b{color:var(--fg)}
 </style></head><body><main>
 <h1>Connect AimYear</h1>
-<p><b>${esc(clientName)}</b> (${esc(redirectHost)}) wants to use your AimYear: your aim, path, plans, timer and time history.</p>
+<p><b>${esc(displayName)}</b> wants access to your AimYear account. It will be able to see and change your aim, path, plans, timer and time history.</p>
+${localReturn ? '' : `<p class="small">After you allow, you'll return to ${esc(redirectHost)}.</p>`}
 <section id="signin">
   <button id="google">Continue with Google</button>
   <button id="apple">Continue with Apple</button>
