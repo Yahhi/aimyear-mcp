@@ -40,10 +40,10 @@ export function computeAttention(sessions: Session[], windowStart: Date, windowE
     if (active.length === 0) continue;
     const exclusive = active.filter(x => x.s.exclusive);
     if (exclusive.length > 0) active = exclusive;
-    const total = active.reduce((sum, x) => sum + Math.max(0, x.s.weight || 1), 0) || active.length;
+    const total = active.reduce((sum, x) => sum + Math.max(0, x.s.weight ?? 1), 0) || active.length;
     const minutes = (b - a) / 60000;
     for (const x of active) {
-      const w = total > 0 ? Math.max(0, x.s.weight || 1) / total : 1 / active.length;
+      const w = total > 0 ? Math.max(0, x.s.weight ?? 1) / total : 1 / active.length;
       attention.set(x.s.id, (attention.get(x.s.id) ?? 0) + minutes * w);
     }
     if (active.length > overlapThreshold) {

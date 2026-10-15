@@ -4,7 +4,27 @@ The AimYear MCP server: one big aim for the year, a path of stages and concrete 
 one main step a day, focus sessions with attention shares across terminals and apps, and
 a stop rule for comfortable work that pretends to be progress.
 
-40 tools, 2 prompts. Every tool acts as one signed-in person; see [docs/ACCESS.md](docs/ACCESS.md).
+41 tools, 2 prompts. Every tool acts as one signed-in person; see [docs/ACCESS.md](docs/ACCESS.md).
+
+## Tools
+
+Names say what a tool does: `get_` reads one thing, `list_` reads several, `find_` looks
+for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change one entry.
+
+| Group | Tools |
+|---|---|
+| Aim | `get_goal`, `check_goal_draft`, `set_goal`, `record_progress`, `set_levers`, `set_projects` |
+| Path | `get_path`, `set_milestones`, `edit_milestone`, `add_steps`, `edit_step`, `delete_step`, `next_steps` |
+| Week | `get_commitments`, `set_commitments`, `get_capacity` |
+| Day | `get_planning_context`, `get_plan`, `set_plan`, `edit_plan_item`, `delete_plan_item`, `set_day_mode` |
+| Timer and sessions | `get_now`, `start_session`, `add_note`, `split_attention`, `stop_session`, `stop_timer`, `add_session`, `edit_session`, `delete_session`, `list_sessions`, `find_gaps` |
+| Reviews | `summarize_day`, `summarize_week`, `find_leaks` |
+| Settings and devices | `get_settings`, `set_settings`, `add_device`, `list_devices`, `delete_device` |
+
+0.3.0 renamed most tools (0.2.x names stop working) and added the editing tools:
+`edit_session`, `delete_session` for finished sessions, `edit_milestone`, `delete_step`,
+`edit_plan_item`, `delete_plan_item`, `set_projects`, and `get_settings` / `set_settings`
+with the timezone.
 
 ## Connect
 
@@ -65,7 +85,7 @@ issuer), `AIMYEAR_ALLOWED_ORIGINS` (extra browser origins), `AIMYEAR_WORKPLACE`,
 npm test                  # access table guard, anonymous gate and batch smuggling, OAuth discovery,
                           # annotations, Origin, version negotiation, surface lock, domain rules
 npm run test:conformance  # a client's path through the real HTTP entry point: initialize and
-                          # tools/list without a token, then all 40 tools with a throwaway user
+                          # tools/list without a token, then every tool with a throwaway user
                           # in the real Firestore; cleans up
 CONFORMANCE_URL=https://mcp.aimyear.com/mcp npm run test:conformance   # read-only tools, live
 npm run test:oauth        # register → consent → real Firebase ID token → code → token (PKCE) →

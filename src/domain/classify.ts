@@ -13,7 +13,7 @@ function matches(text: string, hints: { repos: string[]; keywords: string[] }, n
 /** Decide what a session is, from explicit ids first, then from match hints on the task text. */
 export function classify(input: ClassInput, goal: Goal | null, day: Day | null): ClassResult {
   const mainItem = day?.plan.find(p => p.isMainStep);
-  // Accept the main item's plan id or step id in either field: get_current used to
+  // Accept the main item's plan id or step id in either field: get_current (now get_now) used to
   // return the plan item id as main_step.id, and agents passed it as stepId.
   if (mainItem) {
     const ids = [mainItem.id, mainItem.stepId].filter(Boolean);
@@ -74,7 +74,7 @@ export function decideVerdict(cls: Classification, day: Day | null, goal: Goal |
   if (!requiresMainStep) return { verdict: 'ok', message: 'No focus window today, so nothing is expected. Logged.' };
   if (!day || day.plan.length === 0) {
     if (cls === 'goal_hard' || cls === 'life') return { verdict: 'ok', message: 'No plan for today yet, but this counts anyway.' };
-    return { verdict: 'plan_first', message: 'There is no plan for today. Before anything else: what is the one step toward the goal today? Set it with set_plan (or say "no plan today" to set mode off).' };
+    return { verdict: 'plan_first', message: 'There is no plan for today. Before anything else: what is the one step toward the goal today? Set it with set_plan (or say "no plan today" and call set_day_mode with off).' };
   }
   if (cls === 'main_step') return { verdict: 'ok', message: "This is today's main step. Go." };
   if (cls === 'goal_hard') return { verdict: 'ok', message: 'Hard lever on the goal. Counts fully.' };
@@ -84,7 +84,7 @@ export function decideVerdict(cls: Classification, day: Day | null, goal: Goal |
     if (day.stopIssuedAt) return { verdict: 'ok', message: `Main step still pending: "${mainItem?.title ?? 'not set'}". Not stopping you twice today, but it goes in the week summary.`, note: 'main step pending' };
     return {
       verdict: 'stop',
-      message: `Stop. This is comfortable work on the goal project and today's main step is not done yet: "${mainItem?.title ?? 'not set'}". Do 25 minutes on the main step first? If you really want to continue with this task, call start_focus again with override=true.`,
+      message: `Stop. This is comfortable work on the goal project and today's main step is not done yet: "${mainItem?.title ?? 'not set'}". Do 25 minutes on the main step first? If you really want to continue with this task, call start_session again with override=true.`,
     };
   }
   return { verdict: 'ok', message: cls === 'life' ? 'Life area. Counts toward balance.' : 'Other work. Counts toward balance.' };

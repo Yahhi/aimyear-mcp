@@ -22,7 +22,9 @@ export interface Goal {
 }
 
 export type ItemStatus = 'todo' | 'doing' | 'done';
-export interface Milestone { id: string; title: string; metric: string; target: number; due: string; status: ItemStatus; createdAt: string; doneAt?: string }
+/** retired: dropped without finishing; it no longer counts as the current milestone. */
+export type MilestoneStatus = ItemStatus | 'retired';
+export interface Milestone { id: string; title: string; metric: string; target: number; due: string; status: MilestoneStatus; createdAt: string; doneAt?: string }
 export interface Step { id: string; milestoneId: string; title: string; leverId?: string; estimateMin: number; order: number; status: ItemStatus; doneAt?: string }
 export interface Path { milestones: Milestone[]; steps: Step[] }
 

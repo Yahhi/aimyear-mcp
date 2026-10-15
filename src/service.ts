@@ -3,7 +3,7 @@ import { addDays, daysBetween, endOfDay, isValidDate, localDate, localTime, minu
 import { computeAttention, findGaps } from './domain/attention.js';
 import { checkGoal, checkStepTitle, type GoalDraft } from './domain/goal.js';
 import { classify, decideVerdict, isGoalWork } from './domain/classify.js';
-import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, Mode, Path, PlanItem, Profile, Project, Session, Step, Workplace } from './types.js';
+import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, PlanItem, Profile, Project, Session, Step, Workplace } from './types.js';
 
 export class AimError extends Error {}
 
@@ -31,12 +31,12 @@ export class AimService {
 
   private async requireGoal(): Promise<Goal> {
     const g = await this.store.getGoal();
-    if (!g) throw new AimError('No goal set yet. Use validate_goal / set_goal first.');
+    if (!g) throw new AimError('No goal set yet. Use check_goal_draft, then set_goal.');
     return g;
   }
 
   // ---------- goal ----------
-  async validateGoal(draft: GoalDraft) {
+  async checkGoalDraft(draft: GoalDraft) {
     const check = checkGoal(draft, await this.tz());
     return { ...check, ok: check.problems.length === 0, speak: check.problems.length === 0 ? `Goal passes the rubric. Pace needed: ${check.pace_per_week} per week for ${check.weeks_left} weeks.` : check.next_question ?? check.problems.join('; ') };
   }
@@ -72,14 +72,17 @@ export class AimService {
     };
   }
 
-  async updateBaseline(value: number, date?: string) {
+  async recordProgress(value: number, date?: string) {
     const goal = await this.requireGoal();
     const d = date ?? await this.today(); this.assertDate(d);
+    // One value per date: a second call for the same date corrects the first.
+    goal.baselineHistory = goal.baselineHistory.filter(h => h.date !== d);
     goal.baselineHistory.push({ value, date: d });
     goal.baselineHistory.sort((a, b) => a.date.localeCompare(b.date));
     goal.updatedAt = new Date().toISOString();
     await this.store.saveGoal(goal);
-    return { ok: true, history: goal.baselineHistory, speak: `Recorded ${goal.metric} = ${value} on ${d}. Target ${goal.target} by ${goal.deadline}.` };
+    const reached = value >= goal.target;
+    return { ok: true, history: goal.baselineHistory, goal_reached: reached, speak: `Recorded ${goal.metric} = ${value} on ${d}. ${reached ? `Target ${goal.target} reached: the goal is done. Set the next aim with set_goal when ready.` : `Target ${goal.target} by ${goal.deadline}.`}` };
   }
 
   async setLevers(levers: { id?: string; name: string; kind: 'hard' | 'comfortable'; examples?: string[]; keywords?: string[]; repos?: string[] }[]) {
@@ -91,13 +94,12 @@ export class AimService {
     return { ok: true, levers: goal.levers, speak: `Levers saved: ${goal.levers.map(l => `${l.name} [${l.kind}]`).join(', ')}.` };
   }
 
-  async addProject(name: string, area: Area, keywords: string[] = [], repos: string[] = []) {
+  async setProjects(projects: { id?: string; name: string; area: Area; keywords?: string[]; repos?: string[] }[]) {
     const goal = await this.requireGoal();
-    const p: Project = { id: slug(name), name: name.trim(), area, match: { keywords, repos } };
-    goal.projects = [...goal.projects.filter(x => x.id !== p.id), p];
+    goal.projects = projects.map(p => ({ id: p.id ?? slug(p.name), name: p.name.trim(), area: p.area, match: { keywords: p.keywords ?? [], repos: p.repos ?? [] } }));
     goal.updatedAt = new Date().toISOString();
     await this.store.saveGoal(goal);
-    return { ok: true, project: p, speak: `Project "${p.name}" (${area}) added. Sessions matching ${[p.name, ...keywords, ...repos].join(', ')} will be classified as other work, not goal work.` };
+    return { ok: true, projects: goal.projects, speak: `Projects saved: ${goal.projects.map(p => `${p.name} [${p.area}]`).join(', ') || 'none'}. Their sessions count as other work or life, not goal work.` };
   }
 
   // ---------- path ----------
@@ -108,7 +110,7 @@ export class AimService {
     const span = Math.max(1, daysBetween(from, m.due));
     const elapsed = Math.min(1, Math.max(0, daysBetween(from, today) / span));
     const doneFrac = mine.length ? done / mine.length : 0;
-    const status = m.status === 'done' ? 'done' : mine.length === 0 ? 'no_steps' : doneFrac >= elapsed + 0.1 ? 'ahead' : doneFrac < elapsed - 0.15 ? 'behind' : 'on_pace';
+    const status = m.status === 'done' || m.status === 'retired' ? m.status : mine.length === 0 ? 'no_steps' : doneFrac >= elapsed + 0.1 ? 'ahead' : doneFrac < elapsed - 0.15 ? 'behind' : 'on_pace';
     return { steps_total: mine.length, steps_done: done, days_left: daysBetween(today, m.due), time_elapsed_fraction: Math.round(elapsed * 100) / 100, pace: status };
   }
 
@@ -116,7 +118,7 @@ export class AimService {
     const path = await this.store.getPath();
     const today = await this.today();
     const milestones = path.milestones.map((m, i) => ({ ...m, ...this.milestonePace(m, path.milestones[i - 1], path.steps, today), steps: path.steps.filter(s => s.milestoneId === m.id).sort((a, b) => a.order - b.order) }));
-    const current = milestones.find(m => m.status !== 'done');
+    const current = milestones.find(isOpen);
     return { milestones, current_milestone_id: current?.id ?? null, speak: current ? `Current milestone: "${current.title}" due ${current.due}, ${current.steps_done}/${current.steps_total} steps done, ${current.pace}.` : 'No open milestones.' };
   }
 
@@ -154,7 +156,35 @@ export class AimService {
     return { ok: true, steps: added, speak: `${added.length} steps added to "${m.title}".` };
   }
 
-  async updateStep(stepId: string, patch: { title?: string; status?: 'todo' | 'doing' | 'done'; order?: number; leverId?: string; estimateMin?: number }) {
+  async editMilestone(milestoneId: string, patch: { title?: string; metric?: string; target?: number; due?: string; status?: MilestoneStatus }) {
+    const path = await this.store.getPath();
+    const m = path.milestones.find(x => x.id === milestoneId);
+    if (!m) throw new AimError(`milestone "${milestoneId}" not found; ids: ${path.milestones.map(x => x.id).join(', ')}`);
+    if (patch.due !== undefined) {
+      this.assertDate(patch.due);
+      const goal = await this.store.getGoal();
+      if (goal && patch.due > goal.deadline) return { ok: false, problems: [`due after the goal deadline ${goal.deadline}`], speak: `That date is after the goal deadline ${goal.deadline}.` };
+      m.due = patch.due;
+    }
+    if (patch.title?.trim()) m.title = patch.title.trim();
+    if (patch.metric?.trim()) m.metric = patch.metric.trim();
+    if (patch.target !== undefined) m.target = patch.target;
+    if (patch.status) { m.status = patch.status; m.doneAt = patch.status === 'done' || patch.status === 'retired' ? new Date().toISOString() : undefined; }
+    await this.store.savePath(path);
+    const next = path.milestones.find(isOpen);
+    return { ok: true, milestone: m, speak: `Milestone "${m.title}": ${m.status}, due ${m.due}.${patch.status && !isOpen(m) ? ` Current milestone is now ${next ? `"${next.title}"` : 'none'}.` : ''}` };
+  }
+
+  async deleteStep(stepId: string) {
+    const path = await this.store.getPath();
+    const s = path.steps.find(x => x.id === stepId);
+    if (!s) throw new AimError(`step "${stepId}" not found`);
+    path.steps = path.steps.filter(x => x.id !== stepId);
+    await this.store.savePath(path);
+    return { ok: true, speak: `Step deleted: "${s.title}".` };
+  }
+
+  async editStep(stepId: string, patch: { title?: string; status?: 'todo' | 'doing' | 'done'; order?: number; leverId?: string; estimateMin?: number }) {
     const path = await this.store.getPath();
     const s = path.steps.find(x => x.id === stepId);
     if (!s) throw new AimError(`step "${stepId}" not found`);
@@ -171,14 +201,14 @@ export class AimService {
   private autoCloseMilestones(path: Path) {
     for (const m of path.milestones) {
       const mine = path.steps.filter(s => s.milestoneId === m.id);
-      if (mine.length && mine.every(s => s.status === 'done') && m.status !== 'done') { m.status = 'done'; m.doneAt = new Date().toISOString(); }
+      if (mine.length && mine.every(s => s.status === 'done') && isOpen(m)) { m.status = 'done'; m.doneAt = new Date().toISOString(); }
     }
   }
 
   async nextSteps(count = 5) {
     const goal = await this.store.getGoal();
     const path = await this.store.getPath();
-    const current = path.milestones.find(m => m.status !== 'done');
+    const current = path.milestones.find(isOpen);
     if (!current) return { steps: [], speak: 'No open milestone. Set milestones first.' };
     const hard = new Set((goal?.levers ?? []).filter(l => l.kind === 'hard').map(l => l.id));
     const open = path.steps.filter(s => s.milestoneId === current.id && s.status !== 'done').sort((a, b) => (Number(hard.has(b.leverId ?? '')) - Number(hard.has(a.leverId ?? ''))) || a.order - b.order).slice(0, count);
@@ -186,25 +216,36 @@ export class AimService {
   }
 
   // ---------- profile ----------
-  async setPomodoro(p: Partial<Profile['pomodoro']>) {
+  private settingsView(prof: Profile) {
+    const p = prof.pomodoro;
+    return {
+      timezone: prof.timezone, workplace: prof.defaultWorkplace, ...p,
+      speak: `Timezone ${prof.timezone}. Reminders go to ${prof.defaultWorkplace}. Stand-up every ${p.workMin} min${p.standup ? '' : ' (stand-up reminders off)'}, ${p.breakMin} min break, a ${p.longBreakMin} min break every ${p.longBreakEvery} blocks.`,
+    };
+  }
+  async getSettings() { return this.settingsView(await this.profile()); }
+  async setSettings(s: { timezone?: string; workplace?: Workplace; workMin?: number; breakMin?: number; longBreakEvery?: number; longBreakMin?: number; standup?: boolean }) {
     const prof = await this.profile();
-    prof.pomodoro = { ...prof.pomodoro, ...p };
+    if (s.timezone !== undefined) {
+      try { new Intl.DateTimeFormat('en', { timeZone: s.timezone }); } catch { throw new AimError(`unknown timezone "${s.timezone}"; use an IANA name such as Europe/Madrid`); }
+      prof.timezone = s.timezone;
+    }
+    if (s.workplace) prof.defaultWorkplace = s.workplace;
+    const { timezone: _t, workplace: _w, ...pom } = s;
+    prof.pomodoro = { ...prof.pomodoro, ...Object.fromEntries(Object.entries(pom).filter(([, v]) => v !== undefined)) };
     await this.store.saveProfile(prof); this.profileCache = prof;
-    return { ok: true, pomodoro: prof.pomodoro, speak: `Pomodoro: ${prof.pomodoro.workMin} min work, ${prof.pomodoro.breakMin} min break, long break every ${prof.pomodoro.longBreakEvery}.` };
+    const view = this.settingsView(prof);
+    return { ok: true, ...view, speak: `Saved. ${view.speak}` };
   }
-  async setWorkplace(w: Workplace) {
-    const prof = await this.profile(); prof.defaultWorkplace = w; await this.store.saveProfile(prof); this.profileCache = prof;
-    return { ok: true, speak: `Default workplace is now ${w}.` };
-  }
-  async setMode(date: string | undefined, mode: Mode) {
+  async setDayMode(date: string | undefined, mode: Mode) {
     const d = date ?? await this.today(); this.assertDate(d);
     const day = await this.store.getOrCreateDay(d, (await this.profile()).defaultMode);
     day.mode = mode; await this.store.saveDay(day);
-    return { ok: true, date: d, mode, speak: mode === 'off' ? `Tracking off for ${d}: timer and reminders only, nothing stored.` : `Mode for ${d}: ${mode}.` };
+    return { ok: true, date: d, mode, speak: mode === 'off' ? `Tracking off for ${d}: timer and reminders only, nothing stored.` : `Tracking on for ${d}.` };
   }
 
   // ---------- devices ----------
-  async registerDevice(token: string, platform: Device['platform'], label?: string) {
+  async addDevice(token: string, platform: Device['platform'], label?: string) {
     const now = new Date().toISOString();
     await this.store.saveDevice({ token, platform, lastSeen: now, foregroundAt: now, label });
     const all = await this.store.getDevices();
@@ -214,7 +255,7 @@ export class AimService {
     const all = await this.store.getDevices();
     return { devices: all.map(d => ({ platform: d.platform, label: d.label, lastSeen: d.lastSeen, token: `…${d.token.slice(-8)}` })), speak: all.length ? `Devices: ${all.map(d => `${d.platform}${d.label ? ` (${d.label})` : ''}`).join(', ')}.` : 'No devices registered, so server reminders have nowhere to go. Sign in on the phone app to register one.' };
   }
-  async forgetDevice(token: string) {
+  async deleteDevice(token: string) {
     await this.store.removeDevice(token);
     return { ok: true, speak: 'Device removed.' };
   }
@@ -323,16 +364,46 @@ export class AimService {
     return { ok: true, date: d, plan: day.plan, warnings, speak: `Plan for ${d} saved (${day.plan.length} items). Main step: ${main ? `"${main.title}" [${main.id}]` : 'none (mode off)'}. ${warnings.join(' ')}` };
   }
 
-  async completeItem(itemId: string, date?: string) {
+  private async planItem(itemId: string, date?: string) {
     const d = date ?? await this.today(); this.assertDate(d);
     const day = await this.store.getDay(d);
     const item = day?.plan.find(p => p.id === itemId);
     if (!day || !item) throw new AimError(`plan item "${itemId}" not found on ${d}`);
-    item.done = true; item.doneAt = new Date().toISOString();
+    return { day, item };
+  }
+
+  async editPlanItem(itemId: string, date: string | undefined, patch: { done?: boolean; title?: string; area?: Area; projectId?: string; leverId?: string; stepId?: string; isMainStep?: boolean; estimateMin?: number }) {
+    const { day, item } = await this.planItem(itemId, date);
+    if (patch.stepId !== undefined) {
+      const path = await this.store.getPath();
+      if (patch.stepId && !path.steps.some(s => s.id === patch.stepId)) throw new AimError(`step "${patch.stepId}" not found in the path`);
+      item.stepId = patch.stepId || undefined;
+    }
+    if (patch.title?.trim()) item.title = patch.title.trim();
+    if (patch.area) item.area = patch.area;
+    if (patch.projectId !== undefined) item.projectId = patch.projectId || undefined;
+    if (patch.leverId !== undefined) item.leverId = patch.leverId || undefined;
+    if (patch.estimateMin !== undefined) item.estimateMin = patch.estimateMin;
+    if (patch.isMainStep === true) for (const p of day.plan) p.isMainStep = p.id === item.id;
+    else if (patch.isMainStep === false) item.isMainStep = false;
+    const notes: string[] = [];
+    if (patch.done !== undefined && patch.done !== item.done) {
+      item.done = patch.done; item.doneAt = patch.done ? new Date().toISOString() : undefined;
+      if (item.stepId) {
+        const r = await this.editStep(item.stepId, { status: patch.done ? 'done' : 'doing' });
+        notes.push(patch.done ? `Path step done: "${r.step?.title}".` : `Path step "${r.step?.title}" is open again.`);
+      }
+    }
     await this.store.saveDay(day);
-    let stepNote = '';
-    if (item.stepId) { const r = await this.updateStep(item.stepId, { status: 'done' }); stepNote = ` Path step done: "${r.step?.title}".`; }
-    return { ok: true, item, speak: `${item.isMainStep ? 'Main step' : 'Item'} done: "${item.title}".${stepNote}` };
+    const what = item.isMainStep ? 'Main step' : 'Item';
+    return { ok: true, item, speak: `${what} "${item.title}" ${patch.done === true ? 'done' : patch.done === false ? 'not done' : 'updated'}.${notes.length ? ' ' + notes.join(' ') : ''}` };
+  }
+
+  async deletePlanItem(itemId: string, date?: string) {
+    const { day, item } = await this.planItem(itemId, date);
+    day.plan = day.plan.filter(p => p.id !== itemId);
+    await this.store.saveDay(day);
+    return { ok: true, plan: day.plan, speak: `Removed "${item.title}" from the plan for ${day.date}.${item.isMainStep ? ' That was the main step: set another one with edit_plan_item (isMainStep) or set_plan.' : ''}` };
   }
 
   async getPlanningContext(date?: string) {
@@ -407,23 +478,24 @@ export class AimService {
       minutes_left: b.endsAt ? minutesBetween(now, new Date(b.endsAt)) : null,
     };
   }
-  async endBlock(cancel = false) {
+  async stopTimer(summary?: string, outcome: 'done' | 'partial' | 'abandoned' = 'partial') {
     const b = await this.store.getRunningBlock();
-    if (!b) return { ok: false, speak: 'No block is running.' };
-    if (cancel) b.cancelled = true; else b.ended = true;
-    await this.store.saveBlock(b);
-    await this.store.clearPendings(b.id);
     // A session only counts while the timer runs, so stopping the timer closes them all.
     // Otherwise they stay open overnight and split today's attention with yesterday's work.
+    // Close them even when no timer is found (a finished countdown hides its block).
     const now = new Date().toISOString();
     const closed = await this.store.getRunningSessions();
-    for (const s of closed) { s.end = now; s.outcome = 'partial'; s.summary ??= 'Closed when the timer stopped.'; await this.store.saveSession(s); }
+    for (const s of closed) { s.end = now; s.outcome = summary ? outcome : 'partial'; s.summary = summary?.trim() || s.summary || 'Closed when the timer stopped.'; await this.store.saveSession(s); }
     const closedNote = closed.length ? ` Closed ${closed.map(s => `"${s.task}"`).join(', ')}.` : '';
+    if (!b) return { ok: closed.length > 0, closed_sessions: closed.map(s => s.id), speak: `No timer is running.${closedNote}` };
+    b.ended = true;
+    await this.store.saveBlock(b);
+    await this.store.clearPendings(b.id);
     const prof = await this.profile();
     const { start, end } = await this.dayWindow(await this.today());
     const blocksToday = (await this.store.getBlocksInRange(start.toISOString(), end.toISOString())).filter(x => x.kind === 'work' && !x.cancelled).length;
     const long = blocksToday % prof.pomodoro.longBreakEvery === 0;
-    return { ok: true, blocks_today: blocksToday, next_break_min: long ? prof.pomodoro.longBreakMin : prof.pomodoro.breakMin, closed_sessions: closed.map(s => s.id), speak: (cancel ? 'Block cancelled.' : `Block ${blocksToday} done. Stand up and walk for ${long ? prof.pomodoro.longBreakMin : prof.pomodoro.breakMin} minutes.`) + closedNote };
+    return { ok: true, blocks_today: blocksToday, next_break_min: long ? prof.pomodoro.longBreakMin : prof.pomodoro.breakMin, closed_sessions: closed.map(s => s.id), speak: `Timer stopped, block ${blocksToday} today. Stand up and walk for ${long ? prof.pomodoro.longBreakMin : prof.pomodoro.breakMin} minutes.${closedNote}` };
   }
 
   // ---------- sessions ----------
@@ -446,11 +518,11 @@ export class AimService {
 
   private async runningView() {
     const running = await this.store.getRunningSessions();
-    const total = running.reduce((s, x) => s + (x.weight || 1), 0) || 1;
-    return running.map(s => ({ id: s.id, task: s.task, classification: s.classification, started: s.start, share: Math.round(((s.weight || 1) / total) * 100) / 100, mine: s.clientSessionId === this.clientSessionId }));
+    const total = running.reduce((s, x) => s + (x.weight ?? 1), 0) || 1;
+    return running.map(s => ({ id: s.id, task: s.task, classification: s.classification, started: s.start, share: Math.round(((s.weight ?? 1) / total) * 100) / 100, mine: s.clientSessionId === this.clientSessionId }));
   }
 
-  async startFocus(input: SessionInput & { minutes?: number }) {
+  async startSession(input: SessionInput & { minutes?: number }) {
     const prof = await this.profile();
     const today = await this.today();
     const day = await this.store.getOrCreateDay(today, prof.defaultMode);
@@ -495,8 +567,9 @@ export class AimService {
     return { ok: true, running_sessions: view, applies_to: 'whole session (retroactive)', speak: `Attention: ${view.map(v => `${Math.round(v.share * 100)}% ${v.task}`).join(', ')}.` };
   }
 
-  async heartbeat(note: string, sessionId?: string) {
+  async addNote(note: string, sessionId?: string) {
     const s = await this.runningForConnection(sessionId);
+    if (s.end) throw new AimError(`session [${s.id}] has ended; notes go on a running session. Use edit_session to change its summary.`);
     s.notes.push(`${localTime(new Date(), await this.tz())} ${note.trim()}`);
     if (s.unclassified) {
       const goal = await this.store.getGoal(); const day = await this.store.getDay(await this.today());
@@ -507,26 +580,71 @@ export class AimService {
     return { ok: true, session_id: s.id, classification: s.classification, speak: `Noted on [${s.id}].` };
   }
 
-  async endFocus(summary: string, outcome: 'done' | 'partial' | 'abandoned', sessionId?: string, attentionShare?: number) {
+  async stopSession(summary: string, outcome: 'done' | 'partial' | 'abandoned', sessionId?: string, attentionShare?: number) {
     const s = await this.runningForConnection(sessionId);
+    if (s.end) throw new AimError(`session [${s.id}] already ended at ${localTime(new Date(s.end), await this.tz())} on ${localDate(new Date(s.end), await this.tz())}. To change its times or summary, use edit_session.`);
     s.end = new Date().toISOString(); s.summary = summary.trim(); s.outcome = outcome;
     if (attentionShare !== undefined) s.attentionShareOverride = Math.min(1, Math.max(0, attentionShare));
     await this.store.saveSession(s);
     let extra = '';
-    if (outcome === 'done' && s.itemId) { const day = await this.store.getDay(await this.today()); const item = day?.plan.find(p => p.id === s.itemId); if (item && !item.done) { const r = await this.completeItem(s.itemId); extra = ' ' + r.speak; } }
-    else if (outcome === 'done' && s.stepId) { const r = await this.updateStep(s.stepId, { status: 'done' }); extra = ` Path step done: "${r.step?.title}".`; }
+    if (outcome === 'done' && s.itemId) { const day = await this.store.getDay(await this.today()); const item = day?.plan.find(p => p.id === s.itemId); if (item && !item.done) { const r = await this.editPlanItem(s.itemId, undefined, { done: true }); extra = ' ' + r.speak; } }
+    else if (outcome === 'done' && s.stepId) { const r = await this.editStep(s.stepId, { status: 'done' }); extra = ` Path step done: "${r.step?.title}".`; }
     const view = await this.sessionView(s);
     const block = await this.store.getRunningBlock();
     return { ok: true, session: view, block: this.blockView(block), speak: `Ended [${s.id}] "${s.task}": ${view.wall_min} min wall, ${view.attention_min} min attention, ${outcome}.${extra}${block ? ` Timer still running, ${this.blockView(block)?.minutes_left} min left.` : ''}` };
   }
 
-  async cancelFocus(sessionId?: string) {
+  async deleteSession(sessionId?: string) {
     const s = await this.runningForConnection(sessionId);
     await this.store.deleteSession(s.id);
-    return { ok: true, speak: `Session [${s.id}] "${s.task}" discarded.` };
+    const tz = await this.tz();
+    return { ok: true, deleted: s.id, speak: `Deleted [${s.id}] "${s.task}" (${localDate(new Date(s.start), tz)} ${localTime(new Date(s.start), tz)}–${s.end ? localTime(new Date(s.end), tz) : 'running'}). It no longer counts.` };
   }
 
-  async logSession(input: SessionInput & { minutes?: number; start?: string; end?: string; date?: string }) {
+  /** Fix a session after the fact: times, label, what it counts toward, summary, attention. */
+  async editSession(sessionId: string, patch: { task?: string; date?: string; start?: string; end?: string; area?: Area; projectId?: string; leverId?: string; stepId?: string; itemId?: string; summary?: string; outcome?: 'done' | 'partial' | 'abandoned'; attentionShare?: number; weight?: number; exclusive?: boolean }) {
+    const s = await this.store.getSession(sessionId);
+    if (!s) throw new AimError(`session "${sessionId}" not found; list_sessions shows the ids`);
+    const tz = await this.tz();
+    const changed: string[] = [];
+    if (patch.start !== undefined || patch.end !== undefined || patch.date !== undefined) {
+      const d = patch.date ?? localDate(new Date(s.start), tz); this.assertDate(d);
+      const oldStart = new Date(s.start);
+      const start = patch.start !== undefined ? parseLocal(d, patch.start, tz) : patch.date !== undefined ? parseLocal(d, localTime(oldStart, tz), tz) : oldStart;
+      // Moving only the date moves the whole session; changing only the start keeps the end.
+      const shift = patch.date !== undefined && patch.start === undefined ? start.getTime() - oldStart.getTime() : 0;
+      let end = patch.end !== undefined ? parseLocal(d, patch.end, tz) : s.end ? new Date(new Date(s.end).getTime() + shift) : undefined;
+      // An end earlier than the start means the session ran past midnight.
+      if (end && patch.end !== undefined && end <= start) end = new Date(end.getTime() + 86400000);
+      if (end && end <= start) throw new AimError('end must be after start');
+      if (end && end.getTime() > Date.now() + 60000) throw new AimError('end is in the future');
+      s.start = start.toISOString();
+      if (end) { s.end = end.toISOString(); if (s.autoClosed) { s.autoClosed = false; if (s.summary?.startsWith('Auto-closed')) s.summary = undefined; } }
+      changed.push('times');
+    }
+    if (patch.task?.trim()) { s.task = patch.task.trim(); changed.push('task'); }
+    if (patch.area) { s.area = patch.area; changed.push('area'); }
+    for (const k of ['projectId', 'leverId', 'stepId', 'itemId'] as const) if (patch[k] !== undefined) { s[k] = patch[k] || undefined; changed.push(k); }
+    if (patch.summary !== undefined) { s.summary = patch.summary.trim(); changed.push('summary'); }
+    if (patch.outcome) { s.outcome = patch.outcome; changed.push('outcome'); }
+    if (patch.attentionShare !== undefined) { s.attentionShareOverride = Math.min(1, Math.max(0, patch.attentionShare)); changed.push('attention'); }
+    if (patch.weight !== undefined) { s.weight = Math.max(0, patch.weight); changed.push('weight'); }
+    if (patch.exclusive !== undefined) { s.exclusive = patch.exclusive; changed.push('exclusive'); }
+    if (!changed.length) throw new AimError('nothing to change: pass at least one field');
+    // What the session counts toward follows from the label, so classify it again.
+    if (changed.some(c => ['task', 'area', 'projectId', 'leverId', 'stepId', 'itemId', 'times'].includes(c))) {
+      const goal = await this.store.getGoal();
+      const day = await this.store.getDay(localDate(new Date(s.start), tz));
+      const cls = classify({ area: s.area, projectId: s.projectId, leverId: s.leverId, stepId: s.stepId, itemId: s.itemId, task: s.task }, goal, day);
+      s.classification = cls.classification; s.unclassified = cls.unclassified;
+      s.projectId = cls.projectId ?? s.projectId; s.leverId = cls.leverId ?? s.leverId;
+    }
+    await this.store.saveSession(s);
+    const view = await this.sessionView(s);
+    return { ok: true, session: view, changed, speak: `Fixed [${s.id}] "${s.task}": ${localDate(new Date(s.start), tz)} ${localTime(new Date(s.start), tz)}–${s.end ? localTime(new Date(s.end), tz) : 'running'}, ${view.wall_min} min wall, ${view.attention_min} min attention → ${s.classification}. Changed: ${changed.join(', ')}.` };
+  }
+
+  async addSession(input: SessionInput & { minutes?: number; start?: string; end?: string; date?: string }) {
     const tz = await this.tz();
     const prof = await this.profile();
     let start: Date, end: Date;
@@ -538,14 +656,16 @@ export class AimService {
     else throw new AimError('give minutes, or start and end as HH:MM');
     const date = localDate(start, tz);
     const day = await this.store.getOrCreateDay(date, prof.defaultMode);
-    if (day.mode === 'off') return { ok: false, speak: `Mode is off for ${date}; nothing stored. Use set_mode to turn tracking on for that day.` };
+    if (day.mode === 'off') return { ok: false, speak: `Mode is off for ${date}; nothing stored. Use set_day_mode to turn tracking on for that day.` };
     const goal = await this.store.getGoal();
     const area = input.area ?? 'work';
     const cls = classify({ area, projectId: input.projectId, leverId: input.leverId, stepId: input.stepId, itemId: input.itemId, task: input.task }, goal, day);
     const v = decideVerdict(cls.classification, day, goal, true, (await this.windowMinutesFor(date)) > 0);
     const session: Session = {
       id: newId(), start: start.toISOString(), end: end.toISOString(), source: 'manual', clientSessionId: this.clientSessionId, weight: input.weight ?? 1, exclusive: input.exclusive, workplace: input.workplace ?? prof.defaultWorkplace,
-      area, projectId: cls.projectId ?? input.projectId, leverId: cls.leverId ?? input.leverId, stepId: input.stepId, itemId: input.itemId, task: input.task.trim(), notes: [], classification: cls.classification, unclassified: cls.unclassified, verdictAtStart: v.verdict, outcome: 'done',
+      area, projectId: cls.projectId ?? input.projectId, leverId: cls.leverId ?? input.leverId,
+      stepId: input.stepId ?? (cls.classification === 'main_step' ? day.plan.find(p => p.isMainStep)?.stepId : undefined), itemId: input.itemId ?? (cls.classification === 'main_step' ? day.plan.find(p => p.isMainStep)?.id : undefined),
+      task: input.task.trim(), notes: [], classification: cls.classification, unclassified: cls.unclassified, verdictAtStart: v.verdict, outcome: 'done',
     };
     await this.store.saveSession(session);
     const view = await this.sessionView(session);
@@ -567,7 +687,7 @@ export class AimService {
     const sessions = await this.store.getSessionsOverlapping(start.toISOString(), end.toISOString());
     const tz = await this.tz();
     const gaps = findGaps(sessions, start, end).map(g => ({ ...g, from: localTime(new Date(g.start), tz), to: localTime(new Date(g.end), tz) }));
-    return { date: d, gaps, speak: gaps.length ? `Untracked on ${d}: ${gaps.map(g => `${g.from}–${g.to} (${g.minutes} min)`).join(', ')}. What happened there? Log it with log_session or leave it.` : `No gaps of 20+ minutes on ${d}.` };
+    return { date: d, gaps, speak: gaps.length ? `Untracked on ${d}: ${gaps.map(g => `${g.from}–${g.to} (${g.minutes} min)`).join(', ')}. What happened there? Log it with add_session or leave it.` : `No gaps of 20+ minutes on ${d}.` };
   }
 
   // ---------- review ----------
@@ -606,7 +726,9 @@ export class AimService {
     const d = date ?? await this.today(); this.assertDate(d);
     const from = weekStart(d);
     const days: Awaited<ReturnType<AimService['daySummary']>>[] = [];
-    for (let i = 0; i < 7; i++) { const day = addDays(from, i); if (day > d) break; days.push(await this.daySummary(day)); }
+    const today = await this.today();
+    const through = addDays(from, 6) < today ? addDays(from, 6) : today;
+    for (let i = 0; i < 7; i++) { const day = addDays(from, i); if (day > through) break; days.push(await this.daySummary(day)); }
     const sum = (f: (x: typeof days[number]) => number) => days.reduce((s, x) => s + f(x), 0);
     const byArea: Record<string, number> = {};
     for (const x of days) for (const [k, v] of Object.entries(x.by_area)) byArea[k] = (byArea[k] ?? 0) + v.attention_min;
@@ -614,13 +736,15 @@ export class AimService {
     const hardAtt = sum(x => Math.round(x.goal_attention_min * x.hard_share_of_goal));
     const path = await this.getPath();
     const current = path.milestones.find(m => m.id === path.current_milestone_id);
+    const st = await this.streak();
     return {
-      week_of: from, through: d, days: days.map(x => ({ date: x.date, main_step_done: x.main_step.done, goal_attention_min: x.goal_attention_min, total_attention_min: x.total_attention_min, hard_lever_touched: x.hard_lever_touched, overrides: x.overrides })),
+      streak_days: st.streak_days,
+      week_of: from, through, days: days.map(x => ({ date: x.date, main_step_done: x.main_step.done, goal_attention_min: x.goal_attention_min, total_attention_min: x.total_attention_min, hard_lever_touched: x.hard_lever_touched, overrides: x.overrides })),
       main_step_days: days.filter(x => x.main_step.done).length, days_counted: days.length,
       goal_share: workAtt ? Math.round((goalAtt / workAtt) * 100) / 100 : 0, hard_share: goalAtt ? Math.round((hardAtt / goalAtt) * 100) / 100 : 0,
       by_area: Object.fromEntries(Object.entries(byArea).map(([k, v]) => [k, round(v)])), overrides: sum(x => x.overrides),
       milestone: current ? { title: current.title, due: current.due, steps_done: current.steps_done, steps_total: current.steps_total, pace: current.pace } : null,
-      speak: `Week of ${from}: main step done ${days.filter(x => x.main_step.done).length}/${days.length} days, goal share ${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work, hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%, ${sum(x => x.overrides)} overrides. ${current ? `Milestone "${current.title}": ${current.steps_done}/${current.steps_total} steps, ${current.pace}, due ${current.due}.` : ''}`,
+      speak: `Week of ${from}: main step done ${days.filter(x => x.main_step.done).length}/${days.length} days, goal share ${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work, hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%, ${sum(x => x.overrides)} overrides. Streak ${st.streak_days} day(s). ${current ? `Milestone "${current.title}": ${current.steps_done}/${current.steps_total} steps, ${current.pace}, due ${current.due}.` : ''}`,
     };
   }
 
@@ -669,7 +793,7 @@ export class AimService {
     return { from: f, to: t, count: sessions.length, sessions: sessions.map(s => ({ id: s.id, date: localDate(new Date(s.start), tz), from: localTime(new Date(s.start), tz), to: s.end ? localTime(new Date(s.end), tz) : 'running', task: s.task, area: s.area, classification: s.classification, lever_id: s.leverId, project_id: s.projectId, wall_min: s.end ? minutesBetween(new Date(s.start), new Date(s.end)) : null, summary: s.summary, outcome: s.outcome })), speak: `${sessions.length} sessions between ${f} and ${t}.` };
   }
 
-  async status() {
+  async getNow() {
     const s = await this.daySummary();
     const cur = await this.getCurrent();
     const st = await this.streak();
@@ -693,6 +817,9 @@ function describeWhen(c: { days: number[]; timesPerWeek?: number; start?: string
   const when = c.days.length ? c.days.map(d => DOW[d]).join('/') : `${c.timesPerWeek ?? 0}×/week`;
   return c.start ? `${when} at ${c.start}` : when;
 }
+
+/** A milestone still to work on: not finished and not retired. */
+const isOpen = (m: Milestone) => m.status !== 'done' && m.status !== 'retired';
 
 function slug(s: string) { return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || newId(); }
 

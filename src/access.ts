@@ -35,16 +35,15 @@ const write = auth('changes the signed-in person\'s data');
 
 /** Tools. Every tool acts as one person, so none is public; the entries say what each touches. */
 export const TOOLS: Record<string, Entry> = {
-  get_goal: read, validate_goal: auth('checks a draft against the rubric using the person\'s timezone'),
-  set_goal: write, update_baseline: write, set_levers: write, add_project: write,
-  set_pomodoro: write, set_workplace: write,
-  register_device: write, list_devices: read, forget_device: write,
-  get_commitments: read, set_commitments: write, capacity: read,
-  get_path: read, set_milestones: write, add_steps: write, update_step: write, next_steps: read,
-  get_planning_context: read, set_plan: write, get_plan: read, complete_item: write, set_mode: write,
-  start_focus: write, split_attention: write, heartbeat: write, end_focus: write, cancel_focus: write,
-  end_block: write, cancel_block: write, log_session: write, get_current: read, get_gaps: read,
-  status: read, day_summary: read, week_summary: read, leaks: read, streak: read, history: read,
+  get_goal: read, check_goal_draft: auth('checks a draft against the rubric using the person\'s timezone'),
+  set_goal: write, record_progress: write, set_levers: write, set_projects: write,
+  get_path: read, set_milestones: write, edit_milestone: write, add_steps: write, edit_step: write, delete_step: write, next_steps: read,
+  get_commitments: read, set_commitments: write, get_capacity: read,
+  get_planning_context: read, get_plan: read, set_plan: write, edit_plan_item: write, delete_plan_item: write, set_day_mode: write,
+  get_now: read, start_session: write, add_note: write, split_attention: write, stop_session: write, stop_timer: write,
+  add_session: write, edit_session: write, delete_session: write, list_sessions: read, find_gaps: read,
+  summarize_day: read, summarize_week: read, find_leaks: read,
+  get_settings: read, set_settings: write, add_device: write, list_devices: read, delete_device: write,
 };
 
 /** HTTP routes, "VERB /path". */

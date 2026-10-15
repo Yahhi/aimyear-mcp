@@ -22,45 +22,46 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | Tool | Access | Why |
 |---|---|---|
 | `get_goal` | auth | reads the signed-in person's private data |
-| `validate_goal` | auth | checks a draft against the rubric using the person's timezone |
+| `check_goal_draft` | auth | checks a draft against the rubric using the person's timezone |
 | `set_goal` | auth | changes the signed-in person's data |
-| `update_baseline` | auth | changes the signed-in person's data |
+| `record_progress` | auth | changes the signed-in person's data |
 | `set_levers` | auth | changes the signed-in person's data |
-| `add_project` | auth | changes the signed-in person's data |
-| `set_pomodoro` | auth | changes the signed-in person's data |
-| `set_workplace` | auth | changes the signed-in person's data |
-| `register_device` | auth | changes the signed-in person's data |
-| `list_devices` | auth | reads the signed-in person's private data |
-| `forget_device` | auth | changes the signed-in person's data |
-| `get_commitments` | auth | reads the signed-in person's private data |
-| `set_commitments` | auth | changes the signed-in person's data |
-| `capacity` | auth | reads the signed-in person's private data |
+| `set_projects` | auth | changes the signed-in person's data |
 | `get_path` | auth | reads the signed-in person's private data |
 | `set_milestones` | auth | changes the signed-in person's data |
+| `edit_milestone` | auth | changes the signed-in person's data |
 | `add_steps` | auth | changes the signed-in person's data |
-| `update_step` | auth | changes the signed-in person's data |
+| `edit_step` | auth | changes the signed-in person's data |
+| `delete_step` | auth | changes the signed-in person's data |
 | `next_steps` | auth | reads the signed-in person's private data |
+| `get_commitments` | auth | reads the signed-in person's private data |
+| `set_commitments` | auth | changes the signed-in person's data |
+| `get_capacity` | auth | reads the signed-in person's private data |
 | `get_planning_context` | auth | reads the signed-in person's private data |
-| `set_plan` | auth | changes the signed-in person's data |
 | `get_plan` | auth | reads the signed-in person's private data |
-| `complete_item` | auth | changes the signed-in person's data |
-| `set_mode` | auth | changes the signed-in person's data |
-| `start_focus` | auth | changes the signed-in person's data |
+| `set_plan` | auth | changes the signed-in person's data |
+| `edit_plan_item` | auth | changes the signed-in person's data |
+| `delete_plan_item` | auth | changes the signed-in person's data |
+| `set_day_mode` | auth | changes the signed-in person's data |
+| `get_now` | auth | reads the signed-in person's private data |
+| `start_session` | auth | changes the signed-in person's data |
+| `add_note` | auth | changes the signed-in person's data |
 | `split_attention` | auth | changes the signed-in person's data |
-| `heartbeat` | auth | changes the signed-in person's data |
-| `end_focus` | auth | changes the signed-in person's data |
-| `cancel_focus` | auth | changes the signed-in person's data |
-| `end_block` | auth | changes the signed-in person's data |
-| `cancel_block` | auth | changes the signed-in person's data |
-| `log_session` | auth | changes the signed-in person's data |
-| `get_current` | auth | reads the signed-in person's private data |
-| `get_gaps` | auth | reads the signed-in person's private data |
-| `status` | auth | reads the signed-in person's private data |
-| `day_summary` | auth | reads the signed-in person's private data |
-| `week_summary` | auth | reads the signed-in person's private data |
-| `leaks` | auth | reads the signed-in person's private data |
-| `streak` | auth | reads the signed-in person's private data |
-| `history` | auth | reads the signed-in person's private data |
+| `stop_session` | auth | changes the signed-in person's data |
+| `stop_timer` | auth | changes the signed-in person's data |
+| `add_session` | auth | changes the signed-in person's data |
+| `edit_session` | auth | changes the signed-in person's data |
+| `delete_session` | auth | changes the signed-in person's data |
+| `list_sessions` | auth | reads the signed-in person's private data |
+| `find_gaps` | auth | reads the signed-in person's private data |
+| `summarize_day` | auth | reads the signed-in person's private data |
+| `summarize_week` | auth | reads the signed-in person's private data |
+| `find_leaks` | auth | reads the signed-in person's private data |
+| `get_settings` | auth | reads the signed-in person's private data |
+| `set_settings` | auth | changes the signed-in person's data |
+| `add_device` | auth | changes the signed-in person's data |
+| `list_devices` | auth | reads the signed-in person's private data |
+| `delete_device` | auth | changes the signed-in person's data |
 
 ## HTTP routes
 

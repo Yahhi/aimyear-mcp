@@ -4,7 +4,7 @@
  * token → check every response survives serialisation, parses, and is not an error.
  *
  * In-process (default): a throwaway user in the REAL Firestore, so values come back with
- * production's types, not a kind fake's. Calls all 40 tools, writes included, then deletes
+ * production's types, not a kind fake's. Calls every tool, writes included, then deletes
  * everything it made.
  *
  * Deployed: CONFORMANCE_URL=https://.../mcp and a token in CONFORMANCE_TOKEN_FILE
@@ -66,55 +66,56 @@ try {
   if (remote) {
     const today = new Date().toISOString().slice(0, 10);
     for (const name of READ_ONLY) {
-      const args: Record<string, unknown> = name === 'validate_goal' ? { title: 'Run 10 km under 60 minutes' } : name === 'history' ? { from: today, to: today } : {};
+      const args: Record<string, unknown> = name === 'check_goal_draft' ? { title: 'Run 10 km under 60 minutes' } : name === 'list_sessions' ? { from: today, to: today } : {};
       await use(name, args);
     }
   } else {
     const today = new Date().toISOString().slice(0, 10);
     await use('get_goal');
-    await use('validate_goal', { title: 'Get better at marketing' });
+    await use('check_goal_draft', { title: 'Get better at marketing' });
     await use('set_goal', { title: '15 paying customers', metric: 'paying customers', baseline: 0, target: 15, deadline: addDays(today, 200), area: 'money' });
-    await use('update_baseline', { value: 1 });
+    await use('record_progress', { value: 1 });
     await use('set_levers', { levers: [{ name: 'outreach', kind: 'hard', keywords: ['email'] }, { name: 'building', kind: 'comfortable', keywords: ['feature'] }] });
-    await use('add_project', { name: 'Client work', area: 'work', keywords: ['client'] });
-    await use('set_pomodoro', { workMin: 45, breakMin: 5 });
-    await use('set_workplace', { workplace: 'desktop' });
-    await use('register_device', { token: 'conformance-device-token-0123456789', platform: 'web', label: 'conformance' });
+    await use('set_projects', { projects: [{ name: 'Client work', area: 'work', keywords: ['client'] }] });
+    await use('get_settings');
+    await use('set_settings', { workMin: 45, breakMin: 5, workplace: 'desktop' });
+    await use('add_device', { token: 'conformance-device-token-0123456789', platform: 'web', label: 'conformance' });
     await use('list_devices');
-    await use('forget_device', { token: 'conformance-device-token-0123456789' });
+    await use('delete_device', { token: 'conformance-device-token-0123456789' });
     await use('set_commitments', { commitments: [{ title: 'School run', area: 'relations', days: [1, 2, 3, 4, 5], start: '08:00', minutes: 40 }] });
     await use('get_commitments');
-    await use('capacity');
+    await use('get_capacity');
     await use('set_milestones', { milestones: [{ title: 'Offer ready', metric: 'paywalls live', target: 1, due: addDays(today, 30) }, { title: 'First buyers', metric: 'paying customers', target: 5, due: addDays(today, 120) }] });
     const path = await use('get_path');
     const milestoneId = path?.milestones?.[0]?.id;
-    await use('add_steps', { milestoneId, steps: [{ title: 'Email 10 people from the waitlist', leverId: 'outreach', estimateMin: 50 }] });
+    await use('edit_milestone', { milestoneId, target: 2 });
+    await use('add_steps', { milestoneId, steps: [{ title: 'Email 10 people from the waitlist', leverId: 'outreach', estimateMin: 50 }, { title: 'Post the offer on Reddit', leverId: 'outreach' }] });
     const next = await use('next_steps');
     const stepId = next?.steps?.[0]?.id;
-    await use('update_step', { stepId, estimateMin: 45 });
+    await use('edit_step', { stepId, estimateMin: 45 });
+    await use('delete_step', { stepId: next?.steps?.[1]?.id });
     await use('get_planning_context', { date: today });
     await use('set_plan', { date: today, items: [{ title: 'Email 10 people from the waitlist', area: 'work', stepId, isMainStep: true }, { title: 'Workout', area: 'health' }] });
     const plan = await use('get_plan', { date: today });
     const itemId = plan?.plan?.[0]?.id;
-    await use('set_mode', { mode: 'full' });
-    const started = await use('start_focus', { task: 'email the waitlist', itemId });
-    await use('get_current');
+    await use('set_day_mode', { mode: 'full' });
+    const started = await use('start_session', { task: 'email the waitlist', itemId });
+    await use('get_now');
     await use('split_attention', { shares: { [started?.session?.id ?? 'x']: 1 } });
-    await use('heartbeat', { note: 'halfway' });
-    await use('end_block');
-    await use('end_focus', { summary: 'sent 10 emails', outcome: 'partial' });
-    await use('start_focus', { task: 'email the waitlist again', itemId });
-    await use('cancel_focus');
-    await use('cancel_block', {}, { allowError: true }); // no block left is a fair refusal
-    await use('log_session', { task: 'Workout', area: 'health', minutes: 30 });
-    await use('complete_item', { itemId, date: today });
-    await use('get_gaps', { date: today });
-    await use('status');
-    await use('day_summary', { date: today });
-    await use('week_summary');
-    await use('leaks');
-    await use('streak');
-    await use('history', { from: today, to: today });
+    await use('add_note', { note: 'halfway' });
+    await use('stop_session', { summary: 'sent 10 emails', outcome: 'partial' });
+    await use('stop_timer', { summary: 'stopped' });
+    await use('start_session', { task: 'email the waitlist again', itemId });
+    await use('delete_session');
+    const added = await use('add_session', { task: 'Workout', area: 'health', minutes: 30 });
+    await use('edit_session', { session_id: added?.session?.id, summary: 'ran 5 km', outcome: 'done' });
+    await use('edit_plan_item', { itemId, date: today, done: true });
+    await use('delete_plan_item', { itemId: plan?.plan?.[1]?.id, date: today });
+    await use('find_gaps', { date: today });
+    await use('summarize_day', { date: today });
+    await use('summarize_week');
+    await use('find_leaks');
+    await use('list_sessions', { from: today, to: today });
   }
   const expected = remote ? READ_ONLY : tools.map(t => t.name);
   const missed = expected.filter(n => !called.has(n));
