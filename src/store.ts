@@ -2,7 +2,7 @@ import { initializeApp, cert, getApps, applicationDefault } from 'firebase-admin
 import { getFirestore, Firestore, FieldValue } from 'firebase-admin/firestore';
 import { readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import type { Goal, Path, Profile, Day, Block, Session, Mode, Workplace, Commitment, Device, Pending, Direction } from './types.js';
+import type { Goal, Path, Profile, Day, Block, Session, Mode, Workplace, Commitment, Device, Pending, Direction, Routine } from './types.js';
 
 let dbSingleton: Firestore | null = null;
 export function initFirestore(): Firestore {
@@ -134,7 +134,7 @@ export class Store {
   }
 
   private user() { return this.db.collection('users').doc(this.uid); }
-  private aimDoc(name: 'goal' | 'path' | 'profile' | 'commitments') { return this.user().collection('aim').doc(name); }
+  private aimDoc(name: 'goal' | 'path' | 'profile' | 'commitments' | 'routines') { return this.user().collection('aim').doc(name); }
   private days() { return this.user().collection('days'); }
   private sessions() { return this.user().collection('sessions'); }
   private blocks() { return this.user().collection('blocks'); }
@@ -168,6 +168,12 @@ export class Store {
     return snap.exists ? ((snap.data() as { items: Commitment[] }).items ?? []) : [];
   }
   async saveCommitments(items: Commitment[]) { await this.aimDoc('commitments').set({ items }); }
+
+  async getRoutines(): Promise<Routine[]> {
+    const snap = await this.aimDoc('routines').get();
+    return snap.exists ? ((snap.data() as { items: Routine[] }).items ?? []) : [];
+  }
+  async saveRoutines(items: Routine[]) { await this.aimDoc('routines').set({ items }); }
 
   // --- days ---
   async getDay(date: string): Promise<Day | null> {

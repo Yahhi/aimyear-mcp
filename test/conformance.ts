@@ -95,6 +95,8 @@ try {
     await use('edit_step', { stepId, estimateMin: 45 });
     await use('delete_step', { stepId: next?.steps?.[1]?.id });
     await use('get_planning_context', { date: today });
+    await use('set_routines', { routines: [{ title: 'Talk with one person on Reddit', area: 'money', leverId: 'outreach', days: [1, 2, 3, 4, 5, 6, 7] }] });
+    await use('get_routines');
     await use('set_plan', { date: today, items: [{ title: 'Email 10 people from the waitlist', area: 'work', stepId, isMainStep: true }, { title: 'Workout', area: 'health' }] });
     const plan = await use('get_plan', { date: today });
     const itemId = plan?.plan?.[0]?.id;

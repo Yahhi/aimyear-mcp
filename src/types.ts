@@ -59,11 +59,31 @@ export interface Commitment {
 export type Mode = 'full' | 'focus' | 'off';
 export type Workplace = 'desktop' | 'mobile';
 
+/**
+ * A small step that repeats on fixed weekdays, e.g. "talk with one person on Reddit".
+ * The server adds it to each matching day's plan, so every device and agent sees the
+ * same checks without anyone planning them again.
+ */
+export interface Routine {
+  id: string; title: string; area: Area; projectId?: string; leverId?: string;
+  /** ISO weekdays 1=Mon..7=Sun. */
+  days: number[];
+  estimateMin: number;
+  /** First day it applies (YYYY-MM-DD); earlier days are history and stay as they were. */
+  since: string;
+}
+
 export interface PlanItem {
   id: string; title: string; area: Area; projectId?: string; leverId?: string; stepId?: string;
+  /** Set when the item came from a routine. */
+  routineId?: string;
   isMainStep: boolean; estimateMin: number; done: boolean; doneAt?: string;
 }
-export interface Day { date: string; mode: Mode; plan: PlanItem[]; stopIssuedAt?: string; createdAt: string; updatedAt: string }
+export interface Day {
+  date: string; mode: Mode; plan: PlanItem[]; stopIssuedAt?: string; createdAt: string; updatedAt: string;
+  /** Routines removed from this day on purpose, so they are not added back. */
+  skippedRoutines?: string[];
+}
 
 export interface Profile {
   timezone: string;

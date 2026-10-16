@@ -40,6 +40,8 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `get_planning_context` | auth | reads the signed-in person's private data |
 | `get_plan` | auth | reads the signed-in person's private data |
 | `set_plan` | auth | changes the signed-in person's data |
+| `get_routines` | auth | reads the signed-in person's private data |
+| `set_routines` | auth | changes the signed-in person's data |
 | `edit_plan_item` | auth | changes the signed-in person's data |
 | `delete_plan_item` | auth | changes the signed-in person's data |
 | `set_day_mode` | auth | changes the signed-in person's data |

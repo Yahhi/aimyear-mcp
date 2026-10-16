@@ -16,10 +16,14 @@ for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change 
 | Aim | `get_goal`, `check_goal_draft`, `set_goal`, `record_progress`, `set_levers`, `set_projects` |
 | Path | `get_path`, `set_milestones`, `edit_milestone`, `add_steps`, `edit_step`, `delete_step`, `next_steps` |
 | Week | `get_commitments`, `set_commitments`, `get_capacity` |
-| Day | `get_planning_context`, `get_plan`, `set_plan`, `edit_plan_item`, `delete_plan_item`, `set_day_mode` |
+| Day | `get_planning_context`, `get_plan`, `set_plan`, `edit_plan_item`, `delete_plan_item`, `set_day_mode`, `get_routines`, `set_routines` |
 | Timer and sessions | `get_now`, `start_session`, `add_note`, `split_attention`, `stop_session`, `stop_timer`, `add_session`, `edit_session`, `delete_session`, `list_sessions`, `find_gaps` |
 | Reviews | `summarize_day`, `summarize_week`, `find_leaks` |
 | Settings and devices | `get_settings`, `set_settings`, `add_device`, `list_devices`, `delete_device` |
+
+0.4.0 adds routines: small steps that repeat on fixed weekdays ("talk with one person on
+Reddit"). The server adds them to each matching day's plan, so every device and agent sees
+the same checks; `get_now` lists the open ones and `summarize_week` counts them.
 
 0.3.0 renamed most tools (0.2.x names stop working) and added the editing tools:
 `edit_session`, `delete_session` for finished sessions, `edit_milestone`, `delete_step`,

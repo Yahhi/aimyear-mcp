@@ -51,6 +51,7 @@ on their AimYear account, on every device.
 | `/aim goal` | Set up or refine the aim (rubric below). |
 | `/aim path` | `get_path`. Change stages with `set_milestones` / `edit_milestone`, steps with `add_steps` / `edit_step` / `delete_step`. |
 | `/aim plan` (today / tomorrow) | `get_planning_context`, propose, confirm, `set_plan`. Change one item later with `edit_plan_item` / `delete_plan_item`. |
+| `/aim routines` | `get_routines` / `set_routines`: small daily checks ("talk with one person on Reddit") the server adds to every matching day. |
 | `/aim focus <task>` | `start_session`. Honor the verdict (below). |
 | `/aim pause` | `stop_timer` with a real `summary` and `outcome`. It stops the timer and closes every running session; there is no paused session. Resume = `start_session`. |
 | `/aim done [summary]` | `stop_session` with an outcome and a real summary (what changed, not the task name). The timer keeps running for other sessions. |
@@ -109,6 +110,12 @@ To retire a stage that no longer fits, `edit_milestone` with `status: retired`.
 4. Confirm with the user, then call `set_plan` with `isMainStep` and `stepId` on the
    first step.
 5. Read it back: "First: X. Then whatever you like."
+
+Routines from `set_routines` are already in the day's plan (`get_planning_context`
+lists them). `set_plan` keeps them even when you leave them out, so don't add them
+again. To skip one for a single day, `delete_plan_item`. When the user starts work,
+mention the routines `get_now` still lists as open; at the end of the day, ask which are
+done and tick them with `edit_plan_item`.
 
 ## The verdict from start_session — never skip it
 

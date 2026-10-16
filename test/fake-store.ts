@@ -1,5 +1,5 @@
 import { DEFAULT_PROFILE } from '../src/store.js';
-import type { Block, Commitment, Day, Device, Goal, Mode, Path, Pending, Profile, Session } from '../src/types.js';
+import type { Block, Commitment, Day, Device, Goal, Mode, Path, Pending, Profile, Routine, Session } from '../src/types.js';
 
 /** The Store's interface kept in memory, so service logic can be tested without Firestore. */
 export class FakeStore {
@@ -8,6 +8,7 @@ export class FakeStore {
   goal: Goal | null = null;
   path: Path = { milestones: [], steps: [] };
   commitments: Commitment[] = [];
+  routines: Routine[] = [];
   days = new Map<string, Day>();
   sessions = new Map<string, Session>();
   blocks = new Map<string, Block>();
@@ -22,6 +23,8 @@ export class FakeStore {
   async savePath(p: Path) { this.path = structuredClone(p); }
   async getCommitments() { return structuredClone(this.commitments); }
   async saveCommitments(c: Commitment[]) { this.commitments = structuredClone(c); }
+  async getRoutines() { return structuredClone(this.routines); }
+  async saveRoutines(r: Routine[]) { this.routines = structuredClone(r); }
   async getDay(date: string) { const d = this.days.get(date); return d ? structuredClone(d) : null; }
   async getOrCreateDay(date: string, mode: Mode) {
     if (!this.days.has(date)) this.days.set(date, { date, mode, plan: [], createdAt: '', updatedAt: '' });

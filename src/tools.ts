@@ -12,10 +12,10 @@ type Handler = (args: any) => Promise<unknown>;
 
 /** What each tool does to the person's data. Clients show these before they approve a call. */
 type Kind = 'read' | 'write' | 'idempotent' | 'destructive';
-const READ = ['get_goal', 'check_goal_draft', 'get_path', 'next_steps', 'get_commitments', 'get_capacity', 'get_planning_context', 'get_plan',
+const READ = ['get_goal', 'check_goal_draft', 'get_path', 'next_steps', 'get_commitments', 'get_capacity', 'get_planning_context', 'get_plan', 'get_routines',
   'get_now', 'list_sessions', 'find_gaps', 'summarize_day', 'summarize_week', 'find_leaks', 'get_settings', 'list_devices'];
 // Replaces a whole list or removes something: an earlier value is gone after the call.
-const DESTRUCTIVE = ['set_goal', 'set_levers', 'set_projects', 'set_milestones', 'set_commitments', 'set_plan',
+const DESTRUCTIVE = ['set_goal', 'set_levers', 'set_projects', 'set_milestones', 'set_commitments', 'set_routines', 'set_plan',
   'delete_step', 'delete_plan_item', 'delete_session', 'delete_device', 'stop_timer'];
 // Calling twice with the same arguments leaves the same result.
 const IDEMPOTENT = ['record_progress', 'edit_milestone', 'edit_step', 'edit_plan_item', 'set_day_mode', 'split_attention', 'edit_session', 'set_settings', 'add_device'];
@@ -41,7 +41,7 @@ export const INSTRUCTIONS = `AimYear keeps one person's big aim for the year, th
 
 Names: get_ reads one thing, list_ reads several, find_ looks for problems, set_ replaces a whole list, add_ / edit_ / delete_ change one entry. A session is one piece of work; the timer runs while sessions run.
 
-Typical flow: get_goal (or check_goal_draft → set_goal), get_path, get_planning_context → set_plan with one main step, start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine.`;
+Typical flow: get_goal (or check_goal_draft → set_goal), get_path, get_planning_context → set_plan with one main step (routines from set_routines are added to each day's plan by the server), start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine.`;
 
 function wrap(name: string, fn: Handler, signedIn: boolean) {
   return async (args: any) => {
@@ -120,7 +120,11 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null) {
   t('edit_plan_item', 'Change one plan item: mark it done or not done, rename it, change its estimate, area or links, or make it the main step. done=true also completes its linked path step.', {
     itemId: z.string(), date: date.optional(), done: z.boolean().optional(), title: z.string().optional(), area: area.optional(), projectId: z.string().optional(), leverId: z.string().optional(), stepId: z.string().optional(), isMainStep: z.boolean().optional(), estimateMin: z.number().int().optional(),
   }, a => svc.editPlanItem(a.itemId, a.date, a));
-  t('delete_plan_item', 'Remove one item from a day\'s plan.', { itemId: z.string(), date: date.optional() }, a => svc.deletePlanItem(a.itemId, a.date));
+  t('get_routines', 'Routines: small steps that repeat on fixed weekdays, e.g. "talk with one person on Reddit". The server adds them to each matching day\'s plan, so every device and agent sees the same checks.', {}, () => svc.getRoutines());
+  t('set_routines', 'Replace the list of routines: small steps that repeat on fixed weekdays. From today on, each one appears as a plan item on its days; tick it with edit_plan_item, skip it for one day with delete_plan_item. set_plan keeps them. days are ISO weekdays 1=Mon..7=Sun, default every day. Pass existing ids to keep them.', {
+    routines: z.array(z.object({ id: z.string().optional(), title: z.string(), area, projectId: z.string().optional(), leverId: z.string().optional(), days: z.array(z.number().int().min(1).max(7)).optional(), estimateMin: z.number().int().optional().describe('default 15') })),
+  }, a => svc.setRoutines(a.routines));
+  t('delete_plan_item', 'Remove one item from a day\'s plan. A routine item is skipped for that day only.', { itemId: z.string(), date: date.optional() }, a => svc.deletePlanItem(a.itemId, a.date));
   t('set_day_mode', 'Tracking for a day: full (everything recorded, the default) or off (timer and reminders only, nothing stored, no plan required).', { date: date.optional(), mode: z.enum(['full', 'off']) }, a => svc.setDayMode(a.date, a.mode));
 
   // ---- timer & sessions ----

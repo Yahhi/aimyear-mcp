@@ -3,7 +3,7 @@ import { addDays, daysBetween, endOfDay, isValidDate, localDate, localTime, minu
 import { computeAttention, findGaps } from './domain/attention.js';
 import { checkGoal, checkStepTitle, type GoalDraft } from './domain/goal.js';
 import { classify, decideVerdict, isGoalWork } from './domain/classify.js';
-import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, PlanItem, Profile, Project, Session, Step, Workplace } from './types.js';
+import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, PlanItem, Profile, Project, Routine, Session, Step, Workplace } from './types.js';
 
 export class AimError extends Error {}
 
@@ -335,11 +335,81 @@ export class AimService {
     return items.filter(c => c.days.includes(iso));
   }
 
+  // ---------- routines ----------
+  async getRoutines() {
+    const items = await this.store.getRoutines();
+    return { routines: items, speak: items.length ? `Routines: ${items.map(r => `${r.title} (${describeWhen(r)})`).join('; ')}. They are added to each matching day's plan; tick them with edit_plan_item.` : 'No routines yet. Add small daily checks with set_routines.' };
+  }
+
+  async setRoutines(items: { id?: string; title: string; area: Area; projectId?: string; leverId?: string; days?: number[]; estimateMin?: number }[]) {
+    const problems: string[] = [];
+    const today = await this.today();
+    const prev = new Map((await this.store.getRoutines()).map(r => [r.id, r]));
+    const out: Routine[] = items.map(it => {
+      if (!it.title?.trim()) problems.push('a routine has no title');
+      const days = it.days === undefined ? [1, 2, 3, 4, 5, 6, 7] : [...new Set(it.days.filter(d => d >= 1 && d <= 7))].sort();
+      if (!days.length) problems.push(`"${it.title}" needs at least one weekday (1=Mon..7=Sun)`);
+      const id = it.id ?? slug(it.title ?? '');
+      return { id, title: (it.title ?? '').trim(), area: it.area, projectId: it.projectId, leverId: it.leverId, days, estimateMin: it.estimateMin ?? 15, since: prev.get(id)?.since ?? today };
+    });
+    if (new Set(out.map(r => r.id)).size !== out.length) problems.push('two routines share an id or title');
+    if (problems.length) return { ok: false, problems, speak: problems.join('; ') };
+    await this.store.saveRoutines(out);
+    const day = await this.dayWithRoutines(today);
+    const todays = (day?.plan ?? []).filter(p => p.routineId);
+    return { ok: true, routines: out, today: todays, speak: `${out.length} routine(s) saved: ${out.map(r => `${r.title} (${describeWhen(r)})`).join('; ') || 'none'}. ${todays.length ? `Today: ${todays.map(p => `${p.done ? '✓' : '·'} ${p.title}`).join('; ')}.` : 'None fall on today.'}` };
+  }
+
+  /** Routines due on a date: its weekday matches and the routine already existed. */
+  private routinesOn(routines: Routine[], date: string) {
+    const [y, m, d] = date.split('-').map(Number);
+    const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+    const iso = dow === 0 ? 7 : dow;
+    return routines.filter(r => r.days.includes(iso) && r.since <= date);
+  }
+
+  /**
+   * Brings a day's routine items in line with the routines: adds the missing ones and
+   * drops unticked items whose routine is gone. Past days are history and stay as they
+   * were, and a day with tracking off gets nothing. Returns whether the plan changed.
+   */
+  private async applyRoutines(day: Day): Promise<boolean> {
+    if (day.mode === 'off' || day.date < await this.today()) return false;
+    const due = this.routinesOn(await this.store.getRoutines(), day.date);
+    const dueIds = new Set(due.map(r => r.id));
+    const skipped = new Set(day.skippedRoutines ?? []);
+    const before = day.plan.length;
+    day.plan = day.plan.filter(p => !p.routineId || p.done || dueIds.has(p.routineId));
+    let changed = day.plan.length !== before;
+    for (const r of due) {
+      if (skipped.has(r.id) || day.plan.some(p => p.routineId === r.id)) continue;
+      day.plan.push({ id: newId(), title: r.title, area: r.area, projectId: r.projectId, leverId: r.leverId, routineId: r.id, isMainStep: false, estimateMin: r.estimateMin, done: false });
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** The day with its routines applied: today and later days are created on first read. */
+  private async dayWithRoutines(date: string): Promise<Day | null> {
+    if (date < await this.today()) return this.store.getDay(date);
+    const routines = await this.store.getRoutines();
+    const existing = await this.store.getDay(date);
+    if (!existing && !this.routinesOn(routines, date).length) return null;
+    const day = existing ?? await this.store.getOrCreateDay(date, (await this.profile()).defaultMode);
+    if (await this.applyRoutines(day)) await this.store.saveDay(day);
+    return day;
+  }
+
+  private routineStatus(day: Day | null) {
+    const items = (day?.plan ?? []).filter(p => p.routineId);
+    return { done: items.filter(p => p.done).length, total: items.length, open: items.filter(p => !p.done).map(p => ({ item_id: p.id, title: p.title })) };
+  }
+
   // ---------- planning ----------
   async getPlan(date?: string) {
     const d = date ?? await this.today(); this.assertDate(d);
-    const day = await this.store.getDay(d);
-    return { date: d, mode: day?.mode ?? (await this.profile()).defaultMode, plan: day?.plan ?? [], speak: day?.plan.length ? `Plan for ${d}: ${day.plan.map(p => `${p.done ? '✓' : '·'} ${p.isMainStep ? '★ ' : ''}${p.title}`).join('; ')}` : `No plan for ${d} yet.` };
+    const day = await this.dayWithRoutines(d);
+    return { date: d, mode: day?.mode ?? (await this.profile()).defaultMode, plan: day?.plan ?? [], speak: day?.plan.length ? `Plan for ${d}: ${day.plan.map(p => `${p.done ? '✓' : '·'} ${p.isMainStep ? '★ ' : ''}${p.title}${p.routineId ? ' (routine)' : ''}`).join('; ')}` : `No plan for ${d} yet.` };
   }
 
   async setPlan(date: string | undefined, items: { title: string; area: Area; projectId?: string; leverId?: string; stepId?: string; isMainStep?: boolean; estimateMin?: number }[]) {
@@ -358,7 +428,11 @@ export class AimService {
     const path = await this.store.getPath();
     for (const it of items) if (it.stepId && !path.steps.some(s => s.id === it.stepId)) return { ok: false, problems: [`stepId "${it.stepId}" not found in path`], speak: `Step ${it.stepId} is not in the path.` };
     const prev = new Map(day.plan.map(p => [p.stepId ?? p.title, p]));
-    day.plan = items.map(it => { const old = prev.get(it.stepId ?? it.title); return { id: old?.id ?? newId(), title: it.title.trim(), area: it.area, projectId: it.projectId, leverId: it.leverId ?? (it.stepId ? path.steps.find(s => s.id === it.stepId)?.leverId : undefined), stepId: it.stepId, isMainStep: !!it.isMainStep, estimateMin: it.estimateMin ?? 50, done: old?.done ?? false, doneAt: old?.doneAt }; });
+    const routineTitles = new Map(this.routinesOn(await this.store.getRoutines(), d).map(r => [r.title.toLowerCase(), r.id]));
+    day.plan = items.map(it => { const old = prev.get(it.stepId ?? it.title); return { id: old?.id ?? newId(), title: it.title.trim(), area: it.area, projectId: it.projectId, leverId: it.leverId ?? (it.stepId ? path.steps.find(s => s.id === it.stepId)?.leverId : undefined), stepId: it.stepId, routineId: old?.routineId ?? (it.isMainStep ? undefined : routineTitles.get(it.title.trim().toLowerCase())), isMainStep: !!it.isMainStep, estimateMin: it.estimateMin ?? 50, done: old?.done ?? false, doneAt: old?.doneAt }; });
+    // Routine items stay when the agent leaves them out: skipping one for a day is delete_plan_item.
+    for (const old of prev.values()) if (old.routineId && !day.plan.some(p => p.routineId === old.routineId)) day.plan.push(old);
+    await this.applyRoutines(day);
     await this.store.saveDay(day);
     const main = day.plan.find(p => p.isMainStep);
     return { ok: true, date: d, plan: day.plan, warnings, speak: `Plan for ${d} saved (${day.plan.length} items). Main step: ${main ? `"${main.title}" [${main.id}]` : 'none (mode off)'}. ${warnings.join(' ')}` };
@@ -366,7 +440,7 @@ export class AimService {
 
   private async planItem(itemId: string, date?: string) {
     const d = date ?? await this.today(); this.assertDate(d);
-    const day = await this.store.getDay(d);
+    const day = await this.dayWithRoutines(d);
     const item = day?.plan.find(p => p.id === itemId);
     if (!day || !item) throw new AimError(`plan item "${itemId}" not found on ${d}`);
     return { day, item };
@@ -402,8 +476,9 @@ export class AimService {
   async deletePlanItem(itemId: string, date?: string) {
     const { day, item } = await this.planItem(itemId, date);
     day.plan = day.plan.filter(p => p.id !== itemId);
+    if (item.routineId) day.skippedRoutines = [...new Set([...(day.skippedRoutines ?? []), item.routineId])];
     await this.store.saveDay(day);
-    return { ok: true, plan: day.plan, speak: `Removed "${item.title}" from the plan for ${day.date}.${item.isMainStep ? ' That was the main step: set another one with edit_plan_item (isMainStep) or set_plan.' : ''}` };
+    return { ok: true, plan: day.plan, speak: `Removed "${item.title}" from the plan for ${day.date}.${item.routineId ? ' It is a routine: skipped for this day only.' : ''}${item.isMainStep ? ' That was the main step: set another one with edit_plan_item (isMainStep) or set_plan.' : ''}` };
   }
 
   async getPlanningContext(date?: string) {
@@ -416,7 +491,8 @@ export class AimService {
     const undone = (yDay?.plan ?? []).filter(p => !p.done);
     const week = await this.weekSummary(addDays(d, -1));
     const daysSinceHard = await this.daysSinceHardLever(d);
-    const existing = await this.store.getDay(d);
+    const existing = await this.dayWithRoutines(d);
+    const routines = this.routinesOn(await this.store.getRoutines(), d);
     const commitments = await this.commitmentsFor(d);
     const cap = await this.capacity();
     const committedToday = commitments.reduce((sum, c) => sum + c.minutes, 0);
@@ -426,8 +502,8 @@ export class AimService {
       milestone: next.milestone ?? null, next_steps: next.steps,
       yesterday: { date: yesterday, main_step_done: ySum.main_step.done, goal_attention_min: ySum.goal_attention_min, by_area: ySum.by_area, undone_items: undone },
       week: { main_step_days: week.main_step_days, goal_share: week.goal_share, hard_share: week.hard_share, by_area: week.by_area },
-      days_since_hard_lever: daysSinceHard, existing_plan: existing?.plan ?? [],
-      speak: `Planning ${d}. ${windowMinutes === 0 ? 'NO focus window that day: do not plan goal work, and do not ask for a main step. ' : `Focus window: ${Math.round(windowMinutes / 6) / 10} h. `}Fixed that day: ${commitments.length ? commitments.map(c => `${c.title} ${c.minutes}min${c.usableForWork ? ' (usable)' : ''}`).join(', ') : 'nothing recorded'} = ${Math.round(committedToday / 6) / 10} h. ${goal.speak} Days since a hard lever: ${daysSinceHard ?? 'never'}. Yesterday main step ${ySum.main_step.done ? 'done' : 'NOT done'}${undone.length ? `, ${undone.length} items left undone` : ''}. Pick the main step from next_steps (hard first), then fit paid work, family, workout.`,
+      days_since_hard_lever: daysSinceHard, existing_plan: existing?.plan ?? [], routines,
+      speak: `Planning ${d}. ${windowMinutes === 0 ? 'NO focus window that day: do not plan goal work, and do not ask for a main step. ' : `Focus window: ${Math.round(windowMinutes / 6) / 10} h. `}Fixed that day: ${commitments.length ? commitments.map(c => `${c.title} ${c.minutes}min${c.usableForWork ? ' (usable)' : ''}`).join(', ') : 'nothing recorded'} = ${Math.round(committedToday / 6) / 10} h. ${goal.speak} Days since a hard lever: ${daysSinceHard ?? 'never'}. Yesterday main step ${ySum.main_step.done ? 'done' : 'NOT done'}${undone.length ? `, ${undone.length} items left undone` : ''}. Pick the main step from next_steps (hard first), then fit paid work, family, workout.${routines.length ? ` Routines that day (already in the plan, set_plan keeps them): ${routines.map(r => r.title).join('; ')}.` : ''}`,
     };
   }
 
@@ -710,15 +786,16 @@ export class AimService {
     const workAtt = byArea['work']?.attention_min ?? 0;
     const totalAtt = Object.values(byArea).reduce((s, v) => s + v.attention_min, 0);
     const main = day?.plan.find(p => p.isMainStep);
+    const routines = this.routineStatus(day);
     const hardTouched = sessions.some(s => (s.classification === 'goal_hard' || (s.classification === 'main_step' && goal?.levers.find(l => l.id === s.leverId)?.kind === 'hard')) && (att.attention.get(s.id) ?? 0) >= 10);
     const overrides = sessions.filter(s => s.override).length;
     const list = sessions.sort((a, b) => a.start.localeCompare(b.start)).map(s => ({ id: s.id, from: localTime(new Date(s.start), tz), to: s.end ? localTime(new Date(s.end), tz) : 'running', task: s.task, area: s.area, classification: s.classification, lever_id: s.leverId, wall_min: round(att.wall.get(s.id) ?? 0), attention_min: round(s.attentionShareOverride !== undefined ? (att.wall.get(s.id) ?? 0) * s.attentionShareOverride : att.attention.get(s.id) ?? 0), override: s.override ?? false, outcome: s.outcome, summary: s.summary }));
     const gaps = findGaps(sessions, start, end).map(g => ({ from: localTime(new Date(g.start), tz), to: localTime(new Date(g.end), tz), minutes: g.minutes }));
     return {
-      date: d, mode: day?.mode ?? 'full', main_step: { title: main?.title ?? null, done: !!main?.done, planned: !!main },
+      date: d, mode: day?.mode ?? 'full', main_step: { title: main?.title ?? null, done: !!main?.done, planned: !!main }, routines,
       total_attention_min: round(totalAtt), goal_attention_min: round(goalAtt), goal_share_of_work: workAtt ? Math.round((goalAtt / workAtt) * 100) / 100 : 0, hard_share_of_goal: goalAtt ? Math.round((hardAtt / goalAtt) * 100) / 100 : 0,
       hard_lever_touched: hardTouched, overrides, by_area: r(byArea), by_classification: r(byClass), by_lever: r(byLever), overlaps: att.overlaps.map(o => ({ from: localTime(new Date(o.start), tz), to: localTime(new Date(o.end), tz), count: o.count })), gaps, sessions: list,
-      speak: `${d}: ${round(totalAtt)} min tracked, ${round(goalAtt)} min on the goal (${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work), hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%. Main step ${main ? (main.done ? 'done' : `NOT done ("${main.title}")`) : 'not planned'}. Hard lever ${hardTouched ? 'touched' : 'not touched'}. ${overrides ? `${overrides} override(s). ` : ''}${gaps.length ? `${gaps.length} gap(s).` : ''}`,
+      speak: `${d}: ${round(totalAtt)} min tracked, ${round(goalAtt)} min on the goal (${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work), hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%. Main step ${main ? (main.done ? 'done' : `NOT done ("${main.title}")`) : 'not planned'}. Hard lever ${hardTouched ? 'touched' : 'not touched'}.${routines.total ? ` Routines ${routines.done}/${routines.total}.` : ''} ${overrides ? `${overrides} override(s). ` : ''}${gaps.length ? `${gaps.length} gap(s).` : ''}`,
     };
   }
 
@@ -737,14 +814,16 @@ export class AimService {
     const path = await this.getPath();
     const current = path.milestones.find(m => m.id === path.current_milestone_id);
     const st = await this.streak();
+    const routineDays = days.filter(x => x.routines.total > 0);
     return {
       streak_days: st.streak_days,
-      week_of: from, through, days: days.map(x => ({ date: x.date, main_step_done: x.main_step.done, goal_attention_min: x.goal_attention_min, total_attention_min: x.total_attention_min, hard_lever_touched: x.hard_lever_touched, overrides: x.overrides })),
+      week_of: from, through, days: days.map(x => ({ date: x.date, main_step_done: x.main_step.done, routines_done: x.routines.done, routines_total: x.routines.total, goal_attention_min: x.goal_attention_min, total_attention_min: x.total_attention_min, hard_lever_touched: x.hard_lever_touched, overrides: x.overrides })),
       main_step_days: days.filter(x => x.main_step.done).length, days_counted: days.length,
+      routines: { days_with_routines: routineDays.length, days_all_done: routineDays.filter(x => x.routines.done === x.routines.total).length, done: sum(x => x.routines.done), total: sum(x => x.routines.total) },
       goal_share: workAtt ? Math.round((goalAtt / workAtt) * 100) / 100 : 0, hard_share: goalAtt ? Math.round((hardAtt / goalAtt) * 100) / 100 : 0,
       by_area: Object.fromEntries(Object.entries(byArea).map(([k, v]) => [k, round(v)])), overrides: sum(x => x.overrides),
       milestone: current ? { title: current.title, due: current.due, steps_done: current.steps_done, steps_total: current.steps_total, pace: current.pace } : null,
-      speak: `Week of ${from}: main step done ${days.filter(x => x.main_step.done).length}/${days.length} days, goal share ${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work, hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%, ${sum(x => x.overrides)} overrides. Streak ${st.streak_days} day(s). ${current ? `Milestone "${current.title}": ${current.steps_done}/${current.steps_total} steps, ${current.pace}, due ${current.due}.` : ''}`,
+      speak: `Week of ${from}: main step done ${days.filter(x => x.main_step.done).length}/${days.length} days, goal share ${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work, hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%, ${sum(x => x.overrides)} overrides.${routineDays.length ? ` Routines all done on ${routineDays.filter(x => x.routines.done === x.routines.total).length}/${routineDays.length} days (${sum(x => x.routines.done)}/${sum(x => x.routines.total)} checks).` : ''} Streak ${st.streak_days} day(s). ${current ? `Milestone "${current.title}": ${current.steps_done}/${current.steps_total} steps, ${current.pace}, due ${current.due}.` : ''}`,
     };
   }
 
@@ -794,6 +873,7 @@ export class AimService {
   }
 
   async getNow() {
+    await this.dayWithRoutines(await this.today());
     const s = await this.daySummary();
     const cur = await this.getCurrent();
     const st = await this.streak();
@@ -808,7 +888,8 @@ export class AimService {
     } else if (windowMin === 0 && s.mode !== 'off') {
       nudge = 'No focus window today. Nothing is expected of you toward the goal.';
     }
-    return { ...cur, focus_window_minutes_today: windowMin, today: { date: s.date, main_step: s.main_step, total_attention_min: s.total_attention_min, goal_attention_min: s.goal_attention_min, goal_share_of_work: s.goal_share_of_work, hard_share_of_goal: s.hard_share_of_goal, by_area: s.by_area, overrides: s.overrides }, streak_days: st.streak_days, nudge, speak: `${s.speak} ${cur.speak} Streak ${st.streak_days}. ${nudge}` };
+    const open = s.routines.open.length ? ` Routines still open today: ${s.routines.open.map(o => `"${o.title}"`).join(', ')}.` : s.routines.total ? ' Routines all done today.' : '';
+    return { ...cur, focus_window_minutes_today: windowMin, today: { date: s.date, main_step: s.main_step, routines: s.routines, total_attention_min: s.total_attention_min, goal_attention_min: s.goal_attention_min, goal_share_of_work: s.goal_share_of_work, hard_share_of_goal: s.hard_share_of_goal, by_area: s.by_area, overrides: s.overrides }, streak_days: st.streak_days, nudge, speak: `${s.speak} ${cur.speak} Streak ${st.streak_days}. ${nudge}${open}` };
   }
 }
 

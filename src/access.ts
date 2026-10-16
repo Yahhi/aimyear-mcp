@@ -39,7 +39,7 @@ export const TOOLS: Record<string, Entry> = {
   set_goal: write, record_progress: write, set_levers: write, set_projects: write,
   get_path: read, set_milestones: write, edit_milestone: write, add_steps: write, edit_step: write, delete_step: write, next_steps: read,
   get_commitments: read, set_commitments: write, get_capacity: read,
-  get_planning_context: read, get_plan: read, set_plan: write, edit_plan_item: write, delete_plan_item: write, set_day_mode: write,
+  get_planning_context: read, get_plan: read, set_plan: write, get_routines: read, set_routines: write, edit_plan_item: write, delete_plan_item: write, set_day_mode: write,
   get_now: read, start_session: write, add_note: write, split_attention: write, stop_session: write, stop_timer: write,
   add_session: write, edit_session: write, delete_session: write, list_sessions: read, find_gaps: read,
   summarize_day: read, summarize_week: read, find_leaks: read,
