@@ -116,3 +116,18 @@ test('summarize_week counts the checks', async () => {
   assert.equal(w.routines.days_all_done, 0);
   assert.match(w.speak, /Routines all done on 0\/1 days \(1\/3 checks\)/);
 });
+
+test('a check already planned by hand becomes the routine item instead of a duplicate', async () => {
+  const { store, svc } = setup();
+  const today = await svc.today();
+  await svc.setPlan(undefined, [{ title: 'Daily check', area: 'money', isMainStep: true }, { title: 'Talk with one person on WIP', area: 'money' }]);
+  const wip = store.days.get(today)!.plan.find(p => p.title.includes('WIP'))!;
+  await svc.editPlanItem(wip.id, undefined, { done: true });
+  await svc.setRoutines(CHECKS);
+  const plan = store.days.get(today)!.plan;
+  assert.equal(plan.filter(p => p.title.includes('WIP')).length, 1);
+  const linked = plan.find(p => p.title.includes('WIP'))!;
+  assert.ok(linked.routineId);
+  assert.equal(linked.done, true);
+  assert.equal(plan.length, 4);
+});

@@ -383,6 +383,9 @@ export class AimService {
     let changed = day.plan.length !== before;
     for (const r of due) {
       if (skipped.has(r.id) || day.plan.some(p => p.routineId === r.id)) continue;
+      // An item already planned under the same name becomes the routine's item, keeping its tick.
+      const same = day.plan.find(p => !p.routineId && !p.isMainStep && p.title.trim().toLowerCase() === r.title.toLowerCase());
+      if (same) { same.routineId = r.id; changed = true; continue; }
       day.plan.push({ id: newId(), title: r.title, area: r.area, projectId: r.projectId, leverId: r.leverId, routineId: r.id, isMainStep: false, estimateMin: r.estimateMin, done: false });
       changed = true;
     }
