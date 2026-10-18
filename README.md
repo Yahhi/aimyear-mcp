@@ -14,7 +14,7 @@ moves the goal: selling, talking to users, publishing.
 - **Pro** ($49/year or $8/month, with the coming phone app): notifications, reviews
   written by AimYear, AimYear's own AI coach and Google Calendar sync.
 
-Website: [aimyear.com](https://aimyear.com) · Privacy: [aimyear.com/privacy.html](https://aimyear.com/privacy.html)
+Website: [aimyear.com](https://aimyear.com) · Setup guide: [aimyear.com/connect.html](https://aimyear.com/connect.html) · Privacy: [aimyear.com/privacy.html](https://aimyear.com/privacy.html)
 · Contact: privacy@aimyear.com
 
 ## Connect (about a minute)
