@@ -1,12 +1,51 @@
-# aimyear-mcp
+# AimYear MCP server
 
-The AimYear MCP server: one big aim for the year, a path of stages and concrete steps,
-one main step a day, focus sessions with attention shares across terminals and apps, and
-a stop rule for comfortable work that pretends to be progress.
+**An accountability partner inside the AI agent you already use.** Connect AimYear to
+Claude, Claude Code, ChatGPT or any MCP client, and your agent keeps one big aim for your
+year, plans one main step a day toward it, runs the timer while you work and writes down
+what actually got done. When you start comfortable work while the main step is still open,
+it asks you to do the step first.
 
-41 tools, 2 prompts. Every tool acts as one signed-in person; see [docs/ACCESS.md](docs/ACCESS.md).
+Built for indie developers and makers who build all day but keep postponing the work that
+moves the goal: selling, talking to users, publishing.
 
-## Tools
+- **Free:** sign-in on any number of devices, aims, plans, routines, time tracking and
+  reviews through your own agent. No AI runs on AimYear's side, so there are no AI costs.
+- **Pro** ($49/year or $8/month, with the coming phone app): notifications, reviews
+  written by AimYear, AimYear's own AI coach and Google Calendar sync.
+
+Website: [aimyear.com](https://aimyear.com) · Privacy: [aimyear.com/privacy.html](https://aimyear.com/privacy.html)
+· Contact: privacy@aimyear.com
+
+## Connect (about a minute)
+
+Endpoint: **`https://mcp.aimyear.com/mcp`** (Streamable HTTP, OAuth sign-in with Google,
+Apple or email). Nothing to install.
+
+- **Claude (web, desktop, mobile):** Settings → Connectors → Add custom connector → paste the
+  endpoint → Connect, then sign in.
+- **Claude Code:** `claude mcp add --transport http aimyear https://mcp.aimyear.com/mcp`, then
+  `/mcp` → aimyear → Authenticate.
+- **ChatGPT** (paid plans, developer mode): Settings → Apps & Connectors → Advanced settings →
+  turn on Developer mode. Then Apps & Connectors → Create: name `AimYear`, URL the endpoint
+  above, authentication OAuth → Create, then sign in.
+- **Other MCP clients:** add the endpoint as a remote (HTTP) server with OAuth.
+
+Then say: *"Help me set my aim for this year"*. The agent checks that the aim is countable,
+builds the path of stages, and from then on: *"plan my day"*, *"start the timer"*, *"how was
+my week?"*.
+
+The skill that teaches an agent the method is in [skills/aim/SKILL.md](skills/aim/SKILL.md).
+
+## What happens to your data
+
+The server stores what your agent saves through the tools (aim, path, plans, sessions and
+their summaries) in Google Cloud Firestore. Your conversation stays with your agent's
+provider; AimYear only receives the tool calls. Logs keep the tool name, success and timing,
+never argument values. To delete your account and data, email privacy@aimyear.com. Details:
+[privacy policy](https://aimyear.com/privacy.html).
+
+## Tools (43)
 
 Names say what a tool does: `get_` reads one thing, `list_` reads several, `find_` looks
 for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change one entry.
@@ -30,25 +69,20 @@ the same checks; `get_now` lists the open ones and `summarize_week` counts them.
 `edit_plan_item`, `delete_plan_item`, `set_projects`, and `get_settings` / `set_settings`
 with the timezone.
 
-## Connect
+## Protocol details
 
-Endpoint: **`https://mcp.aimyear.com/mcp`** (Streamable HTTP, stateless, POST only).
-
-- **Claude (web, desktop, mobile):** Settings → Connectors → Add custom connector → paste the
-  endpoint. Claude registers itself and opens the AimYear sign-in page.
-- **Claude Code:** `claude mcp add --transport http aimyear https://mcp.aimyear.com/mcp`, then
-  `/mcp` → aimyear → Authenticate.
-- **ChatGPT:** developer mode → add the endpoint as a connector.
-
-Sign-in is OAuth 2.1 with PKCE and dynamic client registration. The sign-in page uses the
-same Firebase project as the AimYear app (Google, Apple, email), so the app and every
-connected AI share one account and one history. Guest (anonymous) accounts cannot be connected.
+Stateless Streamable HTTP, POST only. Sign-in is OAuth 2.1 with PKCE and dynamic client
+registration. The sign-in page uses the same Firebase project as the AimYear app, so the app
+and every connected AI share one account and one history. Guest (anonymous) accounts cannot
+be connected. Every tool acts as one signed-in person; see [docs/ACCESS.md](docs/ACCESS.md).
 
 Without a token, the server describes itself (`initialize`, `tools/list`, `prompts/list`,
 `ping`); everything else answers `401` with a `WWW-Authenticate` header pointing at
 `/.well-known/oauth-protected-resource/mcp`.
 
-The skill that teaches an agent the method is in [skills/aim/SKILL.md](skills/aim/SKILL.md).
+---
+
+The rest of this file is for working on the server itself. You don't need it to use AimYear.
 
 ## How it is built
 
