@@ -41,7 +41,7 @@ export const INSTRUCTIONS = `AimYear keeps one person's big aim for the year, th
 
 Names: get_ reads one thing, list_ reads several, find_ looks for problems, set_ replaces a whole list, add_ / edit_ / delete_ change one entry. A session is one piece of work; the timer runs while sessions run.
 
-Typical flow: get_goal (or check_goal_draft → set_goal), get_path, get_planning_context → set_plan with one main step (routines from set_routines are added to each day's plan by the server), start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine.`;
+Typical flow: get_goal (or check_goal_draft → set_goal), get_path, get_planning_context → set_plan with one main step (routines from set_routines are added to each day's plan by the server), start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Hard first: the first step of each stage and each day's main step should be on a hard lever (the work the user puts off: outreach, applications, selling, publishing). Preparation (CV, profile, research, polishing) comes only when it blocks the hard step, and only as much as it blocks; do the hard step with what exists now and improve after the replies. set_plan, add_steps and set_levers warn when this is broken: fix it before moving on. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine.`;
 
 function wrap(name: string, fn: Handler, signedIn: boolean) {
   return async (args: any) => {
@@ -97,7 +97,7 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null) {
   t('edit_milestone', 'Change one milestone: title, metric, target, due date or status. status=retired drops it without finishing; done or retired moves the path to the next milestone. Its steps are kept.', {
     milestoneId: z.string(), title: z.string().optional(), metric: z.string().optional(), target: z.number().optional(), due: date.optional(), status: z.enum(['todo', 'doing', 'done', 'retired']).optional(),
   }, a => svc.editMilestone(a.milestoneId, a));
-  t('add_steps', 'Add concrete steps to a milestone. A step is an action that fits a few work blocks ("email 10 people from the waitlist"), not "do marketing". Abstract steps are rejected.', {
+  t('add_steps', 'Add concrete steps to a milestone. A step is an action that fits a few work blocks ("email 10 people from the waitlist"), not "do marketing". Abstract steps are rejected. Put a hard-lever step first; preparation only where it blocks it (warns otherwise).', {
     milestoneId: z.string(), steps: z.array(z.object({ title: z.string(), leverId: z.string().optional(), estimateMin: z.number().int().optional() })),
   }, a => svc.addSteps(a.milestoneId, a.steps));
   t('edit_step', 'Change one step: title, status (todo/doing/done), order, lever, estimate.', { stepId: z.string(), title: z.string().optional(), status: z.enum(['todo', 'doing', 'done']).optional(), order: z.number().int().optional(), leverId: z.string().optional(), estimateMin: z.number().int().optional() }, a => svc.editStep(a.stepId, a));
@@ -114,7 +114,7 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null) {
   // ---- day ----
   t('get_planning_context', 'Everything needed to plan a day: goal and pace, next_steps, yesterday\'s summary and undone items, week balance, days since a hard lever. Defaults to tomorrow. The agent plans; then call set_plan.', { date: date.optional() }, a => svc.getPlanningContext(a.date));
   t('get_plan', 'The plan for a day (default today).', { date: date.optional() }, a => svc.getPlan(a.date));
-  t('set_plan', 'Replace the plan for a day. Exactly one item must have isMainStep=true (the step toward the goal), ideally linked by stepId from next_steps. Other items: paid work, family, workout, etc. with their area. Items that stay keep their done state.', {
+  t('set_plan', 'Replace the plan for a day. Exactly one item must have isMainStep=true (the step toward the goal), ideally linked by stepId from next_steps and on a hard lever. Warns when no item is on a hard lever. Other items: paid work, family, workout, etc. with their area. Items that stay keep their done state.', {
     date: date.optional(), items: z.array(z.object({ title: z.string(), area, projectId: z.string().optional(), leverId: z.string().optional(), stepId: z.string().optional(), isMainStep: z.boolean().optional(), estimateMin: z.number().int().optional() })),
   }, a => svc.setPlan(a.date, a.items));
   t('edit_plan_item', 'Change one plan item: mark it done or not done, rename it, change its estimate, area or links, or make it the main step. done=true also completes its linked path step.', {

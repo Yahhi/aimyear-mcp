@@ -88,6 +88,12 @@ empty, then call `set_goal` with the `area`.
    milestone only. Steps must be concrete and fit a few focus blocks ("email 10 people
    from the waitlist", not "do marketing"). The server rejects vague ones; rephrase and
    retry.
+   **Hard first.** The first step of each stage is on a hard lever: send, ask, publish,
+   apply with what exists now. Preparation (a CV, a profile, research, polishing) goes in
+   only when it blocks that step, and only as much as it blocks. For "a better-paid job"
+   that means "apply to 2 roles with the current CV" before "rewrite the CV"; the replies
+   show what to fix. `add_steps` and `set_levers` warn when a stage starts with
+   preparation: reorder before moving on.
 6. **Levers.** Name the recurring kinds of work toward the aim (`set_levers`), with
    keywords and repos so sessions classify themselves. Ask "Which of these do you put
    off?" — those are `hard`; at least one must be hard. Then `set_projects` for paid work,
@@ -103,7 +109,8 @@ To retire a stage that no longer fits, `edit_milestone` with `status: retired`.
 1. `get_planning_context` (it defaults to tomorrow).
 2. Propose the **first step**: one step from `next_steps` of the current milestone, small
    enough to finish in one or two blocks, with a checkable "done". If no hard lever was
-   touched in more than 2 days, pick one. If the step is bigger than a day, split it with
+   touched in more than 2 days, pick one. The main step should be on a hard lever;
+   `set_plan` warns when nothing in the day is, and then you swap one item. If the step is bigger than a day, split it with
    `add_steps` and plan only today's piece.
 3. Add the rest of the day as items with their areas: paid work, family, workout,
    errands, and fixed-time commitments.

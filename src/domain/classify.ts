@@ -10,6 +10,13 @@ function matches(text: string, hints: { repos: string[]; keywords: string[] }, n
   return [...(hints?.keywords ?? []), ...(hints?.repos ?? [])].some(k => k && t.includes(norm(k)));
 }
 
+/** The lever a piece of work belongs to: its own lever id, its step's lever id, then the levers' match hints on the title. */
+export function leverFor(work: { title: string; leverId?: string; stepId?: string }, goal: Goal | null, steps: { id: string; leverId?: string }[] = []): Lever | undefined {
+  if (!goal) return undefined;
+  const id = work.leverId ?? (work.stepId ? steps.find(s => s.id === work.stepId)?.leverId : undefined);
+  return (id ? goal.levers.find(l => l.id === id) : undefined) ?? goal.levers.find(l => matches(work.title, l.match, l.name));
+}
+
 /** Decide what a session is, from explicit ids first, then from match hints on the task text. */
 export function classify(input: ClassInput, goal: Goal | null, day: Day | null): ClassResult {
   const mainItem = day?.plan.find(p => p.isMainStep);

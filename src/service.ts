@@ -2,7 +2,7 @@ import { Store, newId } from './store.js';
 import { addDays, daysBetween, endOfDay, isValidDate, localDate, localTime, minutesBetween, startOfDay, weekStart } from './dates.js';
 import { computeAttention, findGaps } from './domain/attention.js';
 import { checkGoal, checkStepTitle, type GoalDraft } from './domain/goal.js';
-import { classify, decideVerdict, isGoalWork } from './domain/classify.js';
+import { classify, decideVerdict, isGoalWork, leverFor } from './domain/classify.js';
 import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, PlanItem, Profile, Project, Routine, Session, Step, Workplace } from './types.js';
 
 export class AimError extends Error {}
@@ -91,7 +91,10 @@ export class AimService {
     if (!goal.levers.some(l => l.kind === 'hard')) return { ok: false, speak: 'At least one lever must be marked hard: the kind of work you admit to avoiding. Which one is it?' };
     goal.updatedAt = new Date().toISOString();
     await this.store.saveGoal(goal);
-    return { ok: true, levers: goal.levers, speak: `Levers saved: ${goal.levers.map(l => `${l.name} [${l.kind}]`).join(', ')}.` };
+    const path = await this.store.getPath();
+    const current = path.milestones.find(m => m.status !== 'done' && m.status !== 'retired');
+    const warning = current ? this.prepFirstWarning(goal, path, current.id) : null;
+    return { ok: true, levers: goal.levers, warnings: warning ? [warning] : [], speak: `Levers saved: ${goal.levers.map(l => `${l.name} [${l.kind}]`).join(', ')}.${warning ? ` ${warning}` : ''}` };
   }
 
   async setProjects(projects: { id?: string; name: string; area: Area; keywords?: string[]; repos?: string[] }[]) {
@@ -143,6 +146,20 @@ export class AimService {
     return { ok: true, milestones: path.milestones, speak: `${path.milestones.length} milestones saved. Now add concrete steps for the first one ("${path.milestones[0].title}") with add_steps.` };
   }
 
+  /** Prep-first check: a stage whose first open step is not on a hard lever. Returns a warning or null. */
+  private prepFirstWarning(goal: Goal | null, path: Path, milestoneId: string): string | null {
+    const hard = goal?.levers.filter(l => l.kind === 'hard') ?? [];
+    if (!hard.length) return null;
+    const open = path.steps.filter(s => s.milestoneId === milestoneId && s.status !== 'done').sort((a, b) => a.order - b.order);
+    if (!open.length) return null;
+    const firstHard = open.findIndex(s => leverFor(s, goal)?.kind === 'hard');
+    if (firstHard === 0) return null;
+    const m = path.milestones.find(x => x.id === milestoneId);
+    return firstHard < 0
+      ? `No step of "${m?.title}" is on a hard lever (${hard.map(l => l.name).join(', ')}). Add one, and put it first: preparation comes only when it blocks the hard step.`
+      : `"${m?.title}" starts with ${firstHard} preparation step(s) before the first hard-lever step ("${open[firstHard].title}"). Move a hard step first (edit_step order) and keep only the preparation that blocks it: send with what exists now, improve after the replies.`;
+  }
+
   async addSteps(milestoneId: string, steps: { title: string; leverId?: string; estimateMin?: number }[]) {
     const path = await this.store.getPath();
     const m = path.milestones.find(x => x.id === milestoneId);
@@ -153,7 +170,8 @@ export class AimService {
     const added: Step[] = steps.map((s, i) => ({ id: newId(), milestoneId, title: s.title.trim(), leverId: s.leverId, estimateMin: s.estimateMin ?? 50, order: order0 + i, status: 'todo' }));
     path.steps.push(...added);
     await this.store.savePath(path);
-    return { ok: true, steps: added, speak: `${added.length} steps added to "${m.title}".` };
+    const warning = this.prepFirstWarning(await this.store.getGoal(), path, milestoneId);
+    return { ok: true, steps: added, warnings: warning ? [warning] : [], speak: `${added.length} steps added to "${m.title}".${warning ? ` ${warning}` : ''}` };
   }
 
   async editMilestone(milestoneId: string, patch: { title?: string; metric?: string; target?: number; due?: string; status?: MilestoneStatus }) {
@@ -430,6 +448,13 @@ export class AimService {
     }
     const path = await this.store.getPath();
     for (const it of items) if (it.stepId && !path.steps.some(s => s.id === it.stepId)) return { ok: false, problems: [`stepId "${it.stepId}" not found in path`], speak: `Step ${it.stepId} is not in the path.` };
+    if (day.mode !== 'off' && windowMin > 0) {
+      const goal = await this.store.getGoal();
+      const hard = goal?.levers.filter(l => l.kind === 'hard') ?? [];
+      if (hard.length && !items.some(it => leverFor(it, goal, path.steps)?.kind === 'hard')) {
+        warnings.push(`Nothing in this plan is on a hard lever (${hard.map(l => l.name).join(', ')}): the day is preparation only. Make the main step a short hard-lever step, done with what exists now (next_steps lists them first), or swap one item for one, then call set_plan again.`);
+      }
+    }
     const prev = new Map(day.plan.map(p => [p.stepId ?? p.title, p]));
     const routineTitles = new Map(this.routinesOn(await this.store.getRoutines(), d).map(r => [r.title.toLowerCase(), r.id]));
     day.plan = items.map(it => { const old = prev.get(it.stepId ?? it.title); return { id: old?.id ?? newId(), title: it.title.trim(), area: it.area, projectId: it.projectId, leverId: it.leverId ?? (it.stepId ? path.steps.find(s => s.id === it.stepId)?.leverId : undefined), stepId: it.stepId, routineId: old?.routineId ?? (it.isMainStep ? undefined : routineTitles.get(it.title.trim().toLowerCase())), isMainStep: !!it.isMainStep, estimateMin: it.estimateMin ?? 50, done: old?.done ?? false, doneAt: old?.doneAt }; });
