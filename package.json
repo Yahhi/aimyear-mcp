@@ -1,6 +1,6 @@
 {
   "name": "aimyear-mcp",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "AimYear MCP server: one measurable yearly goal, a path of steps, focus sessions with attention shares, and a stop rule for comfortable work.",
   "type": "module",
   "bin": {

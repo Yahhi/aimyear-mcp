@@ -1,25 +1,34 @@
 import { daysBetween, isValidDate, localDate } from '../dates.js';
 
-export interface GoalDraft { title?: string; why?: string; metric?: string; baseline?: number; target?: number; deadline?: string }
+export interface GoalDraft { kind?: 'count' | 'done'; title?: string; why?: string; metric?: string; baseline?: number; target?: number; deadline?: string }
 export interface GoalCheck { problems: string[]; next_question: string | null; pace_per_week: number | null; weeks_left: number | null }
 
 const ABSTRACT = /\b(better|improve|improving|more|less|grow|growing|learn|learning|be good|get good|become|master)\b/i;
 
-/** The rubric: countable, baseline, near, achievable. Same checks in the skill, the app and the server. */
+/**
+ * The rubric: countable (or a one-time result you can check yes or no), baseline, near,
+ * achievable. Same checks in the skill, the app and the server.
+ */
 export function checkGoal(d: GoalDraft, tz: string, now = new Date()): GoalCheck {
   const problems: string[] = [];
   const questions: string[] = [];
   const today = localDate(now, tz);
 
+  const done = d.kind === 'done';
   if (!d.title || d.title.trim().length < 5) { problems.push('title missing'); questions.push('What is the goal, in one sentence?'); }
-  else if (ABSTRACT.test(d.title) && !/\d/.test(d.title)) {
+  else if (done && ABSTRACT.test(d.title)) {
+    problems.push(`title is abstract ("${d.title.match(ABSTRACT)?.[0]}"): a done-or-not goal must be checkable`);
+    questions.push('What will exist or have happened by the deadline, so you can answer yes or no? (launched in the stores, moved to a new city, passed the B2 exam, ran the marathon)');
+  }
+  else if (!done && ABSTRACT.test(d.title) && !/\d/.test(d.title)) {
     problems.push(`title is abstract ("${d.title.match(ABSTRACT)?.[0]}" without a number)`);
     questions.push('What number will be different in a year? Give the unit and where you will read it (revenue, paying customers, published posts, subscribers, kg, km).');
   }
-  if (!d.metric || d.metric.trim().length < 2) { problems.push('metric missing'); questions.push('What is the one number you will measure, and in what unit?'); }
-  if (d.baseline === undefined || d.baseline === null || Number.isNaN(d.baseline)) { problems.push('baseline missing'); questions.push('Where is that number today?'); }
-  if (d.target === undefined || d.target === null || Number.isNaN(d.target)) { problems.push('target missing'); questions.push('What should the number be at the deadline?'); }
-  if (d.baseline !== undefined && d.target !== undefined && d.baseline === d.target) { problems.push('target equals baseline'); questions.push('The target must differ from today. What is the target?'); }
+  if (done) { /* a done-or-not goal has no metric, baseline or target: 0 → 1 */ }
+  else if (!d.metric || d.metric.trim().length < 2) { problems.push('metric missing'); questions.push('What is the one number you will measure, and in what unit?'); }
+  if (!done && (d.baseline === undefined || d.baseline === null || Number.isNaN(d.baseline))) { problems.push('baseline missing'); questions.push('Where is that number today?'); }
+  if (!done && (d.target === undefined || d.target === null || Number.isNaN(d.target))) { problems.push('target missing'); questions.push('What should the number be at the deadline?'); }
+  if (!done && d.baseline !== undefined && d.target !== undefined && d.baseline === d.target) { problems.push('target equals baseline'); questions.push('The target must differ from today. What is the target?'); }
 
   let weeksLeft: number | null = null;
   if (!d.deadline) { problems.push('deadline missing'); questions.push('By which date? Within 12 months.'); }
@@ -32,7 +41,7 @@ export function checkGoal(d: GoalDraft, tz: string, now = new Date()): GoalCheck
   }
 
   let pace: number | null = null;
-  if (weeksLeft && d.baseline !== undefined && d.target !== undefined && d.target !== d.baseline) pace = (d.target - d.baseline) / weeksLeft;
+  if (!done && weeksLeft && d.baseline !== undefined && d.target !== undefined && d.target !== d.baseline) pace = (d.target - d.baseline) / weeksLeft;
 
   return { problems, next_question: questions[0] ?? null, pace_per_week: pace === null ? null : Math.round(pace * 100) / 100, weeks_left: weeksLeft };
 }

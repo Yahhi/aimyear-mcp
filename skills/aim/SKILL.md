@@ -19,9 +19,12 @@ on their AimYear account, on every device.
 
 ## The method in five rules
 
-1. **One big aim, countable.** A number in a unit, a value today, a target and a deadline
-   within 12 months. It can be in any of the five areas: health, relations, work, money,
-   happiness. "Be healthier", "save money" and "find someone" are wishes, not aims.
+1. **One big aim, countable or checkable.** Usually a number in a unit, a value today, a
+   target and a deadline within 12 months. When no honest number exists, a one-time
+   result you can check yes or no ("launch v2 in the stores", "move to Spain", "pass the
+   B2 exam") with a deadline: `kind: done`, and its stages are its progress. It can be in
+   any of the five areas: health, relations, work, money, happiness. "Be healthier",
+   "save money" and "find someone" are wishes, not aims.
 2. **Keep the aim big; make every step achievable.** Don't shrink the aim to make it
    feel safe. Order the path so each stage is possible *now*.
 3. **If the aim can't happen yet, work on what makes it possible.** Example: the aim is
@@ -51,7 +54,7 @@ on their AimYear account, on every device.
 | `/aim goal` | Set up or refine the aim (rubric below). |
 | `/aim path` | `get_path`. Change stages with `set_milestones` / `edit_milestone`, steps with `add_steps` / `edit_step` / `delete_step`. |
 | `/aim plan` (today / tomorrow) | `get_planning_context`, propose, confirm, `set_plan`. Change one item later with `edit_plan_item` / `delete_plan_item`. |
-| `/aim routines` | `get_routines` / `set_routines`: small daily checks ("talk with one person on Reddit") the server adds to every matching day. |
+| `/aim routines` | `get_routines` / `set_routines`: small daily checks ("talk with one person on Reddit") the server adds to every matching day, or weekly counts (`perWeek`: "talk to 5 people a week"). |
 | `/aim focus <task>` | `start_session`. Honor the verdict (below). |
 | `/aim pause` | `stop_timer` with a real `summary` and `outcome`. It stops the timer and closes every running session; there is no paused session. Resume = `start_session`. |
 | `/aim done [summary]` | `stop_session` with an outcome and a real summary (what changed, not the task name). The timer keeps running for other sessions. |
@@ -75,15 +78,21 @@ empty, then call `set_goal` with the `area`.
    it?" Turn a wish into a number together. Examples: "fitter" becomes "run 10 km under
    60 minutes"; "a relationship" becomes "meet 3 new people a week, of whom some reach a
    third meeting".
+   Only when there is no honest number but a clear result ("launch the app", "move to
+   Spain"), save it with `kind: done`: no metric, baseline or target, and skip steps 2
+   and 4. A feeling ("be calmer") is neither: ask what will be different until it
+   becomes a number or a result.
 2. **Baseline.** "Where is that number today?"
 3. **Deadline.** Within 12 months. A longer dream is fine; store its 12-month slice.
 4. **Pace.** Read `pace_per_week` back: "That is N per week. Realistic with your hours?"
    If not, lower the target or free up time. Never save an aim the user doesn't believe in.
 5. **Path, by readiness.** Ask: "Could this number move this week if you worked hard?"
    - If yes, the milestones are steps up the number.
-   - If no, the first milestones are the preconditions (rule 3: what, who, channel),
-     each with its own metric.
+   - If no, the first milestones are the preconditions (rule 3: what, who, channel).
 
+   Each milestone is **countable** (a metric and a target: "talk to 20 people") or
+   **measured by its steps** (`kind: steps`, no metric: "implement the onboarding flow").
+   Make it countable whenever a number is honest; a build stage is usually steps.
    `set_milestones` with 2–6 ordered milestones (3–5 is usual). Then `add_steps` for the *current*
    milestone only. Steps must be concrete and fit a few focus blocks ("email 10 people
    from the waitlist", not "do marketing"). The server rejects vague ones; rephrase and
@@ -99,8 +108,11 @@ empty, then call `set_goal` with the `area`.
    off?" — those are `hard`; at least one must be hard. Then `set_projects` for paid work,
    other projects and life routines, so they are never mistaken for aim work.
 
-When real progress happens ("I have 4 customers now"), call `record_progress`. When it
-reports the target reached, say so and offer to set the next aim with `set_goal`.
+When real progress happens ("I have 4 customers now"), call `record_progress`. For a
+countable milestone, pass its `milestoneId` ("I've talked to 7 people"); reaching its
+target closes it. A steps milestone moves only by its steps. For a done-or-not aim,
+`record_progress` 1 marks it done. When the aim's target is reached, say so and offer to
+set the next aim with `set_goal`.
 
 To retire a stage that no longer fits, `edit_milestone` with `status: retired`.
 
@@ -123,6 +135,11 @@ lists them). `set_plan` keeps them even when you leave them out, so don't add th
 again. To skip one for a single day, `delete_plan_item`. When the user starts work,
 mention the routines `get_now` still lists as open; at the end of the day, ask which are
 done and tick them with `edit_plan_item`.
+
+A weekly routine (`perWeek: 5`) is a count, not a daily duty: tick it with
+`edit_plan_item` and `count` ("talked to 2 people today" is count 2). It stays in the plan
+until the week's count is reached, then leaves until Monday; `get_now` and
+`summarize_week` show "2/5 this week". Link it to the aim with its lever.
 
 ## The verdict from start_session — never skip it
 

@@ -38,23 +38,32 @@ export class AimService {
   // ---------- goal ----------
   async checkGoalDraft(draft: GoalDraft) {
     const check = checkGoal(draft, await this.tz());
-    return { ...check, ok: check.problems.length === 0, speak: check.problems.length === 0 ? `Goal passes the rubric. Pace needed: ${check.pace_per_week} per week for ${check.weeks_left} weeks.` : check.next_question ?? check.problems.join('; ') };
+    const passes = draft.kind === 'done' ? `Goal passes the rubric: done or not by the deadline, ${check.weeks_left} weeks left. Its progress will be the share of stages done.` : `Goal passes the rubric. Pace needed: ${check.pace_per_week} per week for ${check.weeks_left} weeks.`;
+    return { ...check, ok: check.problems.length === 0, speak: check.problems.length === 0 ? passes : check.next_question ?? check.problems.join('; ') };
   }
 
-  async setGoal(draft: Required<Pick<GoalDraft, 'title' | 'metric' | 'baseline' | 'target' | 'deadline'>> & { why?: string; area?: Area }) {
+  async setGoal(draft: Pick<GoalDraft, 'kind' | 'metric' | 'baseline' | 'target'> & { title: string; deadline: string; why?: string; area?: Area }) {
     const check = checkGoal(draft, await this.tz());
     if (check.problems.length) return { ok: false, ...check, speak: `Not saved: ${check.problems.join('; ')}. ${check.next_question ?? ''}` };
     const existing = await this.store.getGoal();
     const now = new Date().toISOString();
+    const kind = draft.kind ?? 'count';
+    // A done-or-not goal is 0 → 1: record_progress 1 marks it done.
+    const metric = kind === 'done' ? 'done' : draft.metric!.trim();
+    const baseline = kind === 'done' ? 0 : draft.baseline!;
+    const target = kind === 'done' ? 1 : draft.target!;
+    // Values of a different kind or metric mean nothing for this goal: start its history again.
+    const sameNumber = existing && (existing.kind ?? 'count') === kind && existing.metric === metric;
     const goal: Goal = {
-      title: draft.title.trim(), area: draft.area ?? existing?.area ?? 'money', why: (draft.why ?? existing?.why ?? '').trim(), metric: draft.metric.trim(),
-      baseline: draft.baseline, target: draft.target, deadline: draft.deadline,
-      baselineHistory: existing?.baselineHistory?.length ? existing.baselineHistory : [{ value: draft.baseline, date: await this.today() }],
+      title: draft.title.trim(), kind, area: draft.area ?? existing?.area ?? 'money', why: (draft.why ?? existing?.why ?? '').trim(), metric,
+      baseline, target, deadline: draft.deadline,
+      baselineHistory: sameNumber && existing.baselineHistory?.length ? existing.baselineHistory : [{ value: baseline, date: await this.today() }],
       levers: existing?.levers ?? [], projects: existing?.projects ?? [],
       createdAt: existing?.createdAt ?? now, updatedAt: now,
     };
     await this.store.saveGoal(goal);
-    return { ok: true, goal, pace_per_week: check.pace_per_week, weeks_left: check.weeks_left, speak: `Goal saved [${goal.area}]: "${goal.title}" — ${goal.metric} from ${goal.baseline} to ${goal.target} by ${goal.deadline}. That is ${check.pace_per_week} per week.${goal.levers.length ? '' : ' Next: milestones (set_milestones), steps for the first one (add_steps), then levers (set_levers).'}` };
+    const what = kind === 'done' ? `done or not by ${goal.deadline}; progress is the share of stages done.` : `${goal.metric} from ${goal.baseline} to ${goal.target} by ${goal.deadline}. That is ${check.pace_per_week} per week.`;
+    return { ok: true, goal, pace_per_week: check.pace_per_week, weeks_left: check.weeks_left, speak: `Goal saved [${goal.area}]: "${goal.title}" — ${what}${goal.levers.length ? '' : ' Next: milestones (set_milestones), steps for the first one (add_steps), then levers (set_levers).'}` };
   }
 
   async getGoal() {
@@ -63,18 +72,30 @@ export class AimService {
     const today = await this.today();
     const daysLeft = daysBetween(today, goal.deadline);
     const latest = goal.baselineHistory[goal.baselineHistory.length - 1];
-    const progress = goal.target === goal.baseline ? 0 : (latest.value - goal.baseline) / (goal.target - goal.baseline);
+    const kind = goal.kind ?? 'count';
+    let progress = goal.target === goal.baseline ? 0 : (latest.value - goal.baseline) / (goal.target - goal.baseline);
+    let state: string;
+    let stages: { done: number; total: number } | undefined;
+    if (kind === 'done') {
+      // Done or not: until it is done, progress is the share of stages finished.
+      const ms = (await this.store.getPath()).milestones.filter(m => m.status !== 'retired');
+      stages = { done: ms.filter(m => m.status === 'done').length, total: ms.length };
+      const reached = latest.value >= 1;
+      progress = reached ? 1 : stages.total ? stages.done / stages.total : 0;
+      state = reached ? 'done' : `not done yet, ${stages.done} of ${stages.total} stages done`;
+    } else state = `${goal.metric}: ${latest.value} of ${goal.target} (started at ${goal.baseline})`;
     const totalDays = daysBetween(goal.createdAt.slice(0, 10), goal.deadline) || 1;
     const elapsed = Math.min(1, Math.max(0, daysBetween(goal.createdAt.slice(0, 10), today) / totalDays));
     return {
-      goal, current_value: latest.value, days_left: daysLeft, progress_fraction: Math.round(progress * 100) / 100, time_elapsed_fraction: Math.round(elapsed * 100) / 100,
-      speak: `Goal [${goal.area ?? 'money'}]: "${goal.title}". ${goal.metric}: ${latest.value} of ${goal.target} (started at ${goal.baseline}), ${daysLeft} days left. Levers: ${goal.levers.map(l => `${l.name} (${l.kind})`).join(', ') || 'none yet'}.`,
+      goal, kind, current_value: latest.value, ...(stages ? { stages } : {}), days_left: daysLeft, progress_fraction: Math.round(progress * 100) / 100, time_elapsed_fraction: Math.round(elapsed * 100) / 100,
+      speak: `Goal [${goal.area ?? 'money'}]: "${goal.title}". ${state}, ${daysLeft} days left. Levers: ${goal.levers.map(l => `${l.name} (${l.kind})`).join(', ') || 'none yet'}.`,
     };
   }
 
-  async recordProgress(value: number, date?: string) {
+  async recordProgress(value: number, date?: string, milestoneId?: string) {
     const goal = await this.requireGoal();
     const d = date ?? await this.today(); this.assertDate(d);
+    if (milestoneId) return this.recordMilestoneProgress(milestoneId, value, d);
     // One value per date: a second call for the same date corrects the first.
     goal.baselineHistory = goal.baselineHistory.filter(h => h.date !== d);
     goal.baselineHistory.push({ value, date: d });
@@ -82,7 +103,8 @@ export class AimService {
     goal.updatedAt = new Date().toISOString();
     await this.store.saveGoal(goal);
     const reached = value >= goal.target;
-    return { ok: true, history: goal.baselineHistory, goal_reached: reached, speak: `Recorded ${goal.metric} = ${value} on ${d}. ${reached ? `Target ${goal.target} reached: the goal is done. Set the next aim with set_goal when ready.` : `Target ${goal.target} by ${goal.deadline}.`}` };
+    const recorded = goal.kind === 'done' ? (reached ? `"${goal.title}" marked done on ${d}.` : `"${goal.title}" marked not done on ${d}.`) : `Recorded ${goal.metric} = ${value} on ${d}.`;
+    return { ok: true, history: goal.baselineHistory, goal_reached: reached, speak: `${recorded} ${reached ? `Target ${goal.target} reached: the goal is done. Set the next aim with set_goal when ready.` : `Target ${goal.target} by ${goal.deadline}.`}` };
   }
 
   async setLevers(levers: { id?: string; name: string; kind: 'hard' | 'comfortable'; examples?: string[]; keywords?: string[]; repos?: string[] }[]) {
@@ -106,15 +128,18 @@ export class AimService {
   }
 
   // ---------- path ----------
+  /** Pace of a milestone: a count milestone by its recorded value, a steps milestone by its steps. */
   private milestonePace(m: Milestone, prev: Milestone | undefined, steps: Step[], today: string) {
     const mine = steps.filter(s => s.milestoneId === m.id);
     const done = mine.filter(s => s.status === 'done').length;
     const from = prev?.due ?? m.createdAt.slice(0, 10);
     const span = Math.max(1, daysBetween(from, m.due));
     const elapsed = Math.min(1, Math.max(0, daysBetween(from, today) / span));
-    const doneFrac = mine.length ? done / mine.length : 0;
-    const status = m.status === 'done' || m.status === 'retired' ? m.status : mine.length === 0 ? 'no_steps' : doneFrac >= elapsed + 0.1 ? 'ahead' : doneFrac < elapsed - 0.15 ? 'behind' : 'on_pace';
-    return { steps_total: mine.length, steps_done: done, days_left: daysBetween(today, m.due), time_elapsed_fraction: Math.round(elapsed * 100) / 100, pace: status };
+    const kind = milestoneKind(m);
+    const current = kind === 'count' ? (m.progress?.[m.progress.length - 1]?.value ?? 0) : null;
+    const frac = kind === 'count' ? (m.target > 0 ? Math.min(1, current! / m.target) : 0) : mine.length ? done / mine.length : 0;
+    const status = m.status === 'done' || m.status === 'retired' ? m.status : kind === 'steps' && mine.length === 0 ? 'no_steps' : frac >= elapsed + 0.1 ? 'ahead' : frac < elapsed - 0.15 ? 'behind' : 'on_pace';
+    return { kind, ...(kind === 'count' ? { current } : {}), progress_fraction: Math.round(frac * 100) / 100, steps_total: mine.length, steps_done: done, days_left: daysBetween(today, m.due), time_elapsed_fraction: Math.round(elapsed * 100) / 100, pace: status };
   }
 
   async getPath() {
@@ -122,10 +147,10 @@ export class AimService {
     const today = await this.today();
     const milestones = path.milestones.map((m, i) => ({ ...m, ...this.milestonePace(m, path.milestones[i - 1], path.steps, today), steps: path.steps.filter(s => s.milestoneId === m.id).sort((a, b) => a.order - b.order) }));
     const current = milestones.find(isOpen);
-    return { milestones, current_milestone_id: current?.id ?? null, speak: current ? `Current milestone: "${current.title}" due ${current.due}, ${current.steps_done}/${current.steps_total} steps done, ${current.pace}.` : 'No open milestones.' };
+    return { milestones, current_milestone_id: current?.id ?? null, speak: current ? `Current milestone: "${current.title}" due ${current.due}, ${milestoneProgressText(current)}, ${current.pace}.` : 'No open milestones.' };
   }
 
-  async setMilestones(items: { id?: string; title: string; metric: string; target: number; due: string }[]) {
+  async setMilestones(items: { id?: string; title: string; kind?: 'count' | 'steps'; metric?: string; target?: number; due: string }[]) {
     const goal = await this.requireGoal();
     const path = await this.store.getPath();
     const problems: string[] = [];
@@ -134,16 +159,21 @@ export class AimService {
     for (const it of items) {
       if (!isValidDate(it.due)) problems.push(`milestone "${it.title}": due must be YYYY-MM-DD`);
       else { if (it.due > goal.deadline) problems.push(`milestone "${it.title}" is due after the goal deadline ${goal.deadline}`); if (lastDue && it.due < lastDue) problems.push(`milestone "${it.title}" is due before the previous one`); lastDue = it.due; }
-      if (!it.metric?.trim()) problems.push(`milestone "${it.title}" needs a metric`);
+      if (it.kind === 'count' && (!it.metric?.trim() || !(it.target! > 0))) problems.push(`milestone "${it.title}" is countable: it needs a metric and a target above 0`);
     }
     if (problems.length) return { ok: false, problems, speak: problems.join('; ') };
     const now = new Date().toISOString();
     const byId = new Map(path.milestones.map(m => [m.id, m]));
-    path.milestones = items.map(it => { const id = it.id ?? slug(it.title); const prev = byId.get(id); return { id, title: it.title.trim(), metric: it.metric.trim(), target: it.target, due: it.due, status: prev?.status ?? 'todo', createdAt: prev?.createdAt ?? now, doneAt: prev?.doneAt }; });
+    path.milestones = items.map(it => {
+      const id = it.id ?? slug(it.title); const prev = byId.get(id);
+      // Unsaid kind: an existing milestone keeps its own; a new one is countable when it names a number.
+      const kind = it.kind ?? (prev ? milestoneKind(prev) : it.metric?.trim() && it.target! > 0 ? 'count' : 'steps');
+      return { id, title: it.title.trim(), kind, metric: (it.metric ?? '').trim(), target: kind === 'count' ? it.target! : (it.target ?? 0), due: it.due, status: prev?.status ?? 'todo', createdAt: prev?.createdAt ?? now, doneAt: prev?.doneAt, progress: prev?.progress };
+    });
     const keep = new Set(path.milestones.map(m => m.id));
     path.steps = path.steps.filter(s => keep.has(s.milestoneId));
     await this.store.savePath(path);
-    return { ok: true, milestones: path.milestones, speak: `${path.milestones.length} milestones saved. Now add concrete steps for the first one ("${path.milestones[0].title}") with add_steps.` };
+    return { ok: true, milestones: path.milestones, speak: `${path.milestones.length} milestones saved (${path.milestones.map(m => `"${m.title}": ${m.kind === 'count' ? `count to ${m.target} ${m.metric}` : 'steps'}`).join('; ')}). Now add concrete steps for the first one ("${path.milestones[0].title}") with add_steps.${path.milestones.some(m => m.kind === 'count') ? ' Record a countable milestone\'s value with record_progress and its milestoneId.' : ''}` };
   }
 
   /** Prep-first check: a stage whose first open step is not on a hard lever. Returns a warning or null. */
@@ -174,7 +204,7 @@ export class AimService {
     return { ok: true, steps: added, warnings: warning ? [warning] : [], speak: `${added.length} steps added to "${m.title}".${warning ? ` ${warning}` : ''}` };
   }
 
-  async editMilestone(milestoneId: string, patch: { title?: string; metric?: string; target?: number; due?: string; status?: MilestoneStatus }) {
+  async editMilestone(milestoneId: string, patch: { title?: string; kind?: 'count' | 'steps'; metric?: string; target?: number; due?: string; status?: MilestoneStatus }) {
     const path = await this.store.getPath();
     const m = path.milestones.find(x => x.id === milestoneId);
     if (!m) throw new AimError(`milestone "${milestoneId}" not found; ids: ${path.milestones.map(x => x.id).join(', ')}`);
@@ -187,10 +217,27 @@ export class AimService {
     if (patch.title?.trim()) m.title = patch.title.trim();
     if (patch.metric?.trim()) m.metric = patch.metric.trim();
     if (patch.target !== undefined) m.target = patch.target;
+    if (patch.kind) m.kind = patch.kind;
+    if (milestoneKind(m) === 'count' && (!m.metric || !(m.target > 0))) return { ok: false, problems: ['a countable milestone needs a metric and a target above 0'], speak: `"${m.title}" is countable: give it a metric and a target above 0.` };
     if (patch.status) { m.status = patch.status; m.doneAt = patch.status === 'done' || patch.status === 'retired' ? new Date().toISOString() : undefined; }
     await this.store.savePath(path);
     const next = path.milestones.find(isOpen);
     return { ok: true, milestone: m, speak: `Milestone "${m.title}": ${m.status}, due ${m.due}.${patch.status && !isOpen(m) ? ` Current milestone is now ${next ? `"${next.title}"` : 'none'}.` : ''}` };
+  }
+
+  private async recordMilestoneProgress(milestoneId: string, value: number, d: string) {
+    const path = await this.store.getPath();
+    const m = path.milestones.find(x => x.id === milestoneId);
+    if (!m) throw new AimError(`milestone "${milestoneId}" not found; ids: ${path.milestones.map(x => x.id).join(', ')}`);
+    if (milestoneKind(m) !== 'count') return { ok: false, problems: ['not a countable milestone'], speak: `"${m.title}" is measured by its steps, not a number. Tick its steps, or make it countable with edit_milestone (kind count, metric, target).` };
+    // One value per date, as for the goal: a second call for the same date corrects the first.
+    m.progress = [...(m.progress ?? []).filter(h => h.date !== d), { value, date: d }].sort((a, b) => a.date.localeCompare(b.date));
+    const reached = value >= m.target;
+    let closed = false;
+    if (reached && isOpen(m)) { m.status = 'done'; m.doneAt = new Date().toISOString(); closed = true; }
+    await this.store.savePath(path);
+    const next = path.milestones.find(isOpen);
+    return { ok: true, milestone: m, history: m.progress, milestone_reached: reached, speak: `Recorded ${m.metric} = ${value} of ${m.target} for "${m.title}" on ${d}.${closed ? ` Milestone done. Current milestone is now ${next ? `"${next.title}"` : 'none'}.` : ''}` };
   }
 
   async deleteStep(stepId: string) {
@@ -216,8 +263,10 @@ export class AimService {
     return { ok: true, step: s, speak: `Step updated: "${s.title}" is ${s.status}.` };
   }
 
+  /** A steps milestone closes when all its steps are done; a count milestone closes on its value. */
   private autoCloseMilestones(path: Path) {
     for (const m of path.milestones) {
+      if (milestoneKind(m) === 'count') continue;
       const mine = path.steps.filter(s => s.milestoneId === m.id);
       if (mine.length && mine.every(s => s.status === 'done') && isOpen(m)) { m.status = 'done'; m.doneAt = new Date().toISOString(); }
     }
@@ -359,7 +408,7 @@ export class AimService {
     return { routines: items, speak: items.length ? `Routines: ${items.map(r => `${r.title} (${describeWhen(r)})`).join('; ')}. They are added to each matching day's plan; tick them with edit_plan_item.` : 'No routines yet. Add small daily checks with set_routines.' };
   }
 
-  async setRoutines(items: { id?: string; title: string; area: Area; projectId?: string; leverId?: string; days?: number[]; estimateMin?: number }[]) {
+  async setRoutines(items: { id?: string; title: string; area: Area; projectId?: string; leverId?: string; days?: number[]; estimateMin?: number; perWeek?: number }[]) {
     const problems: string[] = [];
     const today = await this.today();
     const prev = new Map((await this.store.getRoutines()).map(r => [r.id, r]));
@@ -367,8 +416,9 @@ export class AimService {
       if (!it.title?.trim()) problems.push('a routine has no title');
       const days = it.days === undefined ? [1, 2, 3, 4, 5, 6, 7] : [...new Set(it.days.filter(d => d >= 1 && d <= 7))].sort();
       if (!days.length) problems.push(`"${it.title}" needs at least one weekday (1=Mon..7=Sun)`);
+      if (it.perWeek !== undefined && !(Number.isInteger(it.perWeek) && it.perWeek >= 1)) problems.push(`"${it.title}": perWeek must be a whole number from 1`);
       const id = it.id ?? slug(it.title ?? '');
-      return { id, title: (it.title ?? '').trim(), area: it.area, projectId: it.projectId, leverId: it.leverId, days, estimateMin: it.estimateMin ?? 15, since: prev.get(id)?.since ?? today };
+      return { id, title: (it.title ?? '').trim(), area: it.area, projectId: it.projectId, leverId: it.leverId, days, estimateMin: it.estimateMin ?? 15, perWeek: it.perWeek, since: prev.get(id)?.since ?? today };
     });
     if (new Set(out.map(r => r.id)).size !== out.length) problems.push('two routines share an id or title');
     if (problems.length) return { ok: false, problems, speak: problems.join('; ') };
@@ -386,6 +436,26 @@ export class AimService {
     return routines.filter(r => r.days.includes(iso) && r.since <= date);
   }
 
+  /** Units a routine has done in the week of `date`, Monday up to the day before it (or through it). */
+  private async routineWeekCount(routineId: string, date: string, throughDate: boolean) {
+    let n = 0;
+    for (let d = weekStart(date); throughDate ? d <= date : d < date; d = addDays(d, 1)) {
+      const day = await this.store.getDay(d);
+      for (const p of day?.plan ?? []) if (p.routineId === routineId && p.done) n += p.count ?? 1;
+    }
+    return n;
+  }
+
+  /** Weekly routines and how far each one is this week. */
+  async routineWeeks(date: string) {
+    const out: { routine_id: string; title: string; per_week: number; done_this_week: number; met: boolean }[] = [];
+    for (const r of (await this.store.getRoutines()).filter(x => x.perWeek)) {
+      const n = await this.routineWeekCount(r.id, date, true);
+      out.push({ routine_id: r.id, title: r.title, per_week: r.perWeek!, done_this_week: n, met: n >= r.perWeek! });
+    }
+    return out;
+  }
+
   /**
    * Brings a day's routine items in line with the routines: adds the missing ones and
    * drops unticked items whose routine is gone. Past days are history and stay as they
@@ -393,7 +463,12 @@ export class AimService {
    */
   private async applyRoutines(day: Day): Promise<boolean> {
     if (day.mode === 'off' || day.date < await this.today()) return false;
-    const due = this.routinesOn(await this.store.getRoutines(), day.date);
+    const due: Routine[] = [];
+    for (const r of this.routinesOn(await this.store.getRoutines(), day.date)) {
+      // A weekly count already reached on earlier days leaves the plan until Monday.
+      if (r.perWeek && await this.routineWeekCount(r.id, day.date, false) >= r.perWeek) continue;
+      due.push(r);
+    }
     const dueIds = new Set(due.map(r => r.id));
     const skipped = new Set(day.skippedRoutines ?? []);
     const before = day.plan.length;
@@ -474,8 +549,14 @@ export class AimService {
     return { day, item };
   }
 
-  async editPlanItem(itemId: string, date: string | undefined, patch: { done?: boolean; title?: string; area?: Area; projectId?: string; leverId?: string; stepId?: string; isMainStep?: boolean; estimateMin?: number }) {
+  async editPlanItem(itemId: string, date: string | undefined, patch: { done?: boolean; count?: number; title?: string; area?: Area; projectId?: string; leverId?: string; stepId?: string; isMainStep?: boolean; estimateMin?: number }) {
     const { day, item } = await this.planItem(itemId, date);
+    if (patch.count !== undefined) {
+      if (!(Number.isInteger(patch.count) && patch.count >= 0)) throw new AimError('count must be a whole number from 0');
+      // A count is how many units this tick did: above 0 it ticks the item, 0 unticks it.
+      item.count = patch.count || undefined;
+      if (patch.done === undefined) patch.done = patch.count > 0;
+    }
     if (patch.stepId !== undefined) {
       const path = await this.store.getPath();
       if (patch.stepId && !path.steps.some(s => s.id === patch.stepId)) throw new AimError(`step "${patch.stepId}" not found in the path`);
@@ -497,8 +578,13 @@ export class AimService {
       }
     }
     await this.store.saveDay(day);
+    const routine = item.routineId ? (await this.store.getRoutines()).find(r => r.id === item.routineId) : undefined;
+    if (routine?.perWeek) {
+      const n = await this.routineWeekCount(routine.id, day.date, true);
+      notes.push(n >= routine.perWeek ? `${n}/${routine.perWeek} this week: the week's count is reached, it leaves the plan until Monday.` : `${n}/${routine.perWeek} this week.`);
+    }
     const what = item.isMainStep ? 'Main step' : 'Item';
-    return { ok: true, item, speak: `${what} "${item.title}" ${patch.done === true ? 'done' : patch.done === false ? 'not done' : 'updated'}.${notes.length ? ' ' + notes.join(' ') : ''}` };
+    return { ok: true, item, speak: `${what} "${item.title}" ${patch.done === true ? 'done' : patch.done === false ? 'not done' : 'updated'}${item.done && item.count ? ` (${item.count})` : ''}.${notes.length ? ' ' + notes.join(' ') : ''}` };
   }
 
   async deletePlanItem(itemId: string, date?: string) {
@@ -843,15 +929,16 @@ export class AimService {
     const current = path.milestones.find(m => m.id === path.current_milestone_id);
     const st = await this.streak();
     const routineDays = days.filter(x => x.routines.total > 0);
+    const weekly = await this.routineWeeks(through);
     return {
       streak_days: st.streak_days,
       week_of: from, through, days: days.map(x => ({ date: x.date, main_step_done: x.main_step.done, routines_done: x.routines.done, routines_total: x.routines.total, goal_attention_min: x.goal_attention_min, total_attention_min: x.total_attention_min, hard_lever_touched: x.hard_lever_touched, overrides: x.overrides })),
       main_step_days: days.filter(x => x.main_step.done).length, days_counted: days.length,
-      routines: { days_with_routines: routineDays.length, days_all_done: routineDays.filter(x => x.routines.done === x.routines.total).length, done: sum(x => x.routines.done), total: sum(x => x.routines.total) },
+      routines: { days_with_routines: routineDays.length, days_all_done: routineDays.filter(x => x.routines.done === x.routines.total).length, done: sum(x => x.routines.done), total: sum(x => x.routines.total), weekly },
       goal_share: workAtt ? Math.round((goalAtt / workAtt) * 100) / 100 : 0, hard_share: goalAtt ? Math.round((hardAtt / goalAtt) * 100) / 100 : 0,
       by_area: Object.fromEntries(Object.entries(byArea).map(([k, v]) => [k, round(v)])), overrides: sum(x => x.overrides),
-      milestone: current ? { title: current.title, due: current.due, steps_done: current.steps_done, steps_total: current.steps_total, pace: current.pace } : null,
-      speak: `Week of ${from}: main step done ${days.filter(x => x.main_step.done).length}/${days.length} days, goal share ${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work, hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%, ${sum(x => x.overrides)} overrides.${routineDays.length ? ` Routines all done on ${routineDays.filter(x => x.routines.done === x.routines.total).length}/${routineDays.length} days (${sum(x => x.routines.done)}/${sum(x => x.routines.total)} checks).` : ''} Streak ${st.streak_days} day(s). ${current ? `Milestone "${current.title}": ${current.steps_done}/${current.steps_total} steps, ${current.pace}, due ${current.due}.` : ''}`,
+      milestone: current ? { title: current.title, kind: current.kind, ...(current.kind === 'count' ? { current: current.current, target: current.target, metric: current.metric } : {}), due: current.due, steps_done: current.steps_done, steps_total: current.steps_total, pace: current.pace } : null,
+      speak: `Week of ${from}: main step done ${days.filter(x => x.main_step.done).length}/${days.length} days, goal share ${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work, hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%, ${sum(x => x.overrides)} overrides.${routineDays.length ? ` Routines all done on ${routineDays.filter(x => x.routines.done === x.routines.total).length}/${routineDays.length} days (${sum(x => x.routines.done)}/${sum(x => x.routines.total)} checks).` : ''}${weekly.length ? ` Weekly counts: ${weekly.map(w => `"${w.title}" ${w.done_this_week}/${w.per_week}${w.met ? ' ✓' : ''}`).join(', ')}.` : ''} Streak ${st.streak_days} day(s). ${current ? `Milestone "${current.title}": ${milestoneProgressText(current)}, ${current.pace}, due ${current.due}.` : ''}`,
     };
   }
 
@@ -917,15 +1004,24 @@ export class AimService {
       nudge = 'No focus window today. Nothing is expected of you toward the goal.';
     }
     const open = s.routines.open.length ? ` Routines still open today: ${s.routines.open.map(o => `"${o.title}"`).join(', ')}.` : s.routines.total ? ' Routines all done today.' : '';
-    return { ...cur, focus_window_minutes_today: windowMin, today: { date: s.date, main_step: s.main_step, routines: s.routines, total_attention_min: s.total_attention_min, goal_attention_min: s.goal_attention_min, goal_share_of_work: s.goal_share_of_work, hard_share_of_goal: s.hard_share_of_goal, by_area: s.by_area, overrides: s.overrides }, streak_days: st.streak_days, nudge, speak: `${s.speak} ${cur.speak} Streak ${st.streak_days}. ${nudge}${open}` };
+    const weekly = await this.routineWeeks(s.date);
+    const weeklyText = weekly.length ? ` This week: ${weekly.map(w => `"${w.title}" ${w.done_this_week}/${w.per_week}`).join(', ')}.` : '';
+    return { ...cur, focus_window_minutes_today: windowMin, today: { date: s.date, main_step: s.main_step, routines: s.routines, weekly_routines: weekly, total_attention_min: s.total_attention_min, goal_attention_min: s.goal_attention_min, goal_share_of_work: s.goal_share_of_work, hard_share_of_goal: s.hard_share_of_goal, by_area: s.by_area, overrides: s.overrides }, streak_days: st.streak_days, nudge, speak: `${s.speak} ${cur.speak} Streak ${st.streak_days}. ${nudge}${open}${weeklyText}` };
   }
 }
 
 const DOW = ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-function describeWhen(c: { days: number[]; timesPerWeek?: number; start?: string }): string {
-  const when = c.days.length ? c.days.map(d => DOW[d]).join('/') : `${c.timesPerWeek ?? 0}×/week`;
+function describeWhen(c: { days: number[]; timesPerWeek?: number; perWeek?: number; start?: string }): string {
+  const days = c.days.length === 7 ? 'any day' : c.days.map(d => DOW[d]).join('/');
+  const when = c.perWeek ? `${c.perWeek} a week, ${days}` : c.days.length ? c.days.map(d => DOW[d]).join('/') : `${c.timesPerWeek ?? 0}×/week`;
   return c.start ? `${when} at ${c.start}` : when;
 }
+
+/** Milestones saved before 0.5 have no kind: they were measured by their steps. */
+const milestoneKind = (m: Milestone) => m.kind ?? 'steps';
+
+const milestoneProgressText = (m: { kind: string; current?: number | null; target: number; metric: string; steps_done: number; steps_total: number }) =>
+  m.kind === 'count' ? `${m.current ?? 0}/${m.target} ${m.metric}` : `${m.steps_done}/${m.steps_total} steps done`;
 
 /** A milestone still to work on: not finished and not retired. */
 const isOpen = (m: Milestone) => m.status !== 'done' && m.status !== 'retired';

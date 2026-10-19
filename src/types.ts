@@ -6,8 +6,16 @@ export interface MatchHints { repos: string[]; keywords: string[] }
 export interface Lever { id: string; name: string; kind: LeverKind; examples: string[]; match: MatchHints }
 export interface Project { id: string; name: string; area: Area; match: MatchHints }
 
+/**
+ * count: a number moves from baseline to target ("15 paying customers").
+ * done: a one-time result that is either done or not ("launch v2 in the stores");
+ * its progress is the share of stages done. A goal without kind is count.
+ */
+export type GoalKind = 'count' | 'done';
+
 export interface Goal {
   title: string;
+  kind?: GoalKind;
   area: Area;
   why: string;
   metric: string;
@@ -24,7 +32,17 @@ export interface Goal {
 export type ItemStatus = 'todo' | 'doing' | 'done';
 /** retired: dropped without finishing; it no longer counts as the current milestone. */
 export type MilestoneStatus = ItemStatus | 'retired';
-export interface Milestone { id: string; title: string; metric: string; target: number; due: string; status: MilestoneStatus; createdAt: string; doneAt?: string }
+/**
+ * count: progress is a recorded value against target ("speak with 20 people").
+ * steps: progress is steps done of steps total ("implement the onboarding flow").
+ * A milestone without kind is steps, which is how every milestone worked before 0.5.
+ */
+export type MilestoneKind = 'count' | 'steps';
+export interface Milestone {
+  id: string; title: string; kind?: MilestoneKind; metric: string; target: number; due: string; status: MilestoneStatus; createdAt: string; doneAt?: string;
+  /** count milestones: recorded values, one per date, oldest first. */
+  progress?: { value: number; date: string }[];
+}
 export interface Step { id: string; milestoneId: string; title: string; leverId?: string; estimateMin: number; order: number; status: ItemStatus; doneAt?: string }
 export interface Path { milestones: Milestone[]; steps: Step[] }
 
@@ -69,6 +87,11 @@ export interface Routine {
   /** ISO weekdays 1=Mon..7=Sun. */
   days: number[];
   estimateMin: number;
+  /**
+   * Weekly count, e.g. 5 for "talk to 5 people a week". Each tick adds its count
+   * (default 1); once the week reaches it, the routine leaves the plan until Monday.
+   */
+  perWeek?: number;
   /** First day it applies (YYYY-MM-DD); earlier days are history and stay as they were. */
   since: string;
 }
@@ -78,6 +101,8 @@ export interface PlanItem {
   /** Set when the item came from a routine. */
   routineId?: string;
   isMainStep: boolean; estimateMin: number; done: boolean; doneAt?: string;
+  /** How many units this tick did, for a routine with perWeek (e.g. 2 people today). Default 1. */
+  count?: number;
 }
 export interface Day {
   date: string; mode: Mode; plan: PlanItem[]; stopIssuedAt?: string; createdAt: string; updatedAt: string;
