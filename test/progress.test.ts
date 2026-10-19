@@ -199,3 +199,69 @@ test('count 0 unticks a weekly routine item', async () => {
   assert.equal(after.done, false);
   assert.equal(after.count, undefined);
 });
+
+// ---------- minimum versions and starters ----------
+
+const REDDIT = { title: 'Talk with one person on Reddit', area: 'money' as const, leverId: 'customer-conversations', minimum: 'Read one thread' };
+
+test('a minimum tick counts for the day and is reported apart from full and skipped', async () => {
+  const { store, svc } = setup();
+  const today = await svc.today();
+  await svc.setRoutines([REDDIT, { title: 'Talk with one person on WIP', area: 'money' }, { title: 'Post a progress update', area: 'money' }]);
+  const [reddit, wip, post] = store.days.get(today)!.plan;
+
+  const open = await svc.getNow();
+  assert.match(open.speak, /"Talk with one person on Reddit" \(bad day\? the minimum: Read one thread\)/);
+
+  const r = await svc.editPlanItem(reddit.id, undefined, { level: 'minimum' });
+  assert.match(r.speak, /Minimum done \("Read one thread"\)/);
+  await svc.editPlanItem(wip.id, undefined, { done: true });
+  await svc.deletePlanItem(post.id);
+
+  const day = await svc.daySummary();
+  assert.equal(day.routines.full, 1);
+  assert.equal(day.routines.minimum, 1);
+  assert.equal(day.routines.skipped, 1);
+  assert.match(day.speak, /Routines 1 full, 1 minimum, 1 skipped, 0 open/);
+  const week = await svc.weekSummary();
+  assert.equal(week.routines.minimum, 1);
+  assert.match(week.speak, /2\/2 checks: 1 full, 1 minimum, 1 skipped/);
+
+  // Unticking clears the level, so a later full tick is full.
+  await svc.editPlanItem(reddit.id, undefined, { done: false });
+  await svc.editPlanItem(reddit.id, undefined, { done: true });
+  assert.equal(store.days.get(today)!.plan.find(p => p.id === reddit.id)!.level, undefined);
+});
+
+test('a minimum tick does not add to a weekly count', async () => {
+  const { store, svc } = setup();
+  await svc.setRoutines([{ ...TALK, minimum: 'Read one thread' }]);
+  const today = await svc.today();
+  const item = store.days.get(today)!.plan[0];
+  await svc.editPlanItem(item.id, undefined, { level: 'minimum' });
+  assert.equal((await svc.getNow()).today.weekly_routines[0].done_this_week, 0);
+});
+
+test('only routines have a minimum', async () => {
+  const { svc } = setup();
+  await svc.setPlan(undefined, [{ title: 'Email 10 people from the waitlist', area: 'money', isMainStep: true }]);
+  const plan = await svc.getPlan();
+  await assert.rejects(svc.editPlanItem(plan.plan[0].id, undefined, { level: 'minimum' }), /not a routine/);
+});
+
+test('with no routines, get_routines offers starters for the aim, linked to its levers', async () => {
+  const { svc } = setup();
+  const today = await svc.today();
+  await svc.setGoal({ title: '15 paying customers', metric: 'paying customers', baseline: 0, target: 15, deadline: addDays(today, 70) });
+  await svc.setLevers([{ id: 'talk', name: 'Customer conversations', kind: 'hard' }, { id: 'build', name: 'Building', kind: 'comfortable' }]);
+  const r = await svc.getRoutines();
+  assert.equal(r.starters!.length, 3);
+  assert.ok(r.starters!.every(s => s.minimum && s.area === 'money'));
+  assert.equal(r.starters![0].leverId, 'talk');
+  assert.equal(r.starters![2].leverId, 'build');
+  assert.match(r.speak, /Starters for your aim/);
+  // They can be saved as they are.
+  const saved = await svc.setRoutines(r.starters!);
+  assert.equal(saved.ok, true);
+  assert.equal((await svc.getRoutines()).starters, undefined);
+});

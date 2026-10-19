@@ -136,6 +136,16 @@ again. To skip one for a single day, `delete_plan_item`. When the user starts wo
 mention the routines `get_now` still lists as open; at the end of the day, ask which are
 done and tick them with `edit_plan_item`.
 
+Each routine can have a **minimum**: the small version for a bad day ("read one thread"
+for "talk with one person"). When the user can't do the full one, offer the minimum
+instead of skipping; tick it with `edit_plan_item` and `level: minimum`. It counts for the
+day, and reports show full, minimum and skipped apart, so a small step never passes for
+the full one. Don't push the minimum as the default: it is for bad days.
+
+When the user has no routines yet, `get_routines` returns **starters** for the aim's area,
+each with its minimum and lever. Offer them as they are and let the user drop or rename
+some; don't design a schedule together from scratch, that is procrastination too.
+
 A weekly routine (`perWeek: 5`) is a count, not a daily duty: tick it with
 `edit_plan_item` and `count` ("talked to 2 people today" is count 2). It stays in the plan
 until the week's count is reached, then leaves until Monday; `get_now` and

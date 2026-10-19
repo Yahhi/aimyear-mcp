@@ -92,6 +92,11 @@ export interface Routine {
    * (default 1); once the week reaches it, the routine leaves the plan until Monday.
    */
   perWeek?: number;
+  /**
+   * The small version for a bad day, e.g. "read one thread" for "talk to one person".
+   * Doing it ticks the day as minimum: it counts, but not as the full routine.
+   */
+  minimum?: string;
   /** First day it applies (YYYY-MM-DD); earlier days are history and stay as they were. */
   since: string;
 }
@@ -103,6 +108,8 @@ export interface PlanItem {
   isMainStep: boolean; estimateMin: number; done: boolean; doneAt?: string;
   /** How many units this tick did, for a routine with perWeek (e.g. 2 people today). Default 1. */
   count?: number;
+  /** Set when only the routine's minimum version was done. Absent on a full tick. */
+  level?: 'minimum';
 }
 export interface Day {
   date: string; mode: Mode; plan: PlanItem[]; stopIssuedAt?: string; createdAt: string; updatedAt: string;

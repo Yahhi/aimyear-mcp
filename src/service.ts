@@ -405,10 +405,13 @@ export class AimService {
   // ---------- routines ----------
   async getRoutines() {
     const items = await this.store.getRoutines();
-    return { routines: items, speak: items.length ? `Routines: ${items.map(r => `${r.title} (${describeWhen(r)})`).join('; ')}. They are added to each matching day's plan; tick them with edit_plan_item.` : 'No routines yet. Add small daily checks with set_routines.' };
+    if (items.length) return { routines: items, speak: `Routines: ${items.map(r => `${r.title} (${describeWhen(r)}${r.minimum ? `; minimum: ${r.minimum}` : ''})`).join('; ')}. They are added to each matching day's plan; tick them with edit_plan_item.` };
+    // Nobody should build a schedule while procrastinating: offer ready-made ones.
+    const starters = starterRoutines(await this.store.getGoal());
+    return { routines: [], starters, speak: `No routines yet. Starters for your aim: ${starters.map(r => `"${r.title}" (minimum: ${r.minimum})`).join('; ')}. Offer them as they are; save the ones the user keeps with set_routines.` };
   }
 
-  async setRoutines(items: { id?: string; title: string; area: Area; projectId?: string; leverId?: string; days?: number[]; estimateMin?: number; perWeek?: number }[]) {
+  async setRoutines(items: { id?: string; title: string; area: Area; projectId?: string; leverId?: string; days?: number[]; estimateMin?: number; perWeek?: number; minimum?: string }[]) {
     const problems: string[] = [];
     const today = await this.today();
     const prev = new Map((await this.store.getRoutines()).map(r => [r.id, r]));
@@ -418,7 +421,7 @@ export class AimService {
       if (!days.length) problems.push(`"${it.title}" needs at least one weekday (1=Mon..7=Sun)`);
       if (it.perWeek !== undefined && !(Number.isInteger(it.perWeek) && it.perWeek >= 1)) problems.push(`"${it.title}": perWeek must be a whole number from 1`);
       const id = it.id ?? slug(it.title ?? '');
-      return { id, title: (it.title ?? '').trim(), area: it.area, projectId: it.projectId, leverId: it.leverId, days, estimateMin: it.estimateMin ?? 15, perWeek: it.perWeek, since: prev.get(id)?.since ?? today };
+      return { id, title: (it.title ?? '').trim(), area: it.area, projectId: it.projectId, leverId: it.leverId, days, estimateMin: it.estimateMin ?? 15, perWeek: it.perWeek, minimum: it.minimum?.trim() || undefined, since: prev.get(id)?.since ?? today };
     });
     if (new Set(out.map(r => r.id)).size !== out.length) problems.push('two routines share an id or title');
     if (problems.length) return { ok: false, problems, speak: problems.join('; ') };
@@ -441,7 +444,8 @@ export class AimService {
     let n = 0;
     for (let d = weekStart(date); throughDate ? d <= date : d < date; d = addDays(d, 1)) {
       const day = await this.store.getDay(d);
-      for (const p of day?.plan ?? []) if (p.routineId === routineId && p.done) n += p.count ?? 1;
+      // A minimum tick counts for the day, not toward the weekly number.
+      for (const p of day?.plan ?? []) if (p.routineId === routineId && p.done && p.level !== 'minimum') n += p.count ?? 1;
     }
     return n;
   }
@@ -496,9 +500,18 @@ export class AimService {
     return day;
   }
 
-  private routineStatus(day: Day | null) {
+  /** Routine items of a day: full, minimum and skipped are kept apart, so a small step never passes for the full one. */
+  private async routineStatus(day: Day | null) {
     const items = (day?.plan ?? []).filter(p => p.routineId);
-    return { done: items.filter(p => p.done).length, total: items.length, open: items.filter(p => !p.done).map(p => ({ item_id: p.id, title: p.title })) };
+    const routines = await this.store.getRoutines();
+    const minimumOf = (id?: string) => routines.find(r => r.id === id)?.minimum;
+    const done = items.filter(p => p.done);
+    const minimum = done.filter(p => p.level === 'minimum').length;
+    const skipped = day ? this.routinesOn(routines, day.date).filter(r => day.skippedRoutines?.includes(r.id)).length : 0;
+    return {
+      done: done.length, full: done.length - minimum, minimum, skipped, total: items.length,
+      open: items.filter(p => !p.done).map(p => ({ item_id: p.id, title: p.title, ...(minimumOf(p.routineId) ? { minimum: minimumOf(p.routineId) } : {}) })),
+    };
   }
 
   // ---------- planning ----------
@@ -549,13 +562,18 @@ export class AimService {
     return { day, item };
   }
 
-  async editPlanItem(itemId: string, date: string | undefined, patch: { done?: boolean; count?: number; title?: string; area?: Area; projectId?: string; leverId?: string; stepId?: string; isMainStep?: boolean; estimateMin?: number }) {
+  async editPlanItem(itemId: string, date: string | undefined, patch: { done?: boolean; count?: number; level?: 'full' | 'minimum'; title?: string; area?: Area; projectId?: string; leverId?: string; stepId?: string; isMainStep?: boolean; estimateMin?: number }) {
     const { day, item } = await this.planItem(itemId, date);
     if (patch.count !== undefined) {
       if (!(Number.isInteger(patch.count) && patch.count >= 0)) throw new AimError('count must be a whole number from 0');
       // A count is how many units this tick did: above 0 it ticks the item, 0 unticks it.
       item.count = patch.count || undefined;
       if (patch.done === undefined) patch.done = patch.count > 0;
+    }
+    if (patch.level) {
+      if (!item.routineId) throw new AimError(`"${item.title}" is not a routine: only routines have a minimum version`);
+      item.level = patch.level === 'minimum' ? 'minimum' : undefined;
+      if (patch.done === undefined) patch.done = true;
     }
     if (patch.stepId !== undefined) {
       const path = await this.store.getPath();
@@ -572,6 +590,7 @@ export class AimService {
     const notes: string[] = [];
     if (patch.done !== undefined && patch.done !== item.done) {
       item.done = patch.done; item.doneAt = patch.done ? new Date().toISOString() : undefined;
+      if (!patch.done) { item.level = undefined; item.count = undefined; }
       if (item.stepId) {
         const r = await this.editStep(item.stepId, { status: patch.done ? 'done' : 'doing' });
         notes.push(patch.done ? `Path step done: "${r.step?.title}".` : `Path step "${r.step?.title}" is open again.`);
@@ -584,6 +603,8 @@ export class AimService {
       notes.push(n >= routine.perWeek ? `${n}/${routine.perWeek} this week: the week's count is reached, it leaves the plan until Monday.` : `${n}/${routine.perWeek} this week.`);
     }
     const what = item.isMainStep ? 'Main step' : 'Item';
+    const minimum = routine?.minimum;
+    if (item.done && item.level === 'minimum') notes.push(`Minimum done${minimum ? ` ("${minimum}")` : ''}: it counts for today, and the report keeps it apart from the full one.`);
     return { ok: true, item, speak: `${what} "${item.title}" ${patch.done === true ? 'done' : patch.done === false ? 'not done' : 'updated'}${item.done && item.count ? ` (${item.count})` : ''}.${notes.length ? ' ' + notes.join(' ') : ''}` };
   }
 
@@ -900,7 +921,7 @@ export class AimService {
     const workAtt = byArea['work']?.attention_min ?? 0;
     const totalAtt = Object.values(byArea).reduce((s, v) => s + v.attention_min, 0);
     const main = day?.plan.find(p => p.isMainStep);
-    const routines = this.routineStatus(day);
+    const routines = await this.routineStatus(day);
     const hardTouched = sessions.some(s => (s.classification === 'goal_hard' || (s.classification === 'main_step' && goal?.levers.find(l => l.id === s.leverId)?.kind === 'hard')) && (att.attention.get(s.id) ?? 0) >= 10);
     const overrides = sessions.filter(s => s.override).length;
     const list = sessions.sort((a, b) => a.start.localeCompare(b.start)).map(s => ({ id: s.id, from: localTime(new Date(s.start), tz), to: s.end ? localTime(new Date(s.end), tz) : 'running', task: s.task, area: s.area, classification: s.classification, lever_id: s.leverId, wall_min: round(att.wall.get(s.id) ?? 0), attention_min: round(s.attentionShareOverride !== undefined ? (att.wall.get(s.id) ?? 0) * s.attentionShareOverride : att.attention.get(s.id) ?? 0), override: s.override ?? false, outcome: s.outcome, summary: s.summary }));
@@ -909,7 +930,7 @@ export class AimService {
       date: d, mode: day?.mode ?? 'full', main_step: { title: main?.title ?? null, done: !!main?.done, planned: !!main }, routines,
       total_attention_min: round(totalAtt), goal_attention_min: round(goalAtt), goal_share_of_work: workAtt ? Math.round((goalAtt / workAtt) * 100) / 100 : 0, hard_share_of_goal: goalAtt ? Math.round((hardAtt / goalAtt) * 100) / 100 : 0,
       hard_lever_touched: hardTouched, overrides, by_area: r(byArea), by_classification: r(byClass), by_lever: r(byLever), overlaps: att.overlaps.map(o => ({ from: localTime(new Date(o.start), tz), to: localTime(new Date(o.end), tz), count: o.count })), gaps, sessions: list,
-      speak: `${d}: ${round(totalAtt)} min tracked, ${round(goalAtt)} min on the goal (${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work), hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%. Main step ${main ? (main.done ? 'done' : `NOT done ("${main.title}")`) : 'not planned'}. Hard lever ${hardTouched ? 'touched' : 'not touched'}.${routines.total ? ` Routines ${routines.done}/${routines.total}.` : ''} ${overrides ? `${overrides} override(s). ` : ''}${gaps.length ? `${gaps.length} gap(s).` : ''}`,
+      speak: `${d}: ${round(totalAtt)} min tracked, ${round(goalAtt)} min on the goal (${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work), hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%. Main step ${main ? (main.done ? 'done' : `NOT done ("${main.title}")`) : 'not planned'}. Hard lever ${hardTouched ? 'touched' : 'not touched'}.${routines.total || routines.skipped ? ` Routines ${routineText(routines)}.` : ''} ${overrides ? `${overrides} override(s). ` : ''}${gaps.length ? `${gaps.length} gap(s).` : ''}`,
     };
   }
 
@@ -932,13 +953,13 @@ export class AimService {
     const weekly = await this.routineWeeks(through);
     return {
       streak_days: st.streak_days,
-      week_of: from, through, days: days.map(x => ({ date: x.date, main_step_done: x.main_step.done, routines_done: x.routines.done, routines_total: x.routines.total, goal_attention_min: x.goal_attention_min, total_attention_min: x.total_attention_min, hard_lever_touched: x.hard_lever_touched, overrides: x.overrides })),
+      week_of: from, through, days: days.map(x => ({ date: x.date, main_step_done: x.main_step.done, routines_done: x.routines.done, routines_full: x.routines.full, routines_minimum: x.routines.minimum, routines_skipped: x.routines.skipped, routines_total: x.routines.total, goal_attention_min: x.goal_attention_min, total_attention_min: x.total_attention_min, hard_lever_touched: x.hard_lever_touched, overrides: x.overrides })),
       main_step_days: days.filter(x => x.main_step.done).length, days_counted: days.length,
-      routines: { days_with_routines: routineDays.length, days_all_done: routineDays.filter(x => x.routines.done === x.routines.total).length, done: sum(x => x.routines.done), total: sum(x => x.routines.total), weekly },
+      routines: { days_with_routines: routineDays.length, days_all_done: routineDays.filter(x => x.routines.done === x.routines.total).length, done: sum(x => x.routines.done), full: sum(x => x.routines.full), minimum: sum(x => x.routines.minimum), skipped: sum(x => x.routines.skipped), total: sum(x => x.routines.total), weekly },
       goal_share: workAtt ? Math.round((goalAtt / workAtt) * 100) / 100 : 0, hard_share: goalAtt ? Math.round((hardAtt / goalAtt) * 100) / 100 : 0,
       by_area: Object.fromEntries(Object.entries(byArea).map(([k, v]) => [k, round(v)])), overrides: sum(x => x.overrides),
       milestone: current ? { title: current.title, kind: current.kind, ...(current.kind === 'count' ? { current: current.current, target: current.target, metric: current.metric } : {}), due: current.due, steps_done: current.steps_done, steps_total: current.steps_total, pace: current.pace } : null,
-      speak: `Week of ${from}: main step done ${days.filter(x => x.main_step.done).length}/${days.length} days, goal share ${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work, hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%, ${sum(x => x.overrides)} overrides.${routineDays.length ? ` Routines all done on ${routineDays.filter(x => x.routines.done === x.routines.total).length}/${routineDays.length} days (${sum(x => x.routines.done)}/${sum(x => x.routines.total)} checks).` : ''}${weekly.length ? ` Weekly counts: ${weekly.map(w => `"${w.title}" ${w.done_this_week}/${w.per_week}${w.met ? ' ✓' : ''}`).join(', ')}.` : ''} Streak ${st.streak_days} day(s). ${current ? `Milestone "${current.title}": ${milestoneProgressText(current)}, ${current.pace}, due ${current.due}.` : ''}`,
+      speak: `Week of ${from}: main step done ${days.filter(x => x.main_step.done).length}/${days.length} days, goal share ${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work, hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%, ${sum(x => x.overrides)} overrides.${routineDays.length ? ` Routines all done on ${routineDays.filter(x => x.routines.done === x.routines.total).length}/${routineDays.length} days (${sum(x => x.routines.done)}/${sum(x => x.routines.total)} checks: ${routineText({ full: sum(x => x.routines.full), minimum: sum(x => x.routines.minimum), skipped: sum(x => x.routines.skipped), total: sum(x => x.routines.total) })}).` : ''}${weekly.length ? ` Weekly counts: ${weekly.map(w => `"${w.title}" ${w.done_this_week}/${w.per_week}${w.met ? ' ✓' : ''}`).join(', ')}.` : ''} Streak ${st.streak_days} day(s). ${current ? `Milestone "${current.title}": ${milestoneProgressText(current)}, ${current.pace}, due ${current.due}.` : ''}`,
     };
   }
 
@@ -1003,7 +1024,7 @@ export class AimService {
     } else if (windowMin === 0 && s.mode !== 'off') {
       nudge = 'No focus window today. Nothing is expected of you toward the goal.';
     }
-    const open = s.routines.open.length ? ` Routines still open today: ${s.routines.open.map(o => `"${o.title}"`).join(', ')}.` : s.routines.total ? ' Routines all done today.' : '';
+    const open = s.routines.open.length ? ` Routines still open today: ${s.routines.open.map(o => `"${o.title}"${o.minimum ? ` (bad day? the minimum: ${o.minimum})` : ''}`).join(', ')}.` : s.routines.total ? ` Routines all done today${s.routines.minimum ? `, ${s.routines.minimum} as the minimum` : ''}.` : '';
     const weekly = await this.routineWeeks(s.date);
     const weeklyText = weekly.length ? ` This week: ${weekly.map(w => `"${w.title}" ${w.done_this_week}/${w.per_week}`).join(', ')}.` : '';
     return { ...cur, focus_window_minutes_today: windowMin, today: { date: s.date, main_step: s.main_step, routines: s.routines, weekly_routines: weekly, total_attention_min: s.total_attention_min, goal_attention_min: s.goal_attention_min, goal_share_of_work: s.goal_share_of_work, hard_share_of_goal: s.hard_share_of_goal, by_area: s.by_area, overrides: s.overrides }, streak_days: st.streak_days, nudge, speak: `${s.speak} ${cur.speak} Streak ${st.streak_days}. ${nudge}${open}${weeklyText}` };
@@ -1015,6 +1036,50 @@ function describeWhen(c: { days: number[]; timesPerWeek?: number; perWeek?: numb
   const days = c.days.length === 7 ? 'any day' : c.days.map(d => DOW[d]).join('/');
   const when = c.perWeek ? `${c.perWeek} a week, ${days}` : c.days.length ? c.days.map(d => DOW[d]).join('/') : `${c.timesPerWeek ?? 0}×/week`;
   return c.start ? `${when} at ${c.start}` : when;
+}
+
+const routineText = (r: { full: number; minimum: number; skipped: number; total: number }) =>
+  `${r.full} full, ${r.minimum} minimum, ${r.skipped} skipped, ${Math.max(0, r.total - r.full - r.minimum)} open`;
+
+type Starter = { title: string; minimum: string; hard: boolean; perWeek?: number };
+/** Ready-made routines by the aim's area: a small step and its bad-day minimum. */
+const STARTERS: Record<Area, Starter[]> = {
+  money: [
+    { title: 'Talk with one person who could use the product', minimum: 'Read one thread where they talk about the problem', hard: true },
+    { title: 'Post one progress update', minimum: 'Write the update as a draft', hard: true },
+    { title: 'Look at the numbers: sign-ups, visits, replies', minimum: 'Open the dashboard once', hard: false },
+  ],
+  work: [
+    { title: 'One hour on the hardest task first', minimum: 'Open the task and write the first line', hard: true },
+    { title: 'Send one message that moves the aim', minimum: 'Draft the message', hard: true },
+    { title: 'Write tomorrow\'s first step before stopping', minimum: 'Name the task in one word', hard: false },
+  ],
+  health: [
+    { title: 'Workout for 30 minutes', minimum: 'Put on sports clothes and move for 5 minutes', hard: true },
+    { title: 'Walk for 20 minutes', minimum: 'Walk around the block', hard: false },
+    { title: 'In bed by 23:00', minimum: 'Screens off by 23:30', hard: false },
+  ],
+  relations: [
+    { title: 'Message one friend or relative', minimum: 'Reply to one message you owe', hard: true },
+    { title: '30 minutes with family, phone away', minimum: '10 minutes, phone away', hard: false },
+    { title: 'Meet or call one person', minimum: 'Suggest a time to one person', hard: true, perWeek: 2 },
+  ],
+  happiness: [
+    { title: 'Practice for 20 minutes', minimum: 'Open the case and play one song', hard: true },
+    { title: 'Read 20 pages', minimum: 'Read one page', hard: false },
+    { title: 'Ten minutes outside without the phone', minimum: 'Two minutes at the window', hard: false },
+  ],
+};
+
+function starterRoutines(goal: Goal | null) {
+  const area = goal?.area ?? 'money';
+  const hard = goal?.levers.find(l => l.kind === 'hard');
+  const comfortable = goal?.levers.find(l => l.kind === 'comfortable');
+  return STARTERS[area].map(s => ({
+    title: s.title, minimum: s.minimum, area, days: [1, 2, 3, 4, 5], estimateMin: 15,
+    ...(s.perWeek ? { perWeek: s.perWeek, days: [1, 2, 3, 4, 5, 6, 7] } : {}),
+    ...((s.hard ? hard : comfortable) ? { leverId: (s.hard ? hard : comfortable)!.id } : {}),
+  }));
 }
 
 /** Milestones saved before 0.5 have no kind: they were measured by their steps. */

@@ -114,7 +114,7 @@ test('summarize_week counts the checks', async () => {
   assert.equal(w.routines.done, 1);
   assert.equal(w.routines.total, 3);
   assert.equal(w.routines.days_all_done, 0);
-  assert.match(w.speak, /Routines all done on 0\/1 days \(1\/3 checks\)/);
+  assert.match(w.speak, /Routines all done on 0\/1 days \(1\/3 checks: 1 full, 0 minimum, 0 skipped, 2 open\)/);
 });
 
 test('a check already planned by hand becomes the routine item instead of a duplicate', async () => {
