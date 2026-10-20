@@ -44,6 +44,11 @@ export const TOOLS: Record<string, Entry> = {
   add_session: write, edit_session: write, delete_session: write, list_sessions: read, find_gaps: read,
   summarize_day: read, summarize_week: read, find_leaks: read,
   get_settings: read, set_settings: write, add_device: write, list_devices: read, delete_device: write,
+  add_social_account: auth('stores the person\'s own WIP or Bluesky login, encrypted'),
+  list_social_accounts: auth('reads which networks the person connected (never the logins)'),
+  delete_social_account: auth('deletes the person\'s saved network login'),
+  get_post_draft: auth('drafts a post from the person\'s private record and reads their own feed'),
+  add_post: auth('posts on the person\'s own WIP or Bluesky account, at their explicit request'),
 };
 
 /** HTTP routes, "VERB /path". */
@@ -57,6 +62,7 @@ export const ROUTES: Record<string, Entry> = {
   'DELETE /c/:token/mcp': pub('405: the server is stateless, POST only'),
   'GET /now/:token': auth('the person\'s running timer, for the menu bar app'),
   'POST /pull/:token': auth('claims the person\'s desktop reminders'),
+  'POST /social/post': auth('the Post action of the evening offer: posts the person\'s day at their explicit request (Bearer token)'),
   'POST /tick/:token': admin('scheduler: delivers due reminders for everyone'),
   'GET /.well-known/oauth-authorization-server': pub('OAuth discovery (RFC 8414)'),
   'GET /.well-known/oauth-protected-resource': pub('OAuth discovery (RFC 9728)'),

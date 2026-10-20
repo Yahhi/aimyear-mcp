@@ -1,7 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { AimService, AimError } from './service.js';
-import { AREAS } from './types.js';
+import { AREAS, NETWORKS } from './types.js';
+import type { SocialService } from './social/service.js';
 import { levelOfTool } from './access.js';
 
 const area = z.enum(AREAS);
@@ -13,12 +14,16 @@ type Handler = (args: any) => Promise<unknown>;
 /** What each tool does to the person's data. Clients show these before they approve a call. */
 type Kind = 'read' | 'write' | 'idempotent' | 'destructive';
 const READ = ['get_goal', 'check_goal_draft', 'get_path', 'next_steps', 'get_commitments', 'get_capacity', 'get_planning_context', 'get_plan', 'get_routines',
-  'get_now', 'list_sessions', 'find_gaps', 'summarize_day', 'summarize_week', 'find_leaks', 'get_settings', 'list_devices'];
+  'get_now', 'list_sessions', 'find_gaps', 'summarize_day', 'summarize_week', 'find_leaks', 'get_settings', 'list_devices', 'list_social_accounts', 'get_post_draft'];
 // Replaces a whole list or removes something: an earlier value is gone after the call.
 const DESTRUCTIVE = ['set_goal', 'set_levers', 'set_projects', 'set_milestones', 'set_commitments', 'set_routines', 'set_plan',
-  'delete_step', 'delete_plan_item', 'delete_session', 'delete_device', 'stop_timer'];
+  'delete_step', 'delete_plan_item', 'delete_session', 'delete_device', 'stop_timer', 'delete_social_account'];
 // Calling twice with the same arguments leaves the same result.
-const IDEMPOTENT = ['record_progress', 'edit_milestone', 'edit_step', 'edit_plan_item', 'set_day_mode', 'split_attention', 'edit_session', 'set_settings', 'add_device'];
+const IDEMPOTENT = ['record_progress', 'edit_milestone', 'edit_step', 'edit_plan_item', 'set_day_mode', 'split_attention', 'edit_session', 'set_settings', 'add_device',
+  // Connecting again replaces the saved login; a day's post goes to each network once, however often it is called.
+  'add_social_account', 'add_post'];
+// Reaches a network outside AimYear (WIP, Bluesky).
+const OPEN_WORLD = ['add_social_account', 'get_post_draft', 'add_post'];
 export function kindOf(name: string): Kind {
   if (READ.includes(name)) return 'read';
   if (DESTRUCTIVE.includes(name)) return 'destructive';
@@ -33,7 +38,7 @@ function annotationsFor(name: string) {
     readOnlyHint: k === 'read',
     destructiveHint: k === 'destructive',
     idempotentHint: k === 'read' || k === 'idempotent' || (k === 'destructive' && name.startsWith('set_')),
-    openWorldHint: false,
+    openWorldHint: OPEN_WORLD.includes(name),
   };
 }
 
@@ -41,7 +46,7 @@ export const INSTRUCTIONS = `AimYear keeps one person's big aim for the year, th
 
 Names: get_ reads one thing, list_ reads several, find_ looks for problems, set_ replaces a whole list, add_ / edit_ / delete_ change one entry. A session is one piece of work; the timer runs while sessions run.
 
-Typical flow: get_goal (or check_goal_draft → set_goal), get_path, get_planning_context → set_plan with one main step (routines from set_routines are added to each day's plan by the server), start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Hard first: the first step of each stage and each day's main step should be on a hard lever (the work the user puts off: outreach, applications, selling, publishing). Preparation (CV, profile, research, polishing) comes only when it blocks the hard step, and only as much as it blocks; do the hard step with what exists now and improve after the replies. set_plan, add_steps and set_levers warn when this is broken: fix it before moving on. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine.`;
+Typical flow: get_goal (or check_goal_draft → set_goal), get_path, get_planning_context → set_plan with one main step (routines from set_routines are added to each day's plan by the server), start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Hard first: the first step of each stage and each day's main step should be on a hard lever (the work the user puts off: outreach, applications, selling, publishing). Preparation (CV, profile, research, polishing) comes only when it blocks the hard step, and only as much as it blocks; do the hard step with what exists now and improve after the replies. set_plan, add_steps and set_levers warn when this is broken: fix it before moving on. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine. Posting progress in public (WIP, Bluesky; Pro): get_post_draft shows the day's draft from the record; add_post publishes it only when the user explicitly asks, with their edits.`;
 
 function wrap(name: string, fn: Handler, signedIn: boolean) {
   return async (args: any) => {
@@ -61,12 +66,14 @@ function wrap(name: string, fn: Handler, signedIn: boolean) {
 }
 
 /** svc is null for an anonymous caller: the tools are listed, and every call is refused. */
-export function registerTools(server: McpServer, maybeSvc: AimService | null) {
+export function registerTools(server: McpServer, maybeSvc: AimService | null, maybeSocial: SocialService | null = null) {
   const svc = maybeSvc as AimService;
+  const social = maybeSocial as SocialService;
   const t = (name: string, description: string, shape: Record<string, z.ZodTypeAny>, fn: Handler) =>
     server.registerTool(name, { title: title(name), description, inputSchema: shape, annotations: annotationsFor(name) }, wrap(name, fn, maybeSvc !== null));
 
   const outcome = z.enum(['done', 'partial', 'abandoned']);
+  const network = z.enum(NETWORKS);
   const opId = z.string().min(8).max(128).optional().describe('for apps replaying queued requests: an id the app minted before its first attempt and reuses on retries, so the write is applied once and a retry gets the first answer back. Do not invent one; an agent calling interactively leaves it out');
   const iso = (what: string) => z.string().optional().describe(`${what} as ISO 8601 with offset, e.g. 2026-10-20T14:05:00+02:00. For apps delivering a request queued offline; an agent calling interactively leaves it out. Rejected before the session start; a clock more than 2 minutes ahead of the server is taken as now`);
   const sessionLinks = {
@@ -112,7 +119,12 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null) {
   t('get_commitments', 'Recurring weekly time: commitments (school runs, training, classes), overhead (sleep, meals) and focus windows.', {}, () => svc.getCommitments());
   t('set_commitments', 'Replace the list of recurring weekly commitments. days are ISO weekdays 1=Mon..7=Sun; use timesPerWeek instead when there are no fixed days. Pass existing ids to keep them.', {
     commitments: z.array(z.object({ id: z.string().optional(), title: z.string(), kind: z.enum(['commitment', 'overhead', 'window']).optional().describe("commitment = unavailable and belongs to an area; overhead = unavailable and belongs to no area (sleep, meals, hygiene, moving between places); window = time available for focus work. Default commitment."), area: area.optional().describe('required for kind commitment'), days: z.array(z.number().int().min(1).max(7)).optional(), timesPerWeek: z.number().int().min(1).max(7).optional(), start: hhmm.optional(), minutes: z.number().int().min(1), usableForWork: z.boolean().optional().describe('committed but still workable (waiting, being a passenger)'), assumed: z.boolean().optional().describe('true when the number is your inference, not something the user stated'), insideWindowId: z.string().optional().describe('id of a kind:window entry this commitment is carved out of, so the window is not counted twice'), projectId: z.string().optional(), note: z.string().optional() })),
-  }, a => svc.setCommitments(a.commitments));
+  }, async a => {
+    const r = await svc.setCommitments(a.commitments);
+    // The evening post offer follows the last focus window: move it with the windows.
+    if (r.ok && social) await social.armOffer().catch(e => console.error('[set_commitments] post offer re-arm failed', (e as Error).message));
+    return r;
+  });
   t('get_capacity', 'Weekly time budget out of 168 hours: overhead, hours committed per area, focus windows, and what is still unaccounted for. Nothing is assumed.', {}, () => svc.capacity());
 
   // ---- day ----
@@ -164,15 +176,27 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null) {
   t('find_leaks', 'Where time leaks: comfortable goal work while the main step waited, overrides, unplanned work, gaps, switching, missed main steps, days without a plan. Default the last 7 days.', { from: date.optional(), to: date.optional() }, a => svc.leaks(a.from, a.to));
 
   // ---- settings & devices ----
-  t('get_settings', 'Timezone, where reminders go (desktop or mobile), and timer settings.', {}, () => svc.getSettings());
-  t('set_settings', 'Change any of: timezone (IANA name, e.g. Europe/Madrid; it sets where each day starts and ends), workplace for reminders, stand-up interval workMin, breakMin, longBreakEvery, longBreakMin, standup on/off.', {
+  t('get_settings', 'Timezone, where reminders go (desktop or mobile), timer settings, and which networks get progress posts (post_to).', {}, () => svc.getSettings());
+  t('set_settings', 'Change any of: timezone (IANA name, e.g. Europe/Madrid; it sets where each day starts and ends), workplace for reminders, stand-up interval workMin, breakMin, longBreakEvery, longBreakMin, standup on/off, post_to (networks for progress posts).', {
     timezone: z.string().optional(), workplace: z.enum(['desktop', 'mobile']).optional(), workMin: z.number().int().min(5).max(120).optional(), breakMin: z.number().int().min(1).max(60).optional(), longBreakEvery: z.number().int().min(1).max(10).optional(), longBreakMin: z.number().int().min(5).max(60).optional(), standup: z.boolean().optional(),
+    post_to: z.array(network).optional().describe('which connected networks get the day\'s progress post (the app sets it); [] for none'),
   }, a => svc.setSettings(a));
   t('add_device', 'Register a device token so server reminders (stand up, break over) can reach it. The phone app registers itself; use this for testing or a manual token.', {
     token: z.string().min(20), platform: z.enum(['ios', 'android', 'macos', 'web']), label: z.string().optional(),
   }, a => svc.addDevice(a.token, a.platform, a.label));
   t('list_devices', 'Which devices can receive reminders, and when each was last seen.', {}, () => svc.listDevices());
   t('delete_device', 'Remove a device so it stops receiving reminders.', { token: z.string() }, a => svc.deleteDevice(a.token));
+
+  // ---- posting progress in public (Pro) ----
+  t('add_social_account', 'Connect WIP (wip.co) or Bluesky so AimYear can post the day\'s progress there when the user says Post (Pro). WIP: api_key from wip.co settings. Bluesky: handle and an app password (Settings → Privacy and security → App passwords), never the account password. The login is checked, stored encrypted and never shown again. The app\'s connect screen usually calls this; if the user pastes a key into the chat, use it once and do not repeat it.', {
+    network, api_key: z.string().min(8).max(512).optional().describe('WIP only'), handle: z.string().max(253).optional().describe('Bluesky only, e.g. name.bsky.social'), app_password: z.string().max(64).optional().describe('Bluesky only: xxxx-xxxx-xxxx-xxxx'),
+  }, a => social.connect(a));
+  t('list_social_accounts', 'Connected networks (handle, since when), which of them get progress posts, and whether the user has Pro. Never returns any key or password.', {}, () => social.listAccounts());
+  t('delete_social_account', 'Disconnect a network and delete its saved login. Posts already made stay there.', { network }, a => social.disconnect(a.network));
+  t('get_post_draft', 'The day\'s progress post drafted from the record (aim and progress, main step done or not, minutes on the aim and on hard work, routines, comebacks), at most 300 characters, ending with aimyear.com; and per network whether it is ready, already posted, or skipped because the user already posted there that day. Posts nothing. Pro.', { date: date.optional() }, a => social.draft(a.date));
+  t('add_post', 'Post the day\'s progress, only after the user explicitly said to post. text is the draft as the user edited it (default: the draft from get_post_draft). Goes to the networks chosen in settings, or the ones given. A network where the user already posted that day themselves is skipped. Each day goes to each network once: a retry never posts twice. Today or yesterday only. Pro.', {
+    date: date.optional(), text: z.string().max(4000).optional(), networks: z.array(network).optional().describe('default: the networks chosen in settings'),
+  }, a => social.post(a));
 
   // ---- prompts ----
   server.registerPrompt('plan-tomorrow', { description: 'Plan tomorrow: one main step toward the goal, then the rest of life.' }, () => ({

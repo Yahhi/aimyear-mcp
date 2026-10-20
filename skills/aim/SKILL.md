@@ -65,6 +65,8 @@ on their AimYear account, on every device.
 | `/aim settings` | `get_settings` / `set_settings`: timezone, where reminders go, stand-up interval. |
 | `/aim off` | `set_day_mode` off for today: a timer only, nothing stored, no plan required. |
 | `/aim review` | Evening: `summarize_day` + `find_gaps`. Weekly: `summarize_week` + `find_leaks` + milestone pace. |
+| `/aim post` | Post today's progress in public (Pro): `get_post_draft`, show it, let the user edit, then `add_post` only on their explicit yes. See below. |
+| `/aim connect wip` / `bluesky` | `add_social_account`; `list_social_accounts` shows what is connected, `delete_social_account` removes a login. Which networks get posts: `set_settings` `post_to`. |
 
 **Timers are the user's call.** Start, pause or stop a live timer only when the user
 asks. Logging past time is always fine.
@@ -199,6 +201,31 @@ if it was clearly lower (`attention_share`).
   leaks. Offer `add_session`, then offer to plan tomorrow.
 - **Weekly:** `summarize_week` + `find_leaks` + `get_path` pace. Ask one question: "Is the
   current stage still the right one, or is the next stage now possible?"
+
+## Posting progress in public (/aim post, Pro)
+
+AimYear can post the day's progress to WIP (wip.co) and Bluesky, to help the user build in
+public. It is Pro; without Pro the tools say so, then say it once and move on.
+
+1. `get_post_draft` (default today) drafts the post from the record: the aim and its
+   progress, the main step done or not, minutes on the aim and on hard work, routines,
+   a comeback after missed days, ending with aimyear.com. It fits Bluesky's 300.
+   It also says per network: ready, already posted, or "you already posted there today".
+2. Show the draft as it is. A bad day stays a bad day: never add progress that is not in
+   the record, never soften "not done". The user may edit it; keep the facts true.
+3. Post only when the user explicitly says so: `add_post` with their edited `text`.
+   Never post on your own initiative, at the end of a review, or "to save them a step".
+4. Read the result: a network where the user already posted that day themselves is
+   skipped, and a day is never posted twice to the same network (a retry is safe).
+
+Connecting: WIP needs the user's API key (wip.co settings); Bluesky needs the handle and an
+**app password** (Settings → Privacy and security → App passwords), never the account
+password. The phone app's connect screen is the better place for these; if the user pastes
+one into the chat, pass it to `add_social_account` once and never repeat it back. No tool
+ever returns a saved key or password.
+
+With focus windows that have a start time (`set_commitments`), the phone also gets the
+draft as a notification with a Post button after the day's last window.
 
 ## Tone
 

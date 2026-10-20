@@ -2,7 +2,7 @@ import { initializeApp, cert, getApps, applicationDefault } from 'firebase-admin
 import { getFirestore, Firestore, FieldValue } from 'firebase-admin/firestore';
 import { readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import type { Goal, Path, Profile, Day, Block, Session, Mode, Workplace, Commitment, Device, Pending, Direction, Routine, AppliedOp } from './types.js';
+import type { Goal, Path, Profile, Day, Block, Session, Mode, Workplace, Commitment, Device, Pending, Direction, Routine, AppliedOp, Network, SocialAccount, PostRecord } from './types.js';
 
 let dbSingleton: Firestore | null = null;
 export function initFirestore(): Firestore {
@@ -287,9 +287,44 @@ export class Store {
 
   // --- pending reminders ---
   async savePending(p: Pending) { await this.db.collection(PENDING).doc(p.id).set(p); }
+  async removePending(id: string) { await this.db.collection(PENDING).doc(id).delete(); }
   async clearPendings(blockId: string) {
     const snap = await this.db.collection(PENDING).where('uid', '==', this.uid).where('blockId', '==', blockId).get();
     await Promise.all(snap.docs.map(d => d.ref.delete()));
+  }
+
+  // --- social accounts and the posts AimYear made ---
+  private social() { return this.user().collection('social'); }
+  private posts() { return this.user().collection('posts'); }
+  async getSocialAccounts(): Promise<SocialAccount[]> {
+    const snap = await this.social().get();
+    return snap.docs.map(d => d.data() as SocialAccount);
+  }
+  async getSocialAccount(network: Network): Promise<SocialAccount | null> {
+    const snap = await this.social().doc(network).get();
+    return snap.exists ? (snap.data() as SocialAccount) : null;
+  }
+  async saveSocialAccount(a: SocialAccount) { await this.social().doc(a.network).set(a); }
+  async deleteSocialAccount(network: Network) { await this.social().doc(network).delete(); }
+  async getPostRecord(id: string): Promise<PostRecord | null> {
+    const snap = await this.posts().doc(id).get();
+    return snap.exists ? (snap.data() as PostRecord) : null;
+  }
+  async savePostRecord(r: PostRecord) { await this.posts().doc(r.id).set(r); }
+  /**
+   * Takes the right to post for one day and network, in a transaction. It is refused when
+   * the post is already made, or when another attempt claimed it less than staleMs ago;
+   * a failed or long-stale attempt can be claimed again.
+   */
+  async claimPost(r: PostRecord, staleMs: number): Promise<{ claimed: true } | { claimed: false; existing: PostRecord }> {
+    const ref = this.posts().doc(r.id);
+    return this.db.runTransaction(async tx => {
+      const snap = await tx.get(ref);
+      const cur = snap.exists ? (snap.data() as PostRecord) : null;
+      if (cur && (cur.status === 'posted' || (cur.status === 'posting' && Date.parse(r.attemptAt) - Date.parse(cur.attemptAt) < staleMs))) return { claimed: false as const, existing: cur };
+      tx.set(ref, r);
+      return { claimed: true as const };
+    });
   }
 
   // --- blocks ---

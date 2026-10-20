@@ -3,7 +3,8 @@ import { addDays, daysBetween, endOfDay, isValidDate, localDate, localTime, minu
 import { computeAttention, findGaps } from './domain/attention.js';
 import { checkGoal, checkStepTitle, type GoalDraft } from './domain/goal.js';
 import { classify, decideVerdict, isGoalWork, leverFor } from './domain/classify.js';
-import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, PlanItem, Profile, Project, Routine, Session, Step, Stop, Workplace } from './types.js';
+import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, PlanItem, Profile, Project, Routine, Session, Step, Stop, Workplace, Network } from './types.js';
+import { NETWORKS } from './types.js';
 
 export class AimError extends Error {}
 
@@ -32,6 +33,8 @@ export class AimService {
     if (!this.profileCache) this.profileCache = await this.store.getProfile();
     return this.profileCache;
   }
+  /** Another service saved the profile (e.g. the networks for posts): read it again next time. */
+  forgetProfile() { this.profileCache = null; }
   private async tz() { return (await this.profile()).timezone; }
   async today() { return localDate(new Date(), await this.tz()); }
   private async dayWindow(date: string) { const tz = await this.tz(); return { start: startOfDay(date, tz), end: endOfDay(date, tz) }; }
@@ -330,19 +333,20 @@ export class AimService {
   private settingsView(prof: Profile) {
     const p = prof.pomodoro;
     return {
-      timezone: prof.timezone, workplace: prof.defaultWorkplace, ...p,
-      speak: `Timezone ${prof.timezone}. Reminders go to ${prof.defaultWorkplace}. Stand-up every ${p.workMin} min${p.standup ? '' : ' (stand-up reminders off)'}, ${p.breakMin} min break, a ${p.longBreakMin} min break every ${p.longBreakEvery} blocks.`,
+      timezone: prof.timezone, workplace: prof.defaultWorkplace, ...p, post_to: prof.postTo ?? null,
+      speak: `Timezone ${prof.timezone}. Reminders go to ${prof.defaultWorkplace}. Stand-up every ${p.workMin} min${p.standup ? '' : ' (stand-up reminders off)'}, ${p.breakMin} min break, a ${p.longBreakMin} min break every ${p.longBreakEvery} blocks.${prof.postTo ? ` Progress posts go to: ${prof.postTo.join(', ') || 'no network'}.` : ''}`,
     };
   }
   async getSettings() { return this.settingsView(await this.profile()); }
-  async setSettings(s: { timezone?: string; workplace?: Workplace; workMin?: number; breakMin?: number; longBreakEvery?: number; longBreakMin?: number; standup?: boolean }) {
+  async setSettings(s: { timezone?: string; workplace?: Workplace; workMin?: number; breakMin?: number; longBreakEvery?: number; longBreakMin?: number; standup?: boolean; post_to?: Network[] }) {
     const prof = await this.profile();
     if (s.timezone !== undefined) {
       try { new Intl.DateTimeFormat('en', { timeZone: s.timezone }); } catch { throw new AimError(`unknown timezone "${s.timezone}"; use an IANA name such as Europe/Madrid`); }
       prof.timezone = s.timezone;
     }
     if (s.workplace) prof.defaultWorkplace = s.workplace;
-    const { timezone: _t, workplace: _w, ...pom } = s;
+    if (s.post_to) prof.postTo = NETWORKS.filter(n => s.post_to!.includes(n));
+    const { timezone: _t, workplace: _w, post_to: _p, ...pom } = s;
     prof.pomodoro = { ...prof.pomodoro, ...Object.fromEntries(Object.entries(pom).filter(([, v]) => v !== undefined)) };
     await this.store.saveProfile(prof); this.profileCache = prof;
     const view = this.settingsView(prof);
@@ -427,7 +431,7 @@ export class AimService {
   }
 
   /** Minutes of declared focus window on that weekday, net of commitments carved out of them. */
-  private async windowMinutesFor(date: string): Promise<number> {
+  async windowMinutesFor(date: string): Promise<number> {
     const items = await this.store.getCommitments();
     const [y, m, d] = date.split('-').map(Number);
     const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
@@ -1274,7 +1278,7 @@ const isOpen = (m: Milestone) => m.status !== 'done' && m.status !== 'retired';
 
 function slug(s: string) { return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || newId(); }
 
-function parseLocal(date: string, hhmm: string, tz: string): Date {
+export function parseLocal(date: string, hhmm: string, tz: string): Date {
   const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
   if (!m) throw new AimError(`time must be HH:MM, got "${hhmm}"`);
   const start = startOfDay(date, tz);

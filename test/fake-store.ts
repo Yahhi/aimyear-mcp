@@ -1,5 +1,5 @@
 import { DEFAULT_PROFILE, plainOp, type Tx } from '../src/store.js';
-import type { AppliedOp, Block, Commitment, Day, Device, Goal, Mode, Path, Pending, Profile, Routine, Session } from '../src/types.js';
+import type { AppliedOp, Block, Commitment, Day, Device, Goal, Mode, Path, Network, Pending, PostRecord, Profile, Routine, Session, SocialAccount } from '../src/types.js';
 
 /** The Store's interface kept in memory, so service logic can be tested without Firestore. */
 export class FakeStore {
@@ -15,6 +15,8 @@ export class FakeStore {
   devices = new Map<string, Device>();
   pendings = new Map<string, Pending>();
   ops = new Map<string, AppliedOp>();
+  social = new Map<Network, SocialAccount>();
+  posts = new Map<string, PostRecord>();
   /** Every write that reached the store (sessions, ops, path), so a test can assert "nothing written". */
   writes = 0;
 
@@ -64,6 +66,19 @@ export class FakeStore {
   async getDevices() { return [...this.devices.values()]; }
   async removeDevice(t: string) { this.devices.delete(t); }
   async savePending(p: Pending) { this.pendings.set(p.id, p); }
+  async removePending(id: string) { this.pendings.delete(id); }
+  async getSocialAccounts() { return [...this.social.values()].map(a => structuredClone(a)); }
+  async getSocialAccount(n: Network) { const a = this.social.get(n); return a ? structuredClone(a) : null; }
+  async saveSocialAccount(a: SocialAccount) { this.social.set(a.network, structuredClone(a)); }
+  async deleteSocialAccount(n: Network) { this.social.delete(n); }
+  async getPostRecord(id: string) { const r = this.posts.get(id); return r ? structuredClone(r) : null; }
+  async savePostRecord(r: PostRecord) { this.posts.set(r.id, structuredClone(r)); }
+  async claimPost(r: PostRecord, staleMs: number) {
+    const cur = this.posts.get(r.id);
+    if (cur && (cur.status === 'posted' || (cur.status === 'posting' && Date.parse(r.attemptAt) - Date.parse(cur.attemptAt) < staleMs))) return { claimed: false as const, existing: structuredClone(cur) };
+    this.posts.set(r.id, structuredClone(r));
+    return { claimed: true as const };
+  }
   async clearPendings(blockId: string) { for (const [k, p] of this.pendings) if (p.blockId === blockId) this.pendings.delete(k); }
   async saveBlock(b: Block) { this.blocks.set(b.id, structuredClone(b)); }
   async getRunningBlock() { return [...this.blocks.values()].find(b => !b.ended && !b.cancelled) ?? null; }

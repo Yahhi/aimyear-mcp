@@ -122,6 +122,11 @@ export interface Profile {
   pomodoro: { workMin: number; breakMin: number; longBreakEvery: number; longBreakMin: number; standup: boolean };
   defaultMode: Mode;
   defaultWorkplace: Workplace;
+  /**
+   * Which connected networks get the day's progress post, chosen in the app. Unset means
+   * every connected network. A network that is not connected is ignored.
+   */
+  postTo?: Network[];
 }
 
 export type Direction = 'up' | 'down';
@@ -215,7 +220,8 @@ export interface Pending {
   uid: string;
   blockId: string;
   dueAt: string;
-  kind: 'block_end' | 'break_end' | 'standup';
+  /** post_offer: the evening draft of the day's progress post, with a Post action (Pro). blockId is '' then. */
+  kind: 'block_end' | 'break_end' | 'standup' | 'post_offer';
   workplace: Workplace;
   minutes: number;
   breakMin: number;
@@ -223,4 +229,46 @@ export interface Pending {
   elapsedMin?: number;
   /** The last reminder this timer will send: it looks forgotten. */
   final?: boolean;
+  /** post_offer: the local day the post is about. */
+  date?: string;
+}
+
+// ---------- posting progress in public (docs/public-posting.md) ----------
+
+export const NETWORKS = ['wip', 'bluesky'] as const;
+export type Network = (typeof NETWORKS)[number];
+
+/** AES-256-GCM output, base64. The plaintext is the network's credentials as JSON. */
+export interface SealedSecret { v: 1; iv: string; tag: string; data: string }
+
+/**
+ * One connected network, at users/{uid}/social/{network}. `secret` is the only place
+ * the credentials live, sealed; nothing else in the doc is secret.
+ */
+export interface SocialAccount {
+  network: Network;
+  /** The public account name: WIP username, Bluesky handle. */
+  handle: string;
+  connectedAt: string;
+  secret: SealedSecret;
+}
+
+/**
+ * The post AimYear made (or is making) for one day on one network, at
+ * users/{uid}/posts/{date}_{network}. Its id tells AimYear's own posts apart from the
+ * ones the user wrote on the site, and its status makes a retry post nothing twice.
+ */
+export interface PostRecord {
+  id: string;
+  date: string;
+  network: Network;
+  /** posting: claimed, the network call is under way (or crashed mid-way). */
+  status: 'posting' | 'posted' | 'failed';
+  text: string;
+  attemptAt: string;
+  /** The network's id: WIP todo id, Bluesky at:// uri. */
+  postId?: string;
+  url?: string;
+  postedAt?: string;
+  error?: string;
 }

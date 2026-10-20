@@ -12,7 +12,8 @@ moves the goal: selling, talking to users, publishing.
 - **Free:** sign-in on any number of devices, aims, plans, routines, time tracking and
   reviews through your own agent. No AI runs on AimYear's side, so there are no AI costs.
 - **Pro** ($49/year or $8/month, with the coming phone app): notifications, reviews
-  written by AimYear, AimYear's own AI coach and Google Calendar sync.
+  written by AimYear, AimYear's own AI coach, Google Calendar sync, and posting your
+  day's progress to WIP and Bluesky.
 
 Website: [aimyear.com](https://aimyear.com) · Setup guide: [aimyear.com/connect.html](https://aimyear.com/connect.html) · Privacy: [aimyear.com/privacy.html](https://aimyear.com/privacy.html)
 · Contact: privacy@aimyear.com
@@ -45,7 +46,7 @@ provider; AimYear only receives the tool calls. Logs keep the tool name, success
 never argument values. To delete your account and data, email privacy@aimyear.com. Details:
 [privacy policy](https://aimyear.com/privacy.html).
 
-## Tools (43)
+## Tools (48)
 
 Names say what a tool does: `get_` reads one thing, `list_` reads several, `find_` looks
 for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change one entry.
@@ -59,6 +60,16 @@ for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change 
 | Timer and sessions | `get_now`, `start_session`, `add_note`, `split_attention`, `stop_session`, `stop_timer`, `add_session`, `edit_session`, `delete_session`, `list_sessions`, `find_gaps` |
 | Reviews | `summarize_day`, `summarize_week`, `find_leaks` |
 | Settings and devices | `get_settings`, `set_settings`, `add_device`, `list_devices`, `delete_device` |
+| Posting progress (Pro) | `add_social_account`, `list_social_accounts`, `delete_social_account`, `get_post_draft`, `add_post` |
+
+0.8.0 adds posting the day's progress in public, to WIP (wip.co) and Bluesky.
+The draft is written
+from the day's record: the aim and its progress, the main step done or not, minutes on the aim
+and on hard work, routines, a comeback after missed days, and it ends with aimyear.com. AimYear
+posts only when the user says Post. Before posting on a network it reads the user's own feed,
+and skips a network where they already posted that day themselves. Each day goes to each
+network once, however often a post is retried. The draft also comes as an evening push with a
+Post action, at the end of the day's last focus window. Pro only.
 
 0.4.2 adds the hard-first check: `set_plan` warns when nothing in the day is on a hard lever,
 and `add_steps` / `set_levers` warn when a stage starts with preparation before the first
@@ -121,12 +132,16 @@ The rest of this file is for working on the server itself. You don't need it to 
 | `src/calllog.ts` | One structured log line per MCP call: method, tool, ok, error code, latency, user, client. Never argument values. |
 | `src/tools.ts` | Tool registration, annotations (read-only / destructive / idempotent) and the server instructions. |
 | `src/service.ts`, `src/domain/` | The rules: goal rubric, classification, attention, plans, sessions. |
+| `src/social/` | Posting progress: the draft (`draft.ts`), the WIP and Bluesky clients (`clients.ts`), credential sealing (`crypto.ts`), connect / check / post / evening offer (`service.ts`). |
+| `src/pro.ts` | The one Pro check point. Today a hand-kept uid list (`AIMYEAR_PRO_UIDS`); RevenueCat later. |
 | `src/surface.ts` | The surface fingerprint behind `surface.lock.json`. |
 | `.githooks/pre-commit` | Regenerates `docs/ACCESS.md` from `src/access.ts` and stages it on every commit, so the committed table can't drift (`npm ci` points `core.hooksPath` at it through the `prepare` script; `test/access.test.ts` still fails on a stale file). |
 
 Data lives in Firestore under `users/{uid}/aim/{goal,path,profile}`, `users/{uid}/days`,
 `users/{uid}/sessions`, `users/{uid}/blocks`, `users/{uid}/ops` (applied `op_id`s, TTL on
-`expiresAt`); OAuth under `oauth_clients`, `oauth_requests`, `oauth_codes`, `oauth_tokens`;
+`expiresAt`), `users/{uid}/social/{wip,bluesky}` (handle and the login sealed with AES-256-GCM),
+`users/{uid}/posts/{date}_{network}` (the posts AimYear made: their ids tell them apart from the
+user's own posts, and the doc is claimed before each post so a retry never posts twice); OAuth under `oauth_clients`, `oauth_requests`, `oauth_codes`, `oauth_tokens`;
 reminders in `pending_notifications` (claimed by a transactional delete before each push).
 
 ## Run locally
@@ -144,7 +159,10 @@ Credentials: a Firebase admin service account at `~/.aimyear/service-account.jso
 
 Env: `AIMYEAR_UID` (stdio), `AIMYEAR_TOKENS` (HTTP: static `token=uid` pairs for Claude Code
 scripts, the menu bar app and the scheduler), `AIMYEAR_BASE_URL` (the public URL; the OAuth
-issuer), `AIMYEAR_ALLOWED_ORIGINS` (extra browser origins), `AIMYEAR_WORKPLACE`, `AIMYEAR_TZ`.
+issuer), `AIMYEAR_ALLOWED_ORIGINS` (extra browser origins), `AIMYEAR_WORKPLACE`, `AIMYEAR_TZ`,
+`AIMYEAR_SOCIAL_KEY` (32 random bytes, base64, from Secret Manager: seals WIP and Bluesky logins;
+without it connecting a network refuses), `AIMYEAR_PRO_UIDS` (comma-separated uids that have Pro
+until RevenueCat is wired; unset means nobody).
 
 ## Tests
 
@@ -170,7 +188,8 @@ gcloud run deploy aimyear-mcp --source . --project aimyear-app --region us-centr
 ```
 
 Env vars on the service: `AIMYEAR_TOKENS`, `AIMYEAR_TZ`, `AIMYEAR_PROJECT`,
-`AIMYEAR_BASE_URL=https://mcp.aimyear.com`. `mcp.aimyear.com` is a Cloud Run domain mapping
+`AIMYEAR_BASE_URL=https://mcp.aimyear.com`, `AIMYEAR_SOCIAL_KEY` (as a Secret Manager secret,
+never a plain env value), `AIMYEAR_PRO_UIDS`. `mcp.aimyear.com` is a Cloud Run domain mapping
 (CNAME to `ghs.googlehosted.com` in Route 53) and is in Firebase Auth's authorized domains.
 Health: `/health`. The legacy URL `https://<service>/c/<token>/mcp` still works.
 

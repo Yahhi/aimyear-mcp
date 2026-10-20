@@ -64,6 +64,11 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `add_device` | auth | changes the signed-in person's data |
 | `list_devices` | auth | reads the signed-in person's private data |
 | `delete_device` | auth | changes the signed-in person's data |
+| `add_social_account` | auth | stores the person's own WIP or Bluesky login, encrypted |
+| `list_social_accounts` | auth | reads which networks the person connected (never the logins) |
+| `delete_social_account` | auth | deletes the person's saved network login |
+| `get_post_draft` | auth | drafts a post from the person's private record and reads their own feed |
+| `add_post` | auth | posts on the person's own WIP or Bluesky account, at their explicit request |
 
 ## HTTP routes
 
@@ -78,6 +83,7 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `DELETE /c/:token/mcp` | public | 405: the server is stateless, POST only |
 | `GET /now/:token` | auth | the person's running timer, for the menu bar app |
 | `POST /pull/:token` | auth | claims the person's desktop reminders |
+| `POST /social/post` | auth | the Post action of the evening offer: posts the person's day at their explicit request (Bearer token) |
 | `POST /tick/:token` | admin | scheduler: delivers due reminders for everyone |
 | `GET /.well-known/oauth-authorization-server` | public | OAuth discovery (RFC 8414) |
 | `GET /.well-known/oauth-protected-resource` | public | OAuth discovery (RFC 9728) |

@@ -1,6 +1,8 @@
-import { getMessaging } from 'firebase-admin/messaging';
-import { Notifications } from './store.js';
+import { getMessaging, type BaseMessage } from 'firebase-admin/messaging';
+import { Notifications, Store } from './store.js';
 import { localDate } from './dates.js';
+import { AimService } from './service.js';
+import { SocialService } from './social/service.js';
 import type { Device, Pending, Workplace } from './types.js';
 
 const DESKTOP: Device['platform'][] = ['macos', 'web'];
@@ -33,6 +35,38 @@ export function textFor(p: Pending, mainStep: { title: string; done: boolean } |
   return { title: 'Break over', body: 'Back to it, or stop for today.' };
 }
 
+/** Builds the posting service for one user; tests pass a fake. */
+export type SocialFor = (uid: string) => Pick<SocialService, 'eveningOffer' | 'armOffer'>;
+const realSocialFor: SocialFor = uid => { const store = new Store(uid); return new SocialService(store, new AimService(store, 'tick', 'mobile')); };
+
+/** Pushes one message to the given devices and drops tokens that are gone. */
+async function push(uid: string, targets: Device[], message: BaseMessage, notif: Notifications) {
+  const res = await getMessaging().sendEachForMulticast({ tokens: targets.map(d => d.token), ...message });
+  await Promise.all(res.responses.map(async (r, i) => {
+    const code = (r.error as { code?: string } | undefined)?.code ?? '';
+    if (!r.success && /registration-token-not-registered|invalid-argument/.test(code)) await notif.dropDevice(uid, targets[i].token);
+  }));
+  return { sent: res.successCount, failed: res.failureCount };
+}
+
+/**
+ * The evening offer: the day's draft with a Post action (category AIMYEAR_POST_OFFER).
+ * The tap calls POST /social/post with data.date and data.text; nothing is posted here.
+ * Pro, and only for networks where the user has not posted that day.
+ */
+export async function deliverPostOffer(p: Pending, notif: Notifications, socialFor: SocialFor = realSocialFor): Promise<{ sent: number; failed: number; reason?: string }> {
+  const offer = await socialFor(p.uid).eveningOffer(p.date ?? '');
+  if (!offer.send) return { sent: 0, failed: 0, reason: offer.reason };
+  const devices = await notif.devicesOf(p.uid);
+  if (!devices.length) return { sent: 0, failed: 0, reason: 'no registered devices' };
+  return push(p.uid, pickDevices(devices, 'mobile'), {
+    notification: { title: offer.title, body: offer.body },
+    data: offer.data,
+    apns: { payload: { aps: { sound: 'default', category: 'AIMYEAR_POST_OFFER', 'interruption-level': 'active' } } },
+    android: { priority: 'normal', notification: { channelId: 'aimyear_posts', clickAction: 'AIMYEAR_POST_OFFER' } },
+  }, notif);
+}
+
 /** Sends one reminder. Returns how many devices accepted it. */
 export async function deliver(p: Pending, notif: Notifications): Promise<{ sent: number; failed: number; reason?: string }> {
   const devices = await notif.devicesOf(p.uid);
@@ -43,22 +77,13 @@ export async function deliver(p: Pending, notif: Notifications): Promise<{ sent:
   const mainStep = await notif.mainStepOf(p.uid, localDate(new Date(p.dueAt), tz));
   const { title, body } = textFor(p, mainStep);
 
-  const res = await getMessaging().sendEachForMulticast({
-    tokens: targets.map(d => d.token),
+  // A token that is gone stays gone: push() drops it so the next reminder is not wasted on it.
+  return push(p.uid, targets, {
     notification: { title, body },
     data: { kind: p.kind, blockId: p.blockId },
     apns: { payload: { aps: { sound: 'default', 'interruption-level': p.kind === 'block_end' ? 'time-sensitive' : 'active' } } },
     android: { priority: 'high', notification: { channelId: 'aimyear_timer', sound: 'default' } },
-  });
-
-  // A token that is gone stays gone: drop it so the next reminder is not wasted on it.
-  await Promise.all(res.responses.map(async (r, i) => {
-    const code = (r.error as { code?: string } | undefined)?.code ?? '';
-    if (!r.success && /registration-token-not-registered|invalid-argument/.test(code)) {
-      await notif.dropDevice(p.uid, targets[i].token);
-    }
-  }));
-  return { sent: res.successCount, failed: res.failureCount };
+  }, notif);
 }
 
 /**
@@ -77,7 +102,7 @@ export async function queueNextStandup(p: Pending, notif: Notifications): Promis
  * claim (a transactional delete) comes before the push: two overlapping ticks both see
  * a reminder due, but only the one that claims it pushes and re-arms; the other skips.
  */
-export async function tick(notif: Notifications, now = new Date()) {
+export async function tick(notif: Notifications, now = new Date(), socialFor: SocialFor = realSocialFor) {
   const all = await notif.due(now.toISOString());
   // Desktop reminders are pulled by the Mac agent, not pushed. Drop only the ones
   // too old to be worth saying out loud, so the queue cannot grow without bound.
@@ -87,6 +112,15 @@ export async function tick(notif: Notifications, now = new Date()) {
   const results: { id: string; kind: string; sent: number; failed: number; reason?: string; continued?: string }[] = [];
   for (const p of due) {
     if (!(await notif.claim(p.id))) continue;
+    if (p.kind === 'post_offer') {
+      let r: { sent: number; failed: number; reason?: string };
+      try { r = await deliverPostOffer(p, notif, socialFor); } catch (e) { r = { sent: 0, failed: 0, reason: (e as Error).message }; }
+      // One offer a day: queue the next evening's, whatever happened to this one.
+      let continued: string | undefined;
+      try { continued = (await socialFor(p.uid).armOffer())?.due_at; } catch (e) { console.error('[tick] post offer re-arm failed', (e as Error).message); }
+      results.push({ id: p.id, kind: p.kind, ...r, continued });
+      continue;
+    }
     let r: { sent: number; failed: number; reason?: string };
     try { r = await deliver(p, notif); } catch (e) { r = { sent: 0, failed: 0, reason: (e as Error).message }; }
     let continued: string | undefined;

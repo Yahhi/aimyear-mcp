@@ -13,7 +13,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { Store, Notifications } from './store.js';
-import { AimService } from './service.js';
+import { AimService, AimError } from './service.js';
 import { registerTools, INSTRUCTIONS } from './tools.js';
 import { tick, textFor, queueNextStandup } from './notifier.js';
 import { localDate } from './dates.js';
@@ -21,11 +21,16 @@ import { isPublicBody } from './access.js';
 import { FirestoreOAuthProvider, SCOPE } from './oauth.js';
 import { instrument, logRefused, type CallContext } from './calllog.js';
 import { VERSION } from './version.js';
+import { SocialService, type SocialDeps } from './social/service.js';
+import { NETWORKS, type Network } from './types.js';
 import type { Workplace } from './types.js';
 
-export function buildServer(uid: string | null, clientSessionId: string, workplace: Workplace) {
+export function buildServer(uid: string | null, clientSessionId: string, workplace: Workplace, socialDeps?: SocialDeps) {
   const server = new McpServer({ name: 'aimyear', version: VERSION }, { instructions: INSTRUCTIONS });
-  registerTools(server, uid ? new AimService(new Store(uid), clientSessionId, workplace) : null);
+  if (!uid) { registerTools(server, null, null); return server; }
+  const store = new Store(uid);
+  const svc = new AimService(store, clientSessionId, workplace);
+  registerTools(server, svc, new SocialService(store, svc, socialDeps));
   return server;
 }
 
@@ -44,9 +49,11 @@ export interface AppOptions {
   baseUrl: URL;
   provider?: FirestoreOAuthProvider;
   extraOrigins?: string[];
+  /** Tests pass fake networks and a fake Pro check; production uses the real ones. */
+  socialDeps?: SocialDeps;
 }
 
-export function createApp({ tokens, baseUrl, provider, extraOrigins = [] }: AppOptions) {
+export function createApp({ tokens, baseUrl, provider, extraOrigins = [], socialDeps }: AppOptions) {
   const resourceUrl = new URL('/mcp', baseUrl);
   const oauth = provider ?? new FirestoreOAuthProvider(resourceUrl);
   const resourceMetadata = getOAuthProtectedResourceMetadataUrl(resourceUrl);
@@ -151,13 +158,35 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [] }: AppO
     }
     const workplace = (req.header('x-aimyear-workplace') as Workplace) ?? 'mobile';
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    const server = buildServer(signedIn?.uid ?? null, signedIn ? `remote:${signedIn.client}` : 'anonymous', workplace);
+    const server = buildServer(signedIn?.uid ?? null, signedIn ? `remote:${signedIn.client}` : 'anonymous', workplace, socialDeps);
     instrument(transport, req.body, ctx);
     res.on('close', () => { transport.close().catch(() => {}); server.close().catch(() => {}); });
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   };
   const bearer = (req: express.Request) => (req.header('authorization') ?? '').replace(/^Bearer\s+/i, '').trim();
+  // The Post action of the evening offer (the phone app, a notification button). Same
+  // sign-in as /mcp: an OAuth access token or a static token, as a Bearer header.
+  // Body: { date, text?, networks? }. Safe to retry: a day goes to each network once.
+  app.post('/social/post', async (req, res) => {
+    try {
+      if (!originAllowed(req.header('origin'), baseUrl, extraOrigins)) { res.status(403).json({ error: 'origin not allowed' }); return; }
+      const who = await identify(bearer(req));
+      if (!who || who === 'invalid') { res.status(401).set('WWW-Authenticate', `Bearer resource_metadata="${resourceMetadata}"`).json({ error: 'sign in required' }); return; }
+      const b = (req.body ?? {}) as { date?: unknown; text?: unknown; networks?: unknown };
+      const date = typeof b.date === 'string' ? b.date : undefined;
+      const text = typeof b.text === 'string' ? b.text : undefined;
+      const networks = Array.isArray(b.networks) ? b.networks.filter((n): n is Network => (NETWORKS as readonly string[]).includes(n as string)) : undefined;
+      const store = new Store(who.uid);
+      const social = new SocialService(store, new AimService(store, 'social-post', 'mobile'), socialDeps);
+      res.json(await social.post({ date, text, networks }));
+    } catch (e) {
+      const msg = e instanceof AimError ? e.message : 'Something went wrong. Try again: a retry never posts the same day twice.';
+      if (!(e instanceof AimError)) console.error('[social/post] failed', (e as Error).name);
+      res.status(e instanceof AimError ? 400 : 500).json({ error: msg, speak: msg });
+    }
+  });
+
   const postOnly = (_req: express.Request, res: express.Response) => { res.status(405).set('Allow', 'POST').json({ error: 'stateless server: POST only' }); };
   for (const path of ['/mcp', '/c/:token/mcp']) { app.get(path, postOnly); app.delete(path, postOnly); }
   app.post('/mcp', (req, res) => handle(req, res, bearer(req)).catch(e => { console.error(e); if (!res.headersSent) res.status(500).end(); }));
