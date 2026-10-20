@@ -57,7 +57,7 @@ on their AimYear account, on every device.
 | `/aim routines` | `get_routines` / `set_routines`: small daily checks ("talk with one person on Reddit") the server adds to every matching day, or weekly counts (`perWeek`: "talk to 5 people a week"). |
 | `/aim focus <task>` | `start_session`. Honor the verdict (below). |
 | `/aim pause` | `stop_timer` with a real `summary` and `outcome`. It stops the timer and closes every running session; there is no paused session. Resume = `start_session`. |
-| `/aim done [summary]` | `stop_session` with an outcome and a real summary (what changed, not the task name). The timer keeps running for other sessions. |
+| `/aim done [summary]` | `stop_session` with an outcome and a real summary (what changed, not the task name). Pass the `session_id` from `get_now`; without it the server stops only this connection's single running session and otherwise lists the candidates. `op_id`, `end_at` and `start_at` are for apps replaying queued requests: never invent them. The timer keeps running for other sessions. |
 | `/aim log <minutes> <what>` | `add_session` with the right area. Use it for past work, calls, kids, workout. |
 | `/aim fix` | `list_sessions` to find the id, then `edit_session` (times, task, area, lever, project, summary, attention) or `delete_session`. Use it when a timer was forgotten or a session was labelled wrong. Never use `stop_session` on a session that already ended. |
 | `/aim split 70/30` | `split_attention` across running sessions. |
