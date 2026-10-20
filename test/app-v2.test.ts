@@ -103,8 +103,10 @@ test('POST /social/post accepts the Firebase token too (and still enforces Pro)'
   const a = await startTestApp();
   try {
     const r = await post(`${a.url}/social/post`, { date: '2026-10-20' }, bearer(JWT_U1));
-    assert.equal(r.status, 400, 'signed in: the refusal is Pro, not the sign-in');
-    assert.match((await r.json()).speak, /Pro/);
+    assert.equal(r.status, 402, 'signed in: the refusal is Pro, not the sign-in');
+    const body = await r.json();
+    assert.equal(body.code, 'pro_required', 'the app keys the paywall on the code, not the wording');
+    assert.match(body.speak, /Pro/);
     assert.equal((await post(`${a.url}/social/post`, {}, bearer(JWT_REVOKED))).status, 401);
   } finally { await a.close(); }
 });
@@ -234,7 +236,7 @@ test('the desktop pull hands each reminder out once, claiming due ones tick has 
 });
 
 test('POST /desktop/reminders and /desktop/reminders/action with the app\'s Bearer: pull, snooze, break', async () => {
-  const a = await startTestApp();
+  const a = await startTestApp({ pro: { isPro: async (uid: string) => uid === 'u1' } as any });
   try {
     assert.equal((await post(`${a.url}/desktop/reminders`, {}, {})).status, 401);
     a.notif.pending.set('b1-standup-0', standup());
@@ -529,4 +531,35 @@ test('a replayed stop of the last session does not end a timer that a newer sess
   const s2 = await svc.startSession({ task: 'Afternoon outreach', area: 'happiness' });
   await svc.stopSession('sent 5', 'partial', s1.session!.id, undefined, { opId: 'op-stop-replay-1', endAt: new Date().toISOString() });
   assert.equal(store.blocks.get(s2.block!.id!)!.ended, false);
+});
+
+test('desktop reminders are Pro: a Free account gets 402 pro_required, never the reminders', async () => {
+  const a = await startTestApp({ pro: { isPro: async () => false } as any });
+  try {
+    a.notif.pending.set('b1-standup-0', standup());
+    for (const path of ['/desktop/reminders', '/desktop/reminders/action']) {
+      const r = await post(`${a.url}${path}`, { action: 'snooze' }, bearer(JWT_U1));
+      assert.equal(r.status, 402, path);
+      assert.equal((await r.json()).code, 'pro_required', path);
+    }
+    assert.ok(a.notif.pending.has('b1-standup-0'), 'the refused pull handed nothing out');
+  } finally { await a.close(); }
+});
+
+test('delete_session on the last running session stops the timer; with another one running, it keeps going', async () => {
+  const store = new FakeStore();
+  const svc = new AimService(store as any, 'conn');
+  const a = await svc.startSession({ task: 'Write the newsletter', area: 'happiness' });
+  const b = await svc.startSession({ task: 'Reply to support', area: 'happiness' });
+  const blockId = a.block!.id!;
+
+  const first = await svc.deleteSession(a.session!.id);
+  assert.equal(first.timer_stopped, false);
+  assert.equal(store.blocks.get(blockId)!.ended, false, 'one session still runs');
+
+  const last = await svc.deleteSession(b.session!.id);
+  assert.equal(last.timer_stopped, true);
+  assert.equal(store.blocks.get(blockId)!.ended, true, 'no session is left, so no timer');
+  assert.equal([...store.pendings.values()].filter(p => p.blockId === blockId).length, 0, 'its reminders are gone');
+  assert.match(last.speak, /timer stopped/);
 });

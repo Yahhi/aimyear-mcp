@@ -15,7 +15,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { Store, Notifications } from './store.js';
-import { AimService, AimError } from './service.js';
+import { AimService, AimError, ProRequiredError } from './service.js';
 import { registerTools, INSTRUCTIONS } from './tools.js';
 import { getAuth } from 'firebase-admin/auth';
 import { timingSafeEqual, createHash } from 'node:crypto';
@@ -218,6 +218,7 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
     } catch (e) {
       const msg = e instanceof AimError ? e.message : 'Something went wrong. Try again: a retry never posts the same day twice.';
       if (!(e instanceof AimError)) console.error('[social/post] failed', (e as Error).name);
+      if (e instanceof ProRequiredError) { res.status(402).json({ error: msg, code: e.code, speak: msg }); return; }
       res.status(e instanceof AimError ? 400 : 500).json({ error: msg, speak: msg });
     }
   });
@@ -233,6 +234,7 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
     } catch (e) {
       const msg = e instanceof AimError ? e.message : 'Something went wrong. Try again.';
       if (!(e instanceof AimError)) console.error(`[${req.path}] failed`, (e as Error).message);
+      if (e instanceof ProRequiredError) { if (!res.headersSent) res.status(402).json({ error: msg, code: e.code, speak: msg }); return; }
       if (!res.headersSent) res.status(e instanceof AimError ? 400 : 500).json({ error: msg, speak: msg });
     }
   };
@@ -240,7 +242,11 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
   const svcFor = (who: Signed, req: express.Request, label: string) => new AimService(storeFor(who.uid), `remote:${who.client}:${label}`, workplaceOf(req), who.agent);
 
   // A desktop app (macOS, Windows) polls this about every minute. Each reminder comes once.
+  // pricing.md: reminders are Pro. A Free desktop app gets a refusal it can show as the paywall.
+  const REMINDERS_PRO = 'Stand-up reminders are part of AimYear Pro. Get Pro on aimyear.com or in the app.';
+  const requirePro = async (uid: string) => { if (!(await (pro ?? realPro()).isPro(uid))) throw new ProRequiredError(REMINDERS_PRO); };
   app.post('/desktop/reminders', signed(async (_req, res, who) => {
+    await requirePro(who.uid);
     const { reminders } = await pullDesktop(who.uid, notifications());
     res.json({
       reminders: reminders.map(r => ({ id: r.id, kind: r.kind, title: r.title, body: r.body, block_id: r.blockId || null, due_at: r.dueAt, actions: r.actions })),
@@ -249,6 +255,7 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
   }));
   // The stand-up's buttons. Body: { action: 'break' | 'snooze', minutes?, reminder_id? }.
   app.post('/desktop/reminders/action', signed(async (req, res, who) => {
+    await requirePro(who.uid);
     const b = (req.body ?? {}) as { action?: unknown; minutes?: unknown };
     const minutes = typeof b.minutes === 'number' && Number.isFinite(b.minutes) ? b.minutes : undefined;
     const svc = svcFor(who, req, 'reminder');

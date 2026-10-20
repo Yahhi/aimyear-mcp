@@ -13,7 +13,7 @@
  * - All of it is Pro (pricing.md), checked at the one Pro check point (src/pro.ts).
  */
 import type { Store } from '../store.js';
-import { AimError, parseLocal, type AimService } from '../service.js';
+import { AimError, ProRequiredError, parseLocal, type AimService } from '../service.js';
 import { addDays, isValidDate, localDate } from '../dates.js';
 import { isPro } from '../pro.js';
 import { open, seal, SealError } from './crypto.js';
@@ -62,7 +62,7 @@ export class SocialService {
   private now() { return this.deps.now?.() ?? new Date(); }
   private get uid() { return this.store.uid; }
   private async tz() { return (await this.store.getProfile()).timezone; }
-  private async requirePro() { if (!(await this.deps.isPro(this.uid))) throw new AimError(PRO_ONLY); }
+  private async requirePro() { if (!(await this.deps.isPro(this.uid))) throw new ProRequiredError(PRO_ONLY); }
 
   private async dateArg(date: string | undefined, postOnly: boolean): Promise<string> {
     const today = localDate(this.now(), await this.tz());

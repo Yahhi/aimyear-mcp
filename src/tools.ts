@@ -1,6 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { AimService, AimError } from './service.js';
+import { AimService, AimError, ProRequiredError } from './service.js';
 import { AREAS, NETWORKS } from './types.js';
 import type { SocialService } from './social/service.js';
 import type { AccountService } from './account.js';
@@ -62,7 +62,8 @@ function wrap(name: string, fn: Handler, signedIn: boolean) {
       return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
     } catch (e) {
       const msg = e instanceof AimError ? e.message : `${(e as Error).message ?? e}`;
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: msg, speak: msg }) }], isError: true };
+      const code = e instanceof ProRequiredError ? { code: e.code } : {};
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: msg, ...code, speak: msg }) }], isError: true };
     }
   };
 }

@@ -8,6 +8,8 @@ import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Devi
 import { NETWORKS } from './types.js';
 
 export class AimError extends Error {}
+/** A Pro-only feature refused for lack of Pro. Clients key on `code`, never on the wording. */
+export class ProRequiredError extends AimError { readonly code = 'pro_required'; }
 
 const round = (n: number) => Math.round(n);
 
@@ -988,12 +990,15 @@ export class AimService {
     const op = this.opRef('delete_session', opId);
     const first = await this.runningForConnection(sessionId, { device: !!op });
     const tz = await this.tz();
-    return this.applyOnce(op, async tx => {
+    const result = await this.applyOnce(op, async tx => {
       // Gone meanwhile: deleting it again changes nothing, and the answer is still true.
       const s = (await tx.getSession(first.id)) ?? first;
       tx.deleteSession(s.id);
-      return { result: { ok: true, deleted: s.id, speak: `Deleted [${s.id}] "${s.task}" (${localDate(new Date(s.start), tz)} ${localTime(new Date(s.start), tz)}–${s.end ? localTime(new Date(s.end), tz) : 'running'}). It no longer counts.` }, sessionId: s.id };
+      return { result: { ok: true, deleted: s.id, timer_stopped: false, speak: `Deleted [${s.id}] "${s.task}" (${localDate(new Date(s.start), tz)} ${localTime(new Date(s.start), tz)}–${s.end ? localTime(new Date(s.end), tz) : 'running'}). It no longer counts.` }, sessionId: s.id };
     });
+    // A timer only runs for sessions: deleting the last running one stops it, as stop_session does.
+    if (await this.stopIdleTimer()) return { ...result, timer_stopped: true, speak: `${result.speak} No session is left, so the timer stopped.` };
+    return result;
   }
 
   /** Fix a session after the fact: times, label, what it counts toward, summary, attention. */
