@@ -122,6 +122,7 @@ The rest of this file is for working on the server itself. You don't need it to 
 | `src/tools.ts` | Tool registration, annotations (read-only / destructive / idempotent) and the server instructions. |
 | `src/service.ts`, `src/domain/` | The rules: goal rubric, classification, attention, plans, sessions. |
 | `src/surface.ts` | The surface fingerprint behind `surface.lock.json`. |
+| `.githooks/pre-commit` | Regenerates `docs/ACCESS.md` from `src/access.ts` and stages it on every commit, so the committed table can't drift (`npm ci` points `core.hooksPath` at it through the `prepare` script; `test/access.test.ts` still fails on a stale file). |
 
 Data lives in Firestore under `users/{uid}/aim/{goal,path,profile}`, `users/{uid}/days`,
 `users/{uid}/sessions`, `users/{uid}/blocks`, `users/{uid}/ops` (applied `op_id`s, TTL on

@@ -15,7 +15,8 @@
     "test:conformance": "tsx test/conformance.ts",
     "test:oauth": "tsx test/oauth-e2e.ts",
     "access-doc": "tsx scripts/access-doc.ts",
-    "surface-lock": "tsx scripts/surface-lock.ts"
+    "surface-lock": "tsx scripts/surface-lock.ts",
+    "prepare": "git config core.hooksPath .githooks 2>/dev/null || true"
   },
   "license": "SEE LICENSE IN LICENSE.md",
   "private": true,

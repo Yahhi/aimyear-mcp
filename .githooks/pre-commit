@@ -1,0 +1,11 @@
+#!/bin/sh
+# docs/ACCESS.md is rendered from src/access.ts, never edited by hand. Regenerate it on every
+# commit and stage the result, so the committed file can't drift from the table it describes.
+# (test/access.test.ts fails on a stale file; this hook makes that failure impossible to commit.)
+set -e
+cd "$(git rev-parse --show-toplevel)"
+npx tsx scripts/access-doc.ts >/dev/null
+if ! git diff --quiet -- docs/ACCESS.md; then
+  git add docs/ACCESS.md
+  echo "pre-commit: docs/ACCESS.md regenerated from src/access.ts and staged"
+fi
