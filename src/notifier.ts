@@ -72,7 +72,11 @@ export async function queueNextStandup(p: Pending, notif: Notifications): Promis
   return notif.queueNextStandup(p, prof?.pomodoro.workMin ?? p.minutes);
 }
 
-/** One poll: deliver everything due, clear it, and re-arm the next stand-up. */
+/**
+ * One poll: claim each due reminder, deliver it, and re-arm the next stand-up. The
+ * claim (a transactional delete) comes before the push: two overlapping ticks both see
+ * a reminder due, but only the one that claims it pushes and re-arms; the other skips.
+ */
 export async function tick(notif: Notifications, now = new Date()) {
   const all = await notif.due(now.toISOString());
   // Desktop reminders are pulled by the Mac agent, not pushed. Drop only the ones
@@ -82,12 +86,12 @@ export async function tick(notif: Notifications, now = new Date()) {
   for (const p of all) if (p.workplace === 'desktop' && p.dueAt < stale) await notif.remove(p.id);
   const results: { id: string; kind: string; sent: number; failed: number; reason?: string; continued?: string }[] = [];
   for (const p of due) {
+    if (!(await notif.claim(p.id))) continue;
     let r: { sent: number; failed: number; reason?: string };
     try { r = await deliver(p, notif); } catch (e) { r = { sent: 0, failed: 0, reason: (e as Error).message }; }
-    await notif.remove(p.id);
     let continued: string | undefined;
     try { continued = await queueNextStandup(p, notif); } catch (e) { console.error('[tick] standup re-arm failed', e); }
     results.push({ id: p.id, kind: p.kind, ...r, continued });
   }
-  return { processed: due.length, results };
+  return { processed: results.length, results };
 }

@@ -1,9 +1,9 @@
-import { Store, newId } from './store.js';
+import { Store, newId, OP_TTL_DAYS, type Tx } from './store.js';
 import { addDays, daysBetween, endOfDay, isValidDate, localDate, localTime, minutesBetween, startOfDay, weekStart } from './dates.js';
 import { computeAttention, findGaps } from './domain/attention.js';
 import { checkGoal, checkStepTitle, type GoalDraft } from './domain/goal.js';
 import { classify, decideVerdict, isGoalWork, leverFor } from './domain/classify.js';
-import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, PlanItem, Profile, Project, Routine, Session, Step, Workplace } from './types.js';
+import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, PlanItem, Profile, Project, Routine, Session, Step, Stop, Workplace } from './types.js';
 
 export class AimError extends Error {}
 
@@ -14,6 +14,14 @@ export interface SessionInput {
   task: string; area?: Area; projectId?: string; leverId?: string; stepId?: string; itemId?: string;
   weight?: number; exclusive?: boolean; workplace?: Workplace; override?: boolean;
 }
+
+type Outcome = 'done' | 'partial' | 'abandoned';
+/** A device-originated write to apply once: the client's op_id and the tool it came through. */
+type OpRef = { id: string; tool: string };
+/** How far ahead of the server a device clock may be before its timestamp is taken as "now". */
+const CLOCK_SLACK_MS = 2 * 60000;
+const OP_ID = /^[A-Za-z0-9_.:-]{8,128}$/;
+const CLIENT_SESSION_ID = /^[A-Za-z0-9_.:-]{6,64}$/;
 
 export class AimService {
   private profileCache: Profile | null = null;
@@ -33,6 +41,37 @@ export class AimService {
     const g = await this.store.getGoal();
     if (!g) throw new AimError('No goal set yet. Use check_goal_draft, then set_goal.');
     return g;
+  }
+
+  // ---------- device-originated writes ----------
+  /** The op_id a device minted before its first attempt and reuses on retries; it is a Firestore doc id. */
+  private opRef(tool: string, opId: string | undefined): OpRef | undefined {
+    if (opId === undefined) return undefined;
+    if (!OP_ID.test(opId)) throw new AimError(`op_id must be 8–128 characters of letters, digits, - _ . or : (got "${opId.slice(0, 40)}")`);
+    return { id: opId, tool };
+  }
+
+  /**
+   * Applies a write once per op id. An op id applied before returns the first answer
+   * unchanged and writes nothing. Otherwise `body` runs in one transaction and the op
+   * doc lands together with the change, so a crash between the two cannot leave a
+   * change that a retry applies again. Without an op id the body still runs in a
+   * transaction (one path, and the read-modify-write is atomic). Firestore may run
+   * `body` more than once on contention: it must compute from the tx's reads and write
+   * only through the tx; reads outside the tx (for views) are fine.
+   */
+  private async applyOnce<T>(op: OpRef | undefined, body: (tx: Tx) => Promise<{ result: T; sessionId?: string }>): Promise<T> {
+    if (!op) return (await this.store.runTransaction(body)).result;
+    const seen = await this.store.getOp(op.id);
+    if (seen) return seen.result as T;
+    return this.store.runTransaction(async tx => {
+      const prior = await tx.getOp(op.id);
+      if (prior) return prior.result as T;
+      const { result, sessionId } = await body(tx);
+      const now = new Date();
+      tx.saveOp(op.id, { tool: op.tool, sessionId, result, at: now.toISOString(), expiresAt: new Date(now.getTime() + OP_TTL_DAYS * 86400000) });
+      return result;
+    });
   }
 
   // ---------- goal ----------
@@ -190,18 +229,23 @@ export class AimService {
       : `"${m?.title}" starts with ${firstHard} preparation step(s) before the first hard-lever step ("${open[firstHard].title}"). Move a hard step first (edit_step order) and keep only the preparation that blocks it: send with what exists now, improve after the replies.`;
   }
 
-  async addSteps(milestoneId: string, steps: { title: string; leverId?: string; estimateMin?: number }[]) {
-    const path = await this.store.getPath();
-    const m = path.milestones.find(x => x.id === milestoneId);
-    if (!m) throw new AimError(`milestone "${milestoneId}" not found; ids: ${path.milestones.map(x => x.id).join(', ')}`);
-    const problems = steps.map(s => checkStepTitle(s.title)).filter((p): p is string => !!p);
-    if (problems.length) return { ok: false, problems, speak: problems.join('; ') };
-    const order0 = path.steps.filter(s => s.milestoneId === milestoneId).length;
-    const added: Step[] = steps.map((s, i) => ({ id: newId(), milestoneId, title: s.title.trim(), leverId: s.leverId, estimateMin: s.estimateMin ?? 50, order: order0 + i, status: 'todo' }));
-    path.steps.push(...added);
-    await this.store.savePath(path);
-    const warning = this.prepFirstWarning(await this.store.getGoal(), path, milestoneId);
-    return { ok: true, steps: added, warnings: warning ? [warning] : [], speak: `${added.length} steps added to "${m.title}".${warning ? ` ${warning}` : ''}` };
+  async addSteps(milestoneId: string, steps: { title: string; leverId?: string; estimateMin?: number }[], opId?: string) {
+    const op = this.opRef('add_steps', opId);
+    const goal = await this.store.getGoal();
+    return this.applyOnce(op, async tx => {
+      const path = await tx.getPath();
+      const m = path.milestones.find(x => x.id === milestoneId);
+      if (!m) throw new AimError(`milestone "${milestoneId}" not found; ids: ${path.milestones.map(x => x.id).join(', ')}`);
+      const problems = steps.map(s => checkStepTitle(s.title)).filter((p): p is string => !!p);
+      const order0 = path.steps.filter(s => s.milestoneId === milestoneId).length;
+      const added: Step[] = problems.length ? [] : steps.map((s, i) => ({ id: newId(), milestoneId, title: s.title.trim(), leverId: s.leverId, estimateMin: s.estimateMin ?? 50, order: order0 + i, status: 'todo' }));
+      if (!problems.length) { path.steps.push(...added); tx.savePath(path); }
+      const warning = problems.length ? null : this.prepFirstWarning(goal, path, milestoneId);
+      const result = problems.length
+        ? { ok: false, problems, speak: problems.join('; ') }
+        : { ok: true, steps: added, warnings: warning ? [warning] : [], speak: `${added.length} steps added to "${m.title}".${warning ? ` ${warning}` : ''}` };
+      return { result };
+    });
   }
 
   async editMilestone(milestoneId: string, patch: { title?: string; kind?: 'count' | 'steps'; metric?: string; target?: number; due?: string; status?: MilestoneStatus }) {
@@ -717,32 +761,69 @@ export class AimService {
   }
 
   // ---------- sessions ----------
-  private async runningForConnection(sessionId?: string): Promise<Session> {
+  /**
+   * The session a call means. With session_id: that one. A device request (op_id,
+   * end_at or start_at) must name it: a guess could close or delete another terminal's
+   * session, and a replay must land on the same one. Without one, this connection's
+   * single running session; otherwise the running sessions are listed with ids so the
+   * agent can pick. `anyRunning` keeps the old "the only running session" fallback for
+   * a note, which cannot close or delete anything.
+   */
+  private async runningForConnection(sessionId: string | undefined, opts: { device?: boolean; anyRunning?: boolean } = {}): Promise<Session> {
     if (sessionId) { const s = await this.store.getSession(sessionId); if (!s) throw new AimError(`session "${sessionId}" not found`); return s; }
     const running = await this.store.getRunningSessions();
+    const list = running.map(s => `[${s.id}] ${s.task}${s.clientSessionId === this.clientSessionId ? ' (this connection)' : ''}`).join('; ') || 'none';
+    if (opts.device) throw new AimError(`session_id is required with op_id, end_at or start_at: a replayed request must not guess which session it means. Running: ${list}`);
     const mine = running.filter(s => s.clientSessionId === this.clientSessionId);
     if (mine.length === 1) return mine[0];
-    if (mine.length === 0 && running.length === 1) return running[0];
+    if (opts.anyRunning && mine.length === 0 && running.length === 1) return running[0];
     if (running.length === 0) throw new AimError('No running session.');
-    throw new AimError(`Several sessions are running; pass session_id. Running: ${running.map(s => `[${s.id}] ${s.task}`).join('; ')}`);
+    throw new AimError(`${mine.length ? 'Several sessions of this connection are running' : 'No running session belongs to this connection'}; pass session_id (get_now lists them). Running: ${list}`);
+  }
+
+  /** A device timestamp: ISO 8601, taken as given up to two minutes ahead of the server, as "now" beyond that. */
+  private deviceTime(label: string, iso: string, now: Date): Date {
+    const d = new Date(iso);
+    if (!iso.trim() || Number.isNaN(d.getTime())) throw new AimError(`${label} must be ISO 8601, e.g. 2026-10-20T14:05:00+02:00 (got "${iso}")`);
+    return d.getTime() > now.getTime() + CLOCK_SLACK_MS ? now : d;
   }
 
   private async sessionView(s: Session) {
     const start = new Date(s.start), end = s.end ? new Date(s.end) : new Date();
-    const others = await this.store.getSessionsOverlapping(s.start, end.toISOString());
-    const att = computeAttention(others.some(o => o.id === s.id) ? others : [...others, s], start, end);
+    // The stored copy may be behind `s` (inside a transaction it always is): `s` is the truth.
+    const others = (await this.store.getSessionsOverlapping(s.start, end.toISOString())).filter(o => o.id !== s.id);
+    const att = computeAttention([...others, s], start, end);
     return { id: s.id, task: s.task, area: s.area, classification: s.classification, lever_id: s.leverId, project_id: s.projectId, start: s.start, end: s.end, wall_min: round(att.wall.get(s.id) ?? 0), attention_min: round(s.attentionShareOverride !== undefined ? (att.wall.get(s.id) ?? 0) * s.attentionShareOverride : att.attention.get(s.id) ?? 0), weight: s.weight, notes: s.notes, override: s.override ?? false, summary: s.summary, outcome: s.outcome };
   }
 
-  private async runningView() {
-    const running = await this.store.getRunningSessions();
+  /** The running sessions; `extra` is one just started whose write has not landed yet. */
+  private async runningView(extra?: Session) {
+    const stored = (await this.store.getRunningSessions()).filter(s => s.id !== extra?.id);
+    const running = extra ? [...stored, extra] : stored;
     const total = running.reduce((s, x) => s + (x.weight ?? 1), 0) || 1;
     return running.map(s => ({ id: s.id, task: s.task, classification: s.classification, started: s.start, share: Math.round(((s.weight ?? 1) / total) * 100) / 100, mine: s.clientSessionId === this.clientSessionId }));
   }
 
-  async startSession(input: SessionInput & { minutes?: number }) {
+  /**
+   * Starts a session. A device replaying a queued start passes op_id (the first answer
+   * comes back, nothing is created twice), its own session_id (create-if-absent: the
+   * session is returned if it exists) and start_at (when the work really began).
+   */
+  async startSession(input: SessionInput & { minutes?: number; opId?: string; startAt?: string; sessionId?: string }) {
+    const op = this.opRef('start_session', input.opId);
+    if (input.sessionId !== undefined && !CLIENT_SESSION_ID.test(input.sessionId)) throw new AimError(`session_id must be 6–64 characters of letters, digits, - _ . or : (got "${input.sessionId.slice(0, 40)}")`);
+    // Before the timer or a stop verdict leaves a trace: a replayed start does nothing.
+    const seen = op ? await this.store.getOp(op.id) : null;
+    if (seen) return seen.result as StartResult;
+    if (input.sessionId) { const existing = await this.store.getSession(input.sessionId); if (existing) return this.alreadyStarted(existing); }
+    return this.startFresh(input, op);
+  }
+
+  private async startFresh(input: SessionInput & { minutes?: number; startAt?: string; sessionId?: string }, op: OpRef | undefined) {
     const prof = await this.profile();
     const today = await this.today();
+    const now = new Date();
+    const start = input.startAt !== undefined ? this.deviceTime('start_at', input.startAt, now) : now;
     const day = await this.store.getOrCreateDay(today, prof.defaultMode);
     const goal = await this.store.getGoal();
     const area = input.area ?? 'work';
@@ -750,29 +831,52 @@ export class AimService {
     const verdict = decideVerdict(cls.classification, day, goal, !!input.override, (await this.windowMinutesFor(today)) > 0);
     const workplace = input.workplace ?? this.clientWorkplace ?? prof.defaultWorkplace;
 
+    // No session is created on these two paths, but the answer is still recorded under the
+    // op id: a retry must hear the same stop verdict, not slip past it once stopIssuedAt is set.
+    const recorded = <T>(result: T): Promise<T> => op ? this.applyOnce(op, async () => ({ result })) : Promise.resolve(result);
     if (verdict.verdict === 'stop') {
-      day.stopIssuedAt = new Date().toISOString(); await this.store.saveDay(day);
-      return { verdict: verdict.verdict, message: verdict.message, classification: cls.classification, session: null, block: this.blockView(await this.store.getRunningBlock()), speak: verdict.message };
+      day.stopIssuedAt = now.toISOString(); await this.store.saveDay(day);
+      return recorded({ verdict: verdict.verdict, message: verdict.message, classification: cls.classification, session: null, block: this.blockView(await this.store.getRunningBlock()), speak: verdict.message });
     }
     const { block, joined } = await this.ensureBlock(input.minutes, workplace, input.direction ?? 'up');
-    if (day.mode === 'off') return { verdict: 'ok', message: verdict.message, session: null, block: { ...this.blockView(block), joined }, notify_via: 'hook', speak: `Timer ${joined ? 'joined' : 'started'}. Nothing stored (mode off).` };
+    if (day.mode === 'off') return recorded({ verdict: 'ok', message: verdict.message, session: null, block: { ...this.blockView(block), joined }, notify_via: 'hook', speak: `Timer ${joined ? 'joined' : 'started'}. Nothing stored (mode off).` });
 
     const mainItem = day.plan.find(p => p.isMainStep);
     const session: Session = {
-      id: newId(), start: new Date().toISOString(), source: 'agent', clientSessionId: this.clientSessionId, weight: input.weight ?? 1, exclusive: input.exclusive, workplace,
+      id: input.sessionId ?? newId(), start: start.toISOString(), source: 'agent', clientSessionId: this.clientSessionId, weight: input.weight ?? 1, exclusive: input.exclusive, workplace,
       area, projectId: cls.projectId ?? input.projectId, leverId: cls.leverId ?? input.leverId, stepId: input.stepId ?? (cls.classification === 'main_step' ? mainItem?.stepId : undefined), itemId: input.itemId ?? (cls.classification === 'main_step' ? mainItem?.id : undefined),
       task: input.task.trim(), notes: [], classification: cls.classification, unclassified: cls.unclassified, verdictAtStart: verdict.verdict, override: !!input.override && verdict.note === 'override',
     };
-    await this.store.saveSession(session);
-    const running = await this.runningView();
-    const devices = await this.store.getDevices();
-    const reachable = devices.filter(d => (workplace === 'desktop' ? ['macos', 'web'] : ['ios', 'android']).includes(d.platform));
-    const notifyVia = joined ? 'the reminder already set for this block' : devices.length ? `push to ${(reachable.length ? reachable : devices).map(d => d.platform).join(', ')}` : 'no registered device: local hook only';
+    const started = async () => {
+      const running = await this.runningView(session);
+      const devices = await this.store.getDevices();
+      const reachable = devices.filter(d => (workplace === 'desktop' ? ['macos', 'web'] : ['ios', 'android']).includes(d.platform));
+      const notifyVia = joined ? 'the reminder already set for this block' : devices.length ? `push to ${(reachable.length ? reachable : devices).map(d => d.platform).join(', ')}` : 'no registered device: local hook only';
+      return {
+        verdict: verdict.verdict, message: verdict.message, note: verdict.note, classification: cls.classification, matched_by: cls.matchedBy, unclassified: cls.unclassified,
+        session: { id: session.id, task: session.task, area, lever_id: session.leverId, project_id: session.projectId, step_id: session.stepId, item_id: session.itemId, weight: session.weight },
+        block: { ...this.blockView(block), joined }, running_sessions: running, notify_via: notifyVia,
+        speak: `${verdict.message} Session [${session.id}] "${session.task}" → ${cls.classification}${cls.unclassified ? ' (unclassified: tell me the lever or project)' : ''}. Timer ${joined ? 'joined' : 'started'}${running.length > 1 ? `; ${running.length} sessions share attention` : ''}.`,
+      };
+    };
+    return this.applyOnce(op, async tx => {
+      // Two attempts with the same client session_id can race: the first one in wins.
+      const existing = input.sessionId ? await tx.getSession(input.sessionId) : null;
+      if (!existing) tx.saveSession(session);
+      const result = existing ? await this.alreadyStarted(existing) : await started();
+      return { result, sessionId: (existing ?? session).id };
+    });
+  }
+
+  /** A start replayed with its own session_id: the session exists, so nothing is created. */
+  private async alreadyStarted(s: Session) {
+    const tz = await this.tz();
+    const block = await this.store.getRunningBlock();
     return {
-      verdict: verdict.verdict, message: verdict.message, note: verdict.note, classification: cls.classification, matched_by: cls.matchedBy, unclassified: cls.unclassified,
-      session: { id: session.id, task: session.task, area, lever_id: session.leverId, project_id: session.projectId, step_id: session.stepId, item_id: session.itemId, weight: session.weight },
-      block: { ...this.blockView(block), joined }, running_sessions: running, notify_via: notifyVia,
-      speak: `${verdict.message} Session [${session.id}] "${session.task}" → ${cls.classification}${cls.unclassified ? ' (unclassified: tell me the lever or project)' : ''}. Timer ${joined ? 'joined' : 'started'}${running.length > 1 ? `; ${running.length} sessions share attention` : ''}.`,
+      verdict: 'ok' as const, message: 'Already started.', note: 'already started', classification: s.classification,
+      session: { id: s.id, task: s.task, area: s.area, lever_id: s.leverId, project_id: s.projectId, step_id: s.stepId, item_id: s.itemId, weight: s.weight },
+      block: this.blockView(block), running_sessions: await this.runningView(),
+      speak: `Session [${s.id}] "${s.task}" already started at ${localTime(new Date(s.start), tz)}${s.end ? ` and ended at ${localTime(new Date(s.end), tz)}` : ''}; nothing created.`,
     };
   }
 
@@ -785,38 +889,79 @@ export class AimService {
     return { ok: true, running_sessions: view, applies_to: 'whole session (retroactive)', speak: `Attention: ${view.map(v => `${Math.round(v.share * 100)}% ${v.task}`).join(', ')}.` };
   }
 
-  async addNote(note: string, sessionId?: string) {
-    const s = await this.runningForConnection(sessionId);
-    if (s.end) throw new AimError(`session [${s.id}] has ended; notes go on a running session. Use edit_session to change its summary.`);
-    s.notes.push(`${localTime(new Date(), await this.tz())} ${note.trim()}`);
-    if (s.unclassified) {
-      const goal = await this.store.getGoal(); const day = await this.store.getDay(await this.today());
-      const cls = classify({ area: s.area, task: `${s.task} ${note}` }, goal, day);
-      if (!cls.unclassified) { s.classification = cls.classification; s.leverId = cls.leverId ?? s.leverId; s.projectId = cls.projectId ?? s.projectId; s.unclassified = false; }
-    }
-    await this.store.saveSession(s);
-    return { ok: true, session_id: s.id, classification: s.classification, speak: `Noted on [${s.id}].` };
-  }
-
-  async stopSession(summary: string, outcome: 'done' | 'partial' | 'abandoned', sessionId?: string, attentionShare?: number) {
-    const s = await this.runningForConnection(sessionId);
-    if (s.end) throw new AimError(`session [${s.id}] already ended at ${localTime(new Date(s.end), await this.tz())} on ${localDate(new Date(s.end), await this.tz())}. To change its times or summary, use edit_session.`);
-    s.end = new Date().toISOString(); s.summary = summary.trim(); s.outcome = outcome;
-    if (attentionShare !== undefined) s.attentionShareOverride = Math.min(1, Math.max(0, attentionShare));
-    await this.store.saveSession(s);
-    let extra = '';
-    if (outcome === 'done' && s.itemId) { const day = await this.store.getDay(await this.today()); const item = day?.plan.find(p => p.id === s.itemId); if (item && !item.done) { const r = await this.editPlanItem(s.itemId, undefined, { done: true }); extra = ' ' + r.speak; } }
-    else if (outcome === 'done' && s.stepId) { const r = await this.editStep(s.stepId, { status: 'done' }); extra = ` Path step done: "${r.step?.title}".`; }
-    const view = await this.sessionView(s);
-    const block = await this.store.getRunningBlock();
-    return { ok: true, session: view, block: this.blockView(block), speak: `Ended [${s.id}] "${s.task}": ${view.wall_min} min wall, ${view.attention_min} min attention, ${outcome}.${extra}${block ? ` Timer still running, ${this.blockView(block)?.minutes_left} min left.` : ''}` };
-  }
-
-  async deleteSession(sessionId?: string) {
-    const s = await this.runningForConnection(sessionId);
-    await this.store.deleteSession(s.id);
+  async addNote(note: string, sessionId?: string, opId?: string) {
+    const op = this.opRef('add_note', opId);
+    const first = await this.runningForConnection(sessionId, { device: !!op, anyRunning: true });
     const tz = await this.tz();
-    return { ok: true, deleted: s.id, speak: `Deleted [${s.id}] "${s.task}" (${localDate(new Date(s.start), tz)} ${localTime(new Date(s.start), tz)}–${s.end ? localTime(new Date(s.end), tz) : 'running'}). It no longer counts.` };
+    const goal = await this.store.getGoal(); const day = await this.store.getDay(await this.today());
+    return this.applyOnce(op, async tx => {
+      const s = await tx.getSession(first.id);
+      if (!s) throw new AimError(`session "${first.id}" not found`);
+      if (s.end) throw new AimError(`session [${s.id}] has ended; notes go on a running session. Use edit_session to change its summary.`);
+      s.notes.push(`${localTime(new Date(), tz)} ${note.trim()}`);
+      if (s.unclassified) {
+        const cls = classify({ area: s.area, task: `${s.task} ${note}` }, goal, day);
+        if (!cls.unclassified) { s.classification = cls.classification; s.leverId = cls.leverId ?? s.leverId; s.projectId = cls.projectId ?? s.projectId; s.unclassified = false; }
+      }
+      tx.saveSession(s);
+      return { result: { ok: true, session_id: s.id, classification: s.classification, speak: `Noted on [${s.id}].` }, sessionId: s.id };
+    });
+  }
+
+  /**
+   * Stops a session. An agent stops the session of its own connection now; a device
+   * passes session_id, end_at (when the work really ended, so a stop queued offline at
+   * 14:05 and delivered at 16:40 records 14:05) and op_id (a retry gets the first answer).
+   * Two devices may stop the same session: see mergeStop for the rule. The answer says
+   * what the stop did: ended, shortened (moved the end earlier) or recorded (the end stays).
+   */
+  async stopSession(summary: string, outcome: Outcome, sessionId?: string, attentionShare?: number, opts: { opId?: string; endAt?: string } = {}) {
+    const op = this.opRef('stop_session', opts.opId);
+    const device = !!op || opts.endAt !== undefined;
+    const now = new Date();
+    const tz = await this.tz();
+    const first = await this.runningForConnection(sessionId, { device });
+    const endAt = opts.endAt !== undefined ? this.deviceTime('end_at', opts.endAt, now) : now;
+    if (endAt.getTime() < new Date(first.start).getTime()) throw new AimError(`end_at ${opts.endAt} is before the session start ${first.start} (${localTime(new Date(first.start), tz)})`);
+    const stop: Stop = { opId: op?.id, clientSessionId: this.clientSessionId, workplace: this.clientWorkplace, endAt: endAt.toISOString(), summary: summary.trim(), outcome, receivedAt: now.toISOString() };
+    const today = await this.today();
+    return this.applyOnce(op, async tx => {
+      const s = await tx.getSession(first.id);
+      if (!s) throw new AimError(`session "${first.id}" not found`);
+      // An agent stopping "now" a session that already ended would stretch it: that is edit_session's job.
+      if (s.end && !device) throw new AimError(`session [${s.id}] already ended at ${localTime(new Date(s.end), tz)} on ${localDate(new Date(s.end), tz)}. To change its times or summary, use edit_session.`);
+      const wasDone = s.outcome === 'done' && !!s.end;
+      const m = mergeStop(s, stop, tz);
+      if (attentionShare !== undefined) s.attentionShareOverride = Math.min(1, Math.max(0, attentionShare));
+      // done completes the linked plan item or path step, once: when this stop made it done.
+      let extra = '';
+      if (s.outcome === 'done' && !wasDone) {
+        if (s.itemId) { const day = await this.store.getDay(today); const item = day?.plan.find(p => p.id === s.itemId); if (item && !item.done) { const r = await this.editPlanItem(s.itemId, undefined, { done: true }); extra = ' ' + r.speak; } }
+        else if (s.stepId) { const r = await this.editStep(s.stepId, { status: 'done' }); extra = ` Path step done: "${r.step?.title}".`; }
+      }
+      tx.saveSession(s);
+      const view = await this.sessionView(s);
+      const block = await this.store.getRunningBlock();
+      const t = (iso: string) => localTime(new Date(iso), tz);
+      const timer = block ? ` Timer still running, ${this.blockView(block)?.minutes_left} min left.` : '';
+      const noted = m.noted ? ' Your summary went to its notes.' : '';
+      const speak = m.applied === 'ended' ? `Ended [${s.id}] "${s.task}": ${view.wall_min} min wall, ${view.attention_min} min attention, ${s.outcome}.${extra}${timer}`
+        : m.applied === 'shortened' ? `Already ended at ${t(m.previousEnd!)} (${m.previousBy}); your ${t(stop.endAt)} stop moved the end to ${t(stop.endAt)}: [${s.id}] "${s.task}" is now ${view.wall_min} min wall, ${view.attention_min} min attention, ${s.outcome}.${noted}${extra}`
+          : `Already ended at ${t(m.previousEnd!)} (${m.previousBy}); your ${t(stop.endAt)} stop is recorded and the end stays ${t(m.previousEnd!)}: [${s.id}] "${s.task}", ${view.wall_min} min wall, ${s.outcome}.${noted}${extra}`;
+      return { result: { ok: true, applied: m.applied, session: view, block: this.blockView(block), speak }, sessionId: s.id };
+    });
+  }
+
+  async deleteSession(sessionId?: string, opId?: string) {
+    const op = this.opRef('delete_session', opId);
+    const first = await this.runningForConnection(sessionId, { device: !!op });
+    const tz = await this.tz();
+    return this.applyOnce(op, async tx => {
+      // Gone meanwhile: deleting it again changes nothing, and the answer is still true.
+      const s = (await tx.getSession(first.id)) ?? first;
+      tx.deleteSession(s.id);
+      return { result: { ok: true, deleted: s.id, speak: `Deleted [${s.id}] "${s.task}" (${localDate(new Date(s.start), tz)} ${localTime(new Date(s.start), tz)}–${s.end ? localTime(new Date(s.end), tz) : 'running'}). It no longer counts.` }, sessionId: s.id };
+    });
   }
 
   /** Fix a session after the fact: times, label, what it counts toward, summary, attention. */
@@ -862,7 +1007,8 @@ export class AimService {
     return { ok: true, session: view, changed, speak: `Fixed [${s.id}] "${s.task}": ${localDate(new Date(s.start), tz)} ${localTime(new Date(s.start), tz)}–${s.end ? localTime(new Date(s.end), tz) : 'running'}, ${view.wall_min} min wall, ${view.attention_min} min attention → ${s.classification}. Changed: ${changed.join(', ')}.` };
   }
 
-  async addSession(input: SessionInput & { minutes?: number; start?: string; end?: string; date?: string }) {
+  async addSession(input: SessionInput & { minutes?: number; start?: string; end?: string; date?: string; opId?: string }) {
+    const op = this.opRef('add_session', input.opId);
     const tz = await this.tz();
     const prof = await this.profile();
     let start: Date, end: Date;
@@ -885,9 +1031,11 @@ export class AimService {
       stepId: input.stepId ?? (cls.classification === 'main_step' ? day.plan.find(p => p.isMainStep)?.stepId : undefined), itemId: input.itemId ?? (cls.classification === 'main_step' ? day.plan.find(p => p.isMainStep)?.id : undefined),
       task: input.task.trim(), notes: [], classification: cls.classification, unclassified: cls.unclassified, verdictAtStart: v.verdict, outcome: 'done',
     };
-    await this.store.saveSession(session);
-    const view = await this.sessionView(session);
-    return { ok: true, session: view, classification: cls.classification, matched_by: cls.matchedBy, speak: `Logged [${session.id}] "${session.task}" ${localTime(start, tz)}–${localTime(end, tz)} on ${date}: ${view.wall_min} min wall, ${view.attention_min} min attention → ${cls.classification}${cls.unclassified ? ' (unclassified)' : ''}.` };
+    return this.applyOnce(op, async tx => {
+      tx.saveSession(session);
+      const view = await this.sessionView(session);
+      return { result: { ok: true, session: view, classification: cls.classification, matched_by: cls.matchedBy, speak: `Logged [${session.id}] "${session.task}" ${localTime(start, tz)}–${localTime(end, tz)} on ${date}: ${view.wall_min} min wall, ${view.attention_min} min attention → ${cls.classification}${cls.unclassified ? ' (unclassified)' : ''}.` }, sessionId: session.id };
+    });
   }
 
   async getCurrent() {
@@ -1087,6 +1235,32 @@ function starterRoutines(goal: Goal | null) {
     ...(s.perWeek ? { perWeek: s.perWeek, days: [1, 2, 3, 4, 5, 6, 7] } : {}),
     ...((s.hard ? hard : comfortable) ? { leverId: (s.hard ? hard : comfortable)!.id } : {}),
   }));
+}
+
+/** What start_session answers; a replayed op_id returns the first answer in this shape. */
+type StartResult = Awaited<ReturnType<AimService['startFresh']>>;
+
+/**
+ * Folds one stop into a session, whatever order the stops arrive in. No end yet: this
+ * stop ends it. Already ended: the earliest end wins (once anyone stopped it, it was not
+ * running), done wins over any other outcome, the first real summary stays and a
+ * different later one goes to the notes with its time and source. A server auto-close
+ * is a placeholder, not a stop: a real stop replaces its summary and clears the flag.
+ * Returns what this stop did and what was there before, for the answer.
+ */
+export function mergeStop(s: Session, stop: Stop, tz: string): { applied: 'ended' | 'shortened' | 'recorded'; previousEnd?: string; previousBy?: string; noted: boolean } {
+  const previousEnd = s.end;
+  const previousBy = previousEnd ? (s.stops?.find(x => x.endAt === previousEnd)?.workplace ?? (s.autoClosed ? 'closed by the server' : 'stopped earlier')) : undefined;
+  const placeholder = !s.summary?.trim() || (!!s.autoClosed && s.summary.startsWith('Auto-closed'));
+  s.stops = [...(s.stops ?? []), stop];
+  if (!previousEnd) { s.end = stop.endAt; s.summary = stop.summary; s.outcome = stop.outcome; return { applied: 'ended', noted: false }; }
+  const applied = new Date(stop.endAt).getTime() < new Date(previousEnd).getTime() ? 'shortened' : 'recorded';
+  if (applied === 'shortened') { s.end = stop.endAt; s.autoClosed = false; }
+  if (stop.outcome === 'done') s.outcome = 'done';
+  let noted = false;
+  if (placeholder) { s.summary = stop.summary; if (s.autoClosed) s.autoClosed = false; }
+  else if (stop.summary && stop.summary !== s.summary) { s.notes.push(`${localTime(new Date(stop.endAt), tz)} stop from ${stop.workplace ?? 'another device'}: ${stop.summary}`); noted = true; }
+  return { applied, previousEnd, previousBy, noted };
 }
 
 /** Milestones saved before 0.5 have no kind: they were measured by their steps. */

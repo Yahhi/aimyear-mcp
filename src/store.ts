@@ -2,7 +2,7 @@ import { initializeApp, cert, getApps, applicationDefault } from 'firebase-admin
 import { getFirestore, Firestore, FieldValue } from 'firebase-admin/firestore';
 import { readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import type { Goal, Path, Profile, Day, Block, Session, Mode, Workplace, Commitment, Device, Pending, Direction, Routine } from './types.js';
+import type { Goal, Path, Profile, Day, Block, Session, Mode, Workplace, Commitment, Device, Pending, Direction, Routine, AppliedOp } from './types.js';
 
 let dbSingleton: Firestore | null = null;
 export function initFirestore(): Firestore {
@@ -36,6 +36,20 @@ export class Notifications {
     return snap.docs.map(d => d.data() as Pending);
   }
   async remove(id: string) { await this.db.collection(PENDING).doc(id).delete(); }
+  /**
+   * Takes a reminder before sending it: deletes the doc in a transaction and says
+   * whether this caller got it. Two overlapping ticks (or a tick and a pull) both
+   * see it due, but only one claim succeeds, so it is pushed once and re-armed once.
+   */
+  async claim(id: string): Promise<boolean> {
+    const ref = this.db.collection(PENDING).doc(id);
+    return this.db.runTransaction(async tx => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) return false;
+      tx.delete(ref);
+      return true;
+    });
+  }
 
   /**
    * Due reminders for one user's desktop, claimed and removed so they fire once.
@@ -48,8 +62,8 @@ export class Notifications {
       const p = d.data() as Pending;
       return p.uid === uid && p.workplace === 'desktop';
     });
-    const rows = mine.map(d => d.data() as Pending);
-    await Promise.all(mine.map(d => d.ref.delete()));
+    const rows: Pending[] = [];
+    for (const d of mine) if (await this.claim(d.id)) rows.push(d.data() as Pending);
     return rows;
   }
   async devicesOf(uid: string): Promise<Device[]> {
@@ -126,6 +140,26 @@ export const DEFAULT_PROFILE = (tz: string): Profile => ({
   defaultWorkplace: 'desktop',
 });
 
+/** How long an applied op is remembered: a retry later than this is applied again. */
+export const OP_TTL_DAYS = 30;
+
+/**
+ * One atomic unit of work over a user's documents. Reads first, then writes, as
+ * Firestore requires; the writes land together or not at all.
+ */
+export interface Tx {
+  getOp(id: string): Promise<AppliedOp | null>;
+  getSession(id: string): Promise<Session | null>;
+  getPath(): Promise<Path>;
+  saveOp(id: string, op: AppliedOp): void;
+  saveSession(s: Session): void;
+  deleteSession(id: string): void;
+  savePath(p: Path): void;
+}
+
+/** What goes in the op doc: plain JSON only, so a replay returns exactly the first answer. */
+export const plainOp = (op: AppliedOp): AppliedOp => ({ ...op, result: JSON.parse(JSON.stringify(op.result ?? null)) });
+
 /** All persistence for one user. Collections live under users/{uid}. */
 export class Store {
   private db: Firestore;
@@ -138,6 +172,33 @@ export class Store {
   private days() { return this.user().collection('days'); }
   private sessions() { return this.user().collection('sessions'); }
   private blocks() { return this.user().collection('blocks'); }
+  private ops() { return this.user().collection('ops'); }
+
+  // --- applied operations (replay protection) ---
+  async getOp(id: string): Promise<AppliedOp | null> {
+    const snap = await this.ops().doc(id).get();
+    return snap.exists ? (snap.data() as AppliedOp) : null;
+  }
+
+  /**
+   * Runs `fn` as one Firestore transaction. Firestore may run it more than once on
+   * contention, so `fn` must be repeatable: compute from what the tx reads, write
+   * through the tx. Reads outside the tx are allowed (for views), writes are not.
+   */
+  async runTransaction<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
+    return this.db.runTransaction(async t => {
+      const tx: Tx = {
+        getOp: async id => { const s = await t.get(this.ops().doc(id)); return s.exists ? (s.data() as AppliedOp) : null; },
+        getSession: async id => { const s = await t.get(this.sessions().doc(id)); return s.exists ? (s.data() as Session) : null; },
+        getPath: async () => { const s = await t.get(this.aimDoc('path')); return s.exists ? (s.data() as Path) : { milestones: [], steps: [] }; },
+        saveOp: (id, op) => { t.set(this.ops().doc(id), plainOp(op)); },
+        saveSession: s => { t.set(this.sessions().doc(s.id), s); },
+        deleteSession: id => { t.delete(this.sessions().doc(id)); },
+        savePath: p => { t.set(this.aimDoc('path'), p); },
+      };
+      return fn(tx);
+    });
+  }
 
   // --- profile ---
   async getProfile(): Promise<Profile> {

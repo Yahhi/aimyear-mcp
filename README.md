@@ -84,6 +84,29 @@ Without a token, the server describes itself (`initialize`, `tools/list`, `promp
 `ping`); everything else answers `401` with a `WWW-Authenticate` header pointing at
 `/.well-known/oauth-protected-resource/mcp`.
 
+### Retry-safe writes for apps (0.7)
+
+The server is the source of truth, and a phone may deliver a request long after the tap, or
+twice. So `stop_session`, `start_session`, `add_session`, `add_note`, `add_steps` and
+`delete_session` take an optional `op_id`: an id the app mints before its first attempt and
+reuses on every retry. The write is applied once; a retry gets the first answer back and
+writes nothing. Applied ops live in `users/{uid}/ops/{op_id}` (`tool`, `sessionId`, `result`,
+`at`, `expiresAt`) and are written in the same Firestore transaction as the change they
+record. Give the `ops` collection a TTL policy on `expiresAt` (30 days) in the Firestore console.
+
+`stop_session` takes `end_at` and `start_session` takes `start_at` (ISO 8601) so a stop queued
+offline at 14:05 and delivered at 16:40 records 14:05. `start_session` also takes the app's
+own `session_id` (create-if-absent). A request with `op_id`, `end_at` or `start_at` must name
+its `session_id`: the server never guesses which session a replay means. Without them, an
+agent's `stop_session` / `delete_session` acts only on its own connection's single running
+session, and otherwise lists the running sessions with ids.
+
+Two devices can stop one session; the result is the same whatever order the stops arrive in:
+the earliest end wins (once anyone stopped it, it was not running), `done` wins over any
+other outcome, the first summary stays and a different later one goes to the notes. Every
+stop is kept in the session's `stops[]`, and the answer says `applied: ended | shortened |
+recorded`.
+
 ---
 
 The rest of this file is for working on the server itself. You don't need it to use AimYear.
@@ -101,8 +124,9 @@ The rest of this file is for working on the server itself. You don't need it to 
 | `src/surface.ts` | The surface fingerprint behind `surface.lock.json`. |
 
 Data lives in Firestore under `users/{uid}/aim/{goal,path,profile}`, `users/{uid}/days`,
-`users/{uid}/sessions`, `users/{uid}/blocks`; OAuth under `oauth_clients`, `oauth_requests`,
-`oauth_codes`, `oauth_tokens`; reminders in `pending_notifications`.
+`users/{uid}/sessions`, `users/{uid}/blocks`, `users/{uid}/ops` (applied `op_id`s, TTL on
+`expiresAt`); OAuth under `oauth_clients`, `oauth_requests`, `oauth_codes`, `oauth_tokens`;
+reminders in `pending_notifications` (claimed by a transactional delete before each push).
 
 ## Run locally
 

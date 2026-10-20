@@ -67,6 +67,8 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null) {
     server.registerTool(name, { title: title(name), description, inputSchema: shape, annotations: annotationsFor(name) }, wrap(name, fn, maybeSvc !== null));
 
   const outcome = z.enum(['done', 'partial', 'abandoned']);
+  const opId = z.string().min(8).max(128).optional().describe('for apps replaying queued requests: an id the app minted before its first attempt and reuses on retries, so the write is applied once and a retry gets the first answer back. Do not invent one; an agent calling interactively leaves it out');
+  const iso = (what: string) => z.string().optional().describe(`${what} as ISO 8601 with offset, e.g. 2026-10-20T14:05:00+02:00. For apps delivering a request queued offline; an agent calling interactively leaves it out. Rejected before the session start; a clock more than 2 minutes ahead of the server is taken as now`);
   const sessionLinks = {
     area: area.optional().describe('default work'), projectId: z.string().optional(), leverId: z.string().optional(),
     stepId: z.string().optional().describe('path step id'), itemId: z.string().optional().describe('plan item id'),
@@ -100,8 +102,8 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null) {
     milestoneId: z.string(), title: z.string().optional(), kind: milestoneKind, metric: z.string().optional(), target: z.number().optional(), due: date.optional(), status: z.enum(['todo', 'doing', 'done', 'retired']).optional(),
   }, a => svc.editMilestone(a.milestoneId, a));
   t('add_steps', 'Add concrete steps to a milestone. A step is an action that fits a few work blocks ("email 10 people from the waitlist"), not "do marketing". Abstract steps are rejected. Put a hard-lever step first; preparation only where it blocks it (warns otherwise).', {
-    milestoneId: z.string(), steps: z.array(z.object({ title: z.string(), leverId: z.string().optional(), estimateMin: z.number().int().optional() })),
-  }, a => svc.addSteps(a.milestoneId, a.steps));
+    milestoneId: z.string(), steps: z.array(z.object({ title: z.string(), leverId: z.string().optional(), estimateMin: z.number().int().optional() })), op_id: opId,
+  }, a => svc.addSteps(a.milestoneId, a.steps, a.op_id));
   t('edit_step', 'Change one step: title, status (todo/doing/done), order, lever, estimate.', { stepId: z.string(), title: z.string().optional(), status: z.enum(['todo', 'doing', 'done']).optional(), order: z.number().int().optional(), leverId: z.string().optional(), estimateMin: z.number().int().optional() }, a => svc.editStep(a.stepId, a));
   t('delete_step', 'Delete one step from the path.', { stepId: z.string() }, a => svc.deleteStep(a.stepId));
   t('next_steps', 'Open steps of the current milestone, hard-lever steps first: the candidates for today\'s main step.', { count: z.number().int().min(1).max(20).optional() }, a => svc.nextSteps(a.count));
@@ -131,26 +133,28 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null) {
 
   // ---- timer & sessions ----
   t('get_now', 'What is happening now: running sessions with attention shares, the timer, today\'s main step, today\'s minutes, the streak and a one-line nudge.', {}, () => svc.getNow());
-  t('start_session', 'Start a session of work and, if none is running, the timer. Returns a verdict: ok | stop | plan_first. On "stop" NO session is created: relay the message, ask the user; if they insist, call again with override=true. Several sessions may run at once (two terminals) and share attention by weight.', {
+  t('start_session', 'Start a session of work and, if none is running, the timer. Returns a verdict: ok | stop | plan_first. On "stop" NO session is created: relay the message, ask the user; if they insist, call again with override=true. Several sessions may run at once (two terminals) and share attention by weight. Apps replaying a queued start pass op_id, their own session_id and start_at; an agent leaves all three out.', {
     task: z.string().describe('what you are about to do, specific'), ...sessionLinks,
     direction: z.enum(['up', 'down']).optional().describe('up (default) counts elapsed time and runs until stopped, with a stand-up reminder every workMin; down is a fixed timebox, for a break'), minutes: z.number().int().min(5).max(120).optional().describe('length for a down timer, or the stand-up interval for an up timer'), workplace: z.enum(['desktop', 'mobile']).optional(), override: z.boolean().optional().describe('true only after the user confirmed past a stop'),
-  }, a => svc.startSession(a));
-  t('add_note', 'Add a one-line note to a running session (this connection\'s, or session_id). May classify a session that was unclassified.', { note: z.string(), session_id: z.string().optional() }, a => svc.addNote(a.note, a.session_id));
+    op_id: opId, start_at: iso('when the work began'), session_id: z.string().min(6).max(64).optional().describe('for apps: the session id the app minted itself. Create-if-absent: if a session with this id exists it is returned and nothing is created. An agent leaves it out; the server mints the id'),
+  }, a => svc.startSession({ ...a, opId: a.op_id, startAt: a.start_at, sessionId: a.session_id }));
+  t('add_note', 'Add a one-line note to a running session (this connection\'s, or session_id). May classify a session that was unclassified.', { note: z.string(), session_id: z.string().optional().describe('from get_now; required with op_id'), op_id: opId }, a => svc.addNote(a.note, a.session_id, a.op_id));
   t('split_attention', 'Set attention weights of the running sessions at once, e.g. {"abc": 0.7, "def": 0.3}. Applies to the whole session. For a finished session use edit_session.', { shares: z.record(z.string(), z.number().min(0)) }, a => svc.splitAttention(a.shares));
-  t('stop_session', 'Stop a running session (this connection\'s, or session_id) with a summary and outcome. The timer keeps running for other sessions. outcome=done completes the linked plan item or path step. Refuses a session that already ended: use edit_session for that.', {
-    summary: z.string(), outcome, session_id: z.string().optional(), attention_share: z.number().min(0).max(1).optional().describe('corrects the share in hindsight'),
-  }, a => svc.stopSession(a.summary, a.outcome, a.session_id, a.attention_share));
+  t('stop_session', 'Stop a running session with a summary and outcome. Pass session_id from get_now; without it, only this connection\'s single running session is stopped, never another one. The timer keeps running for other sessions. outcome=done completes the linked plan item or path step. Without end_at or op_id it refuses a session that already ended: use edit_session for that. With end_at (apps delivering a stop queued offline) a second stop on the same session is merged, whatever order they arrive in: the earliest end wins, done wins over any other outcome, the first summary stays and a different later one goes to the notes; the answer says applied: ended | shortened | recorded.', {
+    summary: z.string(), outcome, session_id: z.string().optional().describe('from get_now; required with op_id or end_at'), attention_share: z.number().min(0).max(1).optional().describe('corrects the share in hindsight'),
+    end_at: iso('when the work ended'), op_id: opId,
+  }, a => svc.stopSession(a.summary, a.outcome, a.session_id, a.attention_share, { opId: a.op_id, endAt: a.end_at }));
   t('stop_timer', 'Stop the timer ("pause", "stop", "stand up") and every running session with it. There is no paused state: resuming starts a new session. Pass summary and outcome to save them on the sessions it closes, or call stop_session first. Returns the break length.', {
     summary: z.string().optional(), outcome: outcome.optional().describe('default partial'),
   }, a => svc.stopTimer(a.summary, a.outcome));
-  t('add_session', 'Add past time that was not timed: minutes (ending now, or at end), or start+end as HH:MM on date. For calls, children, workout, paid work, or work done away from the agent.', {
-    task: z.string(), minutes: z.number().int().min(1).optional(), start: hhmm.optional(), end: hhmm.optional(), date: date.optional(), ...sessionLinks,
-  }, a => svc.addSession(a));
+  t('add_session', 'Add past time that was not timed: minutes (ending now, or at end), or start+end as HH:MM on date. For calls, children, workout, paid work, or work done away from the agent. Apps replaying a queued entry pass op_id, so a retry does not count the time twice.', {
+    task: z.string(), minutes: z.number().int().min(1).optional(), start: hhmm.optional(), end: hhmm.optional(), date: date.optional(), ...sessionLinks, op_id: opId,
+  }, a => svc.addSession({ ...a, opId: a.op_id }));
   t('edit_session', 'Fix a session, running or finished: start and end (HH:MM on date; an end before the start means it ran past midnight), task, area, project, lever, step, plan item, summary, outcome, attention share, weight. It is classified again after a change. Use it when a timer was forgotten or a session was labelled wrong.', {
     session_id: z.string(), date: date.optional().describe('local date of start and end; default the session\'s own date'), start: hhmm.optional(), end: hhmm.optional(), task: z.string().optional(), ...sessionLinks,
     summary: z.string().optional(), outcome: outcome.optional(), attention_share: z.number().min(0).max(1).optional().describe('share of the session\'s wall time that was real attention'),
   }, a => svc.editSession(a.session_id, { ...a, attentionShare: a.attention_share }));
-  t('delete_session', 'Delete a session, running or finished, so it no longer counts. Without session_id it deletes this connection\'s running session.', { session_id: z.string().optional() }, a => svc.deleteSession(a.session_id));
+  t('delete_session', 'Delete a session, running or finished, so it no longer counts. Pass session_id from get_now or list_sessions; without it, only this connection\'s single running session is deleted, never another one.', { session_id: z.string().optional().describe('required with op_id'), op_id: opId }, a => svc.deleteSession(a.session_id, a.op_id));
   t('list_sessions', 'Sessions in a date range (default the last 7 days), with ids, optionally filtered by area or project.', { from: date.optional(), to: date.optional(), area: area.optional(), projectId: z.string().optional() }, a => svc.history(a.from, a.to, a.area, a.projectId));
   t('find_gaps', 'Untimed stretches of 20+ minutes between the first and last session of a day. Ask the user what happened there.', { date: date.optional() }, a => svc.getGaps(a.date));
 

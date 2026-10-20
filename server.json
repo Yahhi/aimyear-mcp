@@ -8,7 +8,7 @@
     "url": "https://github.com/Yahhi/aimyear-mcp",
     "source": "github"
   },
-  "version": "0.6.1",
+  "version": "0.7.0",
   "remotes": [
     {
       "type": "streamable-http",

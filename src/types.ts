@@ -164,6 +164,39 @@ export interface Session {
   attentionShareOverride?: number;
   /** Closed by the server because the timer was forgotten, not by the user. */
   autoClosed?: boolean;
+  /**
+   * Every stop that reached the server for this session, in arrival order. Two devices
+   * can stop the same session (a phone offline at 14:05, a Mac at 14:20): the earliest
+   * end wins, done wins over any other outcome, the first summary stays.
+   */
+  stops?: Stop[];
+}
+
+/** One stop request as it arrived: what the device said and when the server heard it. */
+export interface Stop {
+  /** The client's operation id, when the request carried one. */
+  opId?: string;
+  clientSessionId?: string;
+  workplace?: Workplace;
+  /** When the device says the work ended (ISO), or the server's receive time without end_at. */
+  endAt: string;
+  summary: string;
+  outcome: 'done' | 'partial' | 'abandoned';
+  receivedAt: string;
+}
+
+/**
+ * A device-originated write that was applied, keyed by the client's op_id under
+ * users/{uid}/ops. A retry with the same op_id gets `result` back and writes nothing.
+ * Written in the same transaction as the change it records.
+ */
+export interface AppliedOp {
+  tool: string;
+  sessionId?: string;
+  result: unknown;
+  at: string;
+  /** A Firestore TTL policy on this field (console: ops, expiresAt) removes old ops. */
+  expiresAt: Date;
 }
 
 export type Verdict = 'ok' | 'stop' | 'plan_first';
