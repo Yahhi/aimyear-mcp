@@ -14,7 +14,7 @@
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 
-export interface CallContext { user: string; client: string; req: string; auth: 'oauth' | 'token' | 'none'; app?: string }
+export interface CallContext { user: string; client: string; req: string; auth: 'oauth' | 'token' | 'firebase' | 'none'; app?: string }
 interface Started { method: string; tool: string | null; args: { keys: string[]; len: number } | null; t0: number; seq: number }
 
 const SKIP = (m: string) => m === 'ping' || m.startsWith('notifications/');

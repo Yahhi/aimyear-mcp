@@ -2,10 +2,12 @@
  * Remote mode (Cloud Run): one Express app, stateless, every MCP request builds a fresh
  * server. Who may call what is decided in src/access.ts; this file only enforces it.
  *
- * Auth on /mcp, in order:
- *  1. OAuth 2.1 access token (Claude, ChatGPT and other connector clients);
- *  2. a static per-person token from AIMYEAR_TOKENS (Claude Code, scripts, the menu bar app);
- *  3. none: only the public JSON-RPC methods answer (initialize, tools/list, …); anything
+ * Auth on /mcp and every Bearer route, in order:
+ *  1. a static per-person token from AIMYEAR_TOKENS (Claude Code, scripts, the menu bar app);
+ *  2. a Firebase ID token (a JWT: the AimYear app's own sign-in), verified with
+ *     firebase-admin, revocation checked; its uid is the same uid the OAuth flow uses;
+ *  3. an OAuth 2.1 access token (Claude, ChatGPT and other connector clients);
+ *  4. none: only the public JSON-RPC methods answer (initialize, tools/list, …); anything
  *     else gets 401 with a WWW-Authenticate header that points to the OAuth discovery.
  */
 import express from 'express';
@@ -15,8 +17,9 @@ import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelconte
 import { Store, Notifications } from './store.js';
 import { AimService, AimError } from './service.js';
 import { registerTools, INSTRUCTIONS } from './tools.js';
-import { tick, textFor, queueNextStandup } from './notifier.js';
-import { localDate } from './dates.js';
+import { getAuth } from 'firebase-admin/auth';
+import { timingSafeEqual, createHash } from 'node:crypto';
+import { tick, pullDesktop } from './notifier.js';
 import { isPublicBody } from './access.js';
 import { FirestoreOAuthProvider, SCOPE } from './oauth.js';
 import { instrument, logRefused, type CallContext } from './calllog.js';
@@ -24,15 +27,32 @@ import { VERSION } from './version.js';
 import { SocialService, type SocialDeps } from './social/service.js';
 import { NETWORKS, type Network } from './types.js';
 import type { Workplace } from './types.js';
+import { AccountService, agentFromUserAgent, agentName, firestoreAccountBackend, type AccountBackend } from './account.js';
+import { pro as realPro, type createPro } from './pro.js';
+import { initFirestore } from './store.js';
 
-export function buildServer(uid: string | null, clientSessionId: string, workplace: Workplace, socialDeps?: SocialDeps) {
+/** Who is calling, for the record: the agent's name on sessions, and the OAuth client id. */
+export interface Caller { agent?: () => Promise<string | undefined>; clientId?: string; accountBackend?: AccountBackend; storeFor?: (uid: string) => Store }
+
+export function buildServer(uid: string | null, clientSessionId: string, workplace: Workplace, socialDeps?: SocialDeps, caller: Caller = {}) {
   const server = new McpServer({ name: 'aimyear', version: VERSION }, { instructions: INSTRUCTIONS });
-  if (!uid) { registerTools(server, null, null); return server; }
-  const store = new Store(uid);
-  const svc = new AimService(store, clientSessionId, workplace);
-  registerTools(server, svc, new SocialService(store, svc, socialDeps));
+  if (!uid) { registerTools(server, null, null, null); return server; }
+  const store = caller.storeFor ? caller.storeFor(uid) : new Store(uid);
+  const svc = new AimService(store, clientSessionId, workplace, caller.agent);
+  registerTools(server, svc, new SocialService(store, svc, socialDeps), new AccountService(caller.accountBackend ?? firestoreAccountBackend(), uid, caller.clientId));
   return server;
 }
+
+/** A Firebase ID token is a JWT; OAuth and static tokens never contain a dot. */
+export const looksLikeJwt = (t: string) => /^eyJ[\w-]*\.[\w-]+\.[\w-]+$/.test(t);
+
+export type VerifyIdToken = (token: string) => Promise<{ uid: string; firebase?: { sign_in_provider?: string } }>;
+const realVerify: VerifyIdToken = t => { initFirestore(); return getAuth().verifyIdToken(t, true); };
+
+const sameSecret = (a: string, b: string) => {
+  const h = (x: string) => createHash('sha256').update(x).digest();
+  return timingSafeEqual(h(a), h(b));
+};
 
 /** Browsers that may call /mcp. Native clients and server-side connectors send no Origin. */
 export function originAllowed(origin: string | undefined, base: URL, extra: string[] = []): boolean {
@@ -51,9 +71,22 @@ export interface AppOptions {
   extraOrigins?: string[];
   /** Tests pass fake networks and a fake Pro check; production uses the real ones. */
   socialDeps?: SocialDeps;
+  /** Tests pass a fake Firebase ID token check; production uses firebase-admin. */
+  verifyIdToken?: VerifyIdToken;
+  /** Tests pass an in-memory account backend; production uses Firestore. */
+  accountBackend?: AccountBackend;
+  /** Tests pass a Pro checker with fake RevenueCat; production uses src/pro.ts. */
+  pro?: ReturnType<typeof createPro>;
+  /** Tests pass a fake reminder store; production uses Firestore. */
+  notifications?: () => Notifications;
+  /** REVENUECAT_WEBHOOK_AUTH; tests pass their own. */
+  webhookAuth?: string;
+  /** Tests pass an in-memory store; production uses Firestore. */
+  storeFor?: (uid: string) => Store;
 }
 
-export function createApp({ tokens, baseUrl, provider, extraOrigins = [], socialDeps }: AppOptions) {
+export function createApp({ tokens, baseUrl, provider, extraOrigins = [], socialDeps, verifyIdToken = realVerify, accountBackend, pro, notifications = () => new Notifications(), webhookAuth = process.env.REVENUECAT_WEBHOOK_AUTH, storeFor = (uid: string) => new Store(uid) }: AppOptions) {
+  const accounts = () => accountBackend ?? firestoreAccountBackend();
   const resourceUrl = new URL('/mcp', baseUrl);
   const oauth = provider ?? new FirestoreOAuthProvider(resourceUrl);
   const resourceMetadata = getOAuthProtectedResourceMetadataUrl(resourceUrl);
@@ -79,7 +112,7 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
     const uid = tokens.get(String(req.params.token));
     if (!uid) { res.status(401).json({ error: 'unauthorized' }); return; }
     try {
-      const svc = new AimService(new Store(uid), 'now', 'desktop');
+      const svc = new AimService(storeFor(uid), 'now', 'desktop');
       const cur = await svc.getCurrent();
       const b = cur.block;
       res.json({
@@ -101,19 +134,8 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
     const uid = tokens.get(String(req.params.token));
     if (!uid) { res.status(401).json({ error: 'unauthorized' }); return; }
     try {
-      const notif = new Notifications();
-      const rows = await notif.claimDesktop(uid, new Date().toISOString());
-      const profile = await notif.profileOf(uid);
-      const out = [];
-      let continued: string | undefined;
-      for (const p of rows) {
-        const main = await notif.mainStepOf(uid, localDate(new Date(p.dueAt), profile?.timezone ?? 'UTC'));
-        out.push({ kind: p.kind, ...textFor(p, main) });
-        // The push path keeps the cadence going in tick(); the desktop path has
-        // to do it here, or the timer stops after exactly one block and one break.
-        try { continued = (await queueNextStandup(p, notif)) ?? continued; } catch (e) { console.error('[pull] standup re-arm failed', e); }
-      }
-      res.json({ reminders: out, continued_block: continued ?? null });
+      const { reminders, continued } = await pullDesktop(uid, notifications());
+      res.json({ reminders: reminders.map(r => ({ kind: r.kind, title: r.title, body: r.body })), continued_block: continued ?? null });
     } catch (e) { console.error('[pull] failed', e); res.status(500).json({ error: (e as Error).message }); }
   });
 
@@ -121,27 +143,40 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
   app.post('/tick/:token', async (req, res) => {
     if (!tokens.has(String(req.params.token))) { res.status(401).json({ error: 'unauthorized' }); return; }
     try {
-      const result = await tick(new Notifications());
+      const result = await tick(notifications());
       if (result.processed) console.error('[tick]', JSON.stringify(result));
       res.json(result);
     } catch (e) { console.error('[tick] failed', e); res.status(500).json({ error: (e as Error).message }); }
   });
 
   // ---- MCP ----
-  type Who = { uid: string; via: 'oauth' | 'token'; client: string } | null | 'invalid';
-  const identify = async (token: string): Promise<Who> => {
+  type Who = { uid: string; via: 'oauth' | 'token' | 'firebase'; client: string; clientId?: string; agent: () => Promise<string | undefined> } | null | 'invalid';
+  const identify = async (token: string, userAgent?: string): Promise<Who> => {
     if (!token) return null;
+    const ua = async () => agentFromUserAgent(userAgent);
     const uid = tokens.get(token);
-    if (uid) return { uid, via: 'token', client: `token:${token.slice(0, 6)}` };
+    if (uid) return { uid, via: 'token', client: `token:${token.slice(0, 6)}`, agent: ua };
+    if (looksLikeJwt(token)) {
+      try {
+        const d = await verifyIdToken(token);
+        // Same rule as the consent page: a guest account has no AimYear record to act on.
+        if (!d?.uid || d.firebase?.sign_in_provider === 'anonymous') return 'invalid';
+        return { uid: d.uid, via: 'firebase', client: 'app', agent: async () => 'app' };
+      } catch { return 'invalid'; }
+    }
     try {
       const info = await oauth.verifyAccessToken(token);
-      return { uid: String(info.extra?.uid), via: 'oauth', client: `oauth:${info.clientId.slice(0, 8)}` };
+      const clientId = info.clientId;
+      return {
+        uid: String(info.extra?.uid), via: 'oauth', client: `oauth:${clientId.slice(0, 8)}`, clientId,
+        agent: async () => { let name: string | undefined; try { name = (await oauth.clientsStore.getClient(clientId))?.client_name; } catch { /* lookup failed: fall back to the user agent */ } return agentName(name) ?? (await ua()); },
+      };
     } catch { return 'invalid'; }
   };
 
   const handle = async (req: express.Request, res: express.Response, token: string) => {
     if (!originAllowed(req.header('origin'), baseUrl, extraOrigins)) { res.status(403).json({ error: 'origin not allowed' }); return; }
-    const who = await identify(token);
+    const who = await identify(token, req.header('user-agent'));
     const ctx: CallContext = {
       user: who && who !== 'invalid' ? who.uid : '',
       client: String(req.header('user-agent') ?? '').slice(0, 80),
@@ -158,7 +193,7 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
     }
     const workplace = (req.header('x-aimyear-workplace') as Workplace) ?? 'mobile';
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    const server = buildServer(signedIn?.uid ?? null, signedIn ? `remote:${signedIn.client}` : 'anonymous', workplace, socialDeps);
+    const server = buildServer(signedIn?.uid ?? null, signedIn ? `remote:${signedIn.client}` : 'anonymous', workplace, socialDeps, signedIn ? { agent: signedIn.agent, clientId: signedIn.clientId, accountBackend: accounts(), storeFor } : {});
     instrument(transport, req.body, ctx);
     res.on('close', () => { transport.close().catch(() => {}); server.close().catch(() => {}); });
     await server.connect(transport);
@@ -171,20 +206,84 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
   app.post('/social/post', async (req, res) => {
     try {
       if (!originAllowed(req.header('origin'), baseUrl, extraOrigins)) { res.status(403).json({ error: 'origin not allowed' }); return; }
-      const who = await identify(bearer(req));
+      const who = await identify(bearer(req), req.header('user-agent'));
       if (!who || who === 'invalid') { res.status(401).set('WWW-Authenticate', `Bearer resource_metadata="${resourceMetadata}"`).json({ error: 'sign in required' }); return; }
       const b = (req.body ?? {}) as { date?: unknown; text?: unknown; networks?: unknown };
       const date = typeof b.date === 'string' ? b.date : undefined;
       const text = typeof b.text === 'string' ? b.text : undefined;
       const networks = Array.isArray(b.networks) ? b.networks.filter((n): n is Network => (NETWORKS as readonly string[]).includes(n as string)) : undefined;
-      const store = new Store(who.uid);
-      const social = new SocialService(store, new AimService(store, 'social-post', 'mobile'), socialDeps);
+      const store = storeFor(who.uid);
+      const social = new SocialService(store, new AimService(store, 'social-post', 'mobile', who.agent), socialDeps);
       res.json(await social.post({ date, text, networks }));
     } catch (e) {
       const msg = e instanceof AimError ? e.message : 'Something went wrong. Try again: a retry never posts the same day twice.';
       if (!(e instanceof AimError)) console.error('[social/post] failed', (e as Error).name);
       res.status(e instanceof AimError ? 400 : 500).json({ error: msg, speak: msg });
     }
+  });
+
+  // ---- Bearer routes for the apps: the same sign-in as /mcp ----
+  type Signed = Exclude<Who, null | 'invalid'>;
+  const signed = (fn: (req: express.Request, res: express.Response, who: Signed) => Promise<void>) => async (req: express.Request, res: express.Response) => {
+    try {
+      if (!originAllowed(req.header('origin'), baseUrl, extraOrigins)) { res.status(403).json({ error: 'origin not allowed' }); return; }
+      const who = await identify(bearer(req), req.header('user-agent'));
+      if (!who || who === 'invalid') { res.status(401).set('WWW-Authenticate', `Bearer resource_metadata="${resourceMetadata}"${who === 'invalid' ? ', error="invalid_token"' : ''}`).json({ error: 'sign in required', speak: 'Sign in to AimYear again.' }); return; }
+      await fn(req, res, who);
+    } catch (e) {
+      const msg = e instanceof AimError ? e.message : 'Something went wrong. Try again.';
+      if (!(e instanceof AimError)) console.error(`[${req.path}] failed`, (e as Error).message);
+      if (!res.headersSent) res.status(e instanceof AimError ? 400 : 500).json({ error: msg, speak: msg });
+    }
+  };
+  const workplaceOf = (req: express.Request): Workplace => (req.header('x-aimyear-workplace') === 'mobile' ? 'mobile' : 'desktop');
+  const svcFor = (who: Signed, req: express.Request, label: string) => new AimService(storeFor(who.uid), `remote:${who.client}:${label}`, workplaceOf(req), who.agent);
+
+  // A desktop app (macOS, Windows) polls this about every minute. Each reminder comes once.
+  app.post('/desktop/reminders', signed(async (_req, res, who) => {
+    const { reminders } = await pullDesktop(who.uid, notifications());
+    res.json({
+      reminders: reminders.map(r => ({ id: r.id, kind: r.kind, title: r.title, body: r.body, block_id: r.blockId || null, due_at: r.dueAt, actions: r.actions })),
+      poll_after_seconds: 60,
+    });
+  }));
+  // The stand-up's buttons. Body: { action: 'break' | 'snooze', minutes?, reminder_id? }.
+  app.post('/desktop/reminders/action', signed(async (req, res, who) => {
+    const b = (req.body ?? {}) as { action?: unknown; minutes?: unknown };
+    const minutes = typeof b.minutes === 'number' && Number.isFinite(b.minutes) ? b.minutes : undefined;
+    const svc = svcFor(who, req, 'reminder');
+    if (b.action === 'break') { res.json(await svc.takeBreak(minutes)); return; }
+    if (b.action === 'snooze') { res.json(await svc.snoozeStandup(minutes)); return; }
+    throw new AimError('action must be "break" or "snooze"');
+  }));
+
+  // ---- the account: connected agents, export, delete ----
+  app.get('/account/agents', signed(async (_req, res, who) => {
+    res.json(await new AccountService(accounts(), who.uid, who.clientId).listAgents());
+  }));
+  app.delete('/account/agents/:clientId', signed(async (req, res, who) => {
+    const r = await new AccountService(accounts(), who.uid, who.clientId).disconnectAgent(String(req.params.clientId));
+    res.status(r.ok ? 200 : 404).json(r);
+  }));
+  app.get('/account/export', signed(async (_req, res, who) => {
+    const out = await new AccountService(accounts(), who.uid, who.clientId).export();
+    res.set({ 'Cache-Control': 'no-store', 'Content-Disposition': `attachment; filename="aimyear-export-${out.exported_at.slice(0, 10)}.json"` }).json(out);
+  }));
+  // Only the app's own Firebase sign-in may delete the account: never an agent's token.
+  app.post('/account/delete', signed(async (req, res, who) => {
+    if (who.via !== 'firebase') { res.status(403).json({ error: 'Delete the account from the AimYear app.', speak: 'Deleting the account is done in the AimYear app, signed in as you.' }); return; }
+    if ((req.body ?? {}).confirm !== true) throw new AimError('Pass {"confirm": true} to delete the account and all its data.');
+    res.set('Cache-Control', 'no-store').json(await new AccountService(accounts(), who.uid).deleteEverything());
+  }));
+
+  // ---- RevenueCat: subscription events keep users/{uid}/aim/pro current ----
+  app.post('/revenuecat/webhook', async (req, res) => {
+    const got = req.header('authorization') ?? '';
+    if (!webhookAuth || !got || !sameSecret(got, webhookAuth)) { res.status(401).json({ error: 'unauthorized' }); return; }
+    try {
+      const updated = await (pro ?? realPro()).applyWebhook(req.body);
+      res.json({ ok: true, updated: updated.length });
+    } catch (e) { console.error('[revenuecat] failed', (e as Error).message); res.status(500).json({ error: 'try again' }); }
   });
 
   const postOnly = (_req: express.Request, res: express.Response) => { res.status(405).set('Allow', 'POST').json({ error: 'stateless server: POST only' }); };

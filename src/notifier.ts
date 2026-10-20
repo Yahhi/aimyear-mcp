@@ -3,9 +3,9 @@ import { Notifications, Store } from './store.js';
 import { localDate } from './dates.js';
 import { AimService } from './service.js';
 import { SocialService } from './social/service.js';
-import type { Device, Pending, Workplace } from './types.js';
+import type { Device, DesktopReminder, Pending, Workplace } from './types.js';
 
-const DESKTOP: Device['platform'][] = ['macos', 'web'];
+const DESKTOP: Device['platform'][] = ['macos', 'windows', 'web'];
 const MOBILE: Device['platform'][] = ['ios', 'android'];
 
 /** Devices that match the workplace the block belongs to; falls back to every device. */
@@ -97,21 +97,64 @@ export async function queueNextStandup(p: Pending, notif: Notifications): Promis
   return notif.queueNextStandup(p, prof?.pomodoro.workMin ?? p.minutes);
 }
 
+/** A desktop reminder older than this is not worth saying out loud any more. */
+const DESKTOP_STALE_MS = 30 * 60000;
+
+export function desktopReminder(p: Pending, mainStep: { title: string; done: boolean } | null, now: Date): DesktopReminder {
+  return {
+    id: p.id, uid: p.uid, kind: p.kind, ...textFor(p, mainStep), blockId: p.blockId, dueAt: p.dueAt, createdAt: now.toISOString(),
+    actions: p.kind === 'standup' && !p.final ? ['break', 'snooze'] : [],
+  };
+}
+
+/**
+ * A claimed desktop reminder: put it where the desktop app pulls from (unless it is too
+ * old to say), then keep the stand-up cadence going on the same block. The cadence never
+ * depends on a desktop app polling: with no app open, the timer still gets its stand-ups
+ * and a forgotten one still closes itself.
+ */
+export async function produceDesktop(p: Pending, notif: Notifications, now = new Date()): Promise<{ reminder?: DesktopReminder; continued?: string }> {
+  let reminder: DesktopReminder | undefined;
+  if (Date.parse(p.dueAt) >= now.getTime() - DESKTOP_STALE_MS) {
+    const tz = (await notif.profileOf(p.uid))?.timezone ?? 'UTC';
+    reminder = desktopReminder(p, await notif.mainStepOf(p.uid, localDate(new Date(p.dueAt), tz)), now);
+    await notif.saveDesktopReminder(reminder);
+  }
+  let continued: string | undefined;
+  try { continued = await queueNextStandup(p, notif); } catch (e) { console.error('[desktop] standup re-arm failed', e); }
+  return { reminder, continued };
+}
+
+/**
+ * What a desktop app gets when it polls: its due reminders (claimed here if /tick has not
+ * reached them yet) and everything /tick already produced for it, each handed out once.
+ */
+export async function pullDesktop(uid: string, notif: Notifications, now = new Date()) {
+  let continued: string | undefined;
+  for (const p of await notif.claimDesktop(uid, now.toISOString())) continued = (await produceDesktop(p, notif, now)).continued ?? continued;
+  const reminders = (await notif.takeDesktopReminders(uid))
+    .filter(r => Date.parse(r.dueAt) >= now.getTime() - DESKTOP_STALE_MS)
+    .sort((a, b) => a.dueAt.localeCompare(b.dueAt));
+  return { reminders, continued };
+}
+
 /**
  * One poll: claim each due reminder, deliver it, and re-arm the next stand-up. The
  * claim (a transactional delete) comes before the push: two overlapping ticks both see
  * a reminder due, but only the one that claims it pushes and re-arms; the other skips.
+ * Desktop reminders are not pushed: they go to the desktop inbox that the desktop app
+ * pulls (POST /desktop/reminders), and their stand-up cadence is kept here too.
  */
 export async function tick(notif: Notifications, now = new Date(), socialFor: SocialFor = realSocialFor) {
-  const all = await notif.due(now.toISOString());
-  // Desktop reminders are pulled by the Mac agent, not pushed. Drop only the ones
-  // too old to be worth saying out loud, so the queue cannot grow without bound.
-  const stale = new Date(now.getTime() - 30 * 60000).toISOString();
-  const due = all.filter(p => p.workplace !== 'desktop');
-  for (const p of all) if (p.workplace === 'desktop' && p.dueAt < stale) await notif.remove(p.id);
+  const due = await notif.due(now.toISOString());
   const results: { id: string; kind: string; sent: number; failed: number; reason?: string; continued?: string }[] = [];
   for (const p of due) {
     if (!(await notif.claim(p.id))) continue;
+    if (p.workplace === 'desktop' && p.kind !== 'post_offer') {
+      const r = await produceDesktop(p, notif, now).catch(e => { console.error('[tick] desktop reminder failed', (e as Error).message); return { reminder: undefined, continued: undefined }; });
+      results.push({ id: p.id, kind: p.kind, sent: 0, failed: 0, reason: r.reminder ? 'desktop inbox' : 'desktop, too old to say', continued: r.continued });
+      continue;
+    }
     if (p.kind === 'post_offer') {
       let r: { sent: number; failed: number; reason?: string };
       try { r = await deliverPostOffer(p, notif, socialFor); } catch (e) { r = { sent: 0, failed: 0, reason: (e as Error).message }; }

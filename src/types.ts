@@ -170,6 +170,12 @@ export interface Session {
   /** Closed by the server because the timer was forgotten, not by the user. */
   autoClosed?: boolean;
   /**
+   * Who started or logged it: "app" for the AimYear app, else the agent's name (the OAuth
+   * client name, e.g. "Claude Code", "ChatGPT", or one read from the user agent). Absent
+   * on sessions recorded before 0.9.
+   */
+  agent?: string;
+  /**
    * Every stop that reached the server for this session, in arrival order. Two devices
    * can stop the same session (a phone offline at 14:05, a Mac at 14:20): the earliest
    * end wins, done wins over any other outcome, the first summary stays.
@@ -208,7 +214,7 @@ export type Verdict = 'ok' | 'stop' | 'plan_first';
 
 export interface Device {
   token: string;
-  platform: 'ios' | 'android' | 'macos' | 'web';
+  platform: 'ios' | 'android' | 'macos' | 'windows' | 'web';
   lastSeen: string;
   foregroundAt?: string;
   label?: string;
@@ -231,6 +237,23 @@ export interface Pending {
   final?: boolean;
   /** post_offer: the local day the post is about. */
   date?: string;
+}
+
+/**
+ * A reminder ready for a desktop app to show, at desktop_reminders/{id}. /tick (or the
+ * pull itself) turns a due desktop Pending into one; POST /desktop/reminders takes it.
+ */
+export interface DesktopReminder {
+  id: string;
+  uid: string;
+  kind: Pending['kind'];
+  title: string;
+  body: string;
+  blockId: string;
+  dueAt: string;
+  createdAt: string;
+  /** The stand-up offers Break (stop the timer for a break) and Snooze (ask again later). */
+  actions: ('break' | 'snooze')[];
 }
 
 // ---------- posting progress in public (docs/public-posting.md) ----------

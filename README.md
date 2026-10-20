@@ -43,10 +43,11 @@ The skill that teaches an agent the method is in [skills/aim/SKILL.md](skills/ai
 The server stores what your agent saves through the tools (aim, path, plans, sessions and
 their summaries) in Google Cloud Firestore. Your conversation stays with your agent's
 provider; AimYear only receives the tool calls. Logs keep the tool name, success and timing,
-never argument values. To delete your account and data, email privacy@aimyear.com. Details:
+never argument values. To delete your account and data, use Delete account in the AimYear app
+(or email privacy@aimyear.com); Export in the app downloads everything as JSON. Details:
 [privacy policy](https://aimyear.com/privacy.html).
 
-## Tools (48)
+## Tools (51)
 
 Names say what a tool does: `get_` reads one thing, `list_` reads several, `find_` looks
 for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change one entry.
@@ -58,9 +59,23 @@ for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change 
 | Week | `get_commitments`, `set_commitments`, `get_capacity` |
 | Day | `get_planning_context`, `get_plan`, `set_plan`, `edit_plan_item`, `delete_plan_item`, `set_day_mode`, `get_routines`, `set_routines` |
 | Timer and sessions | `get_now`, `start_session`, `add_note`, `split_attention`, `stop_session`, `stop_timer`, `add_session`, `edit_session`, `delete_session`, `list_sessions`, `find_gaps` |
-| Reviews | `summarize_day`, `summarize_week`, `find_leaks` |
+| Reviews | `summarize_day`, `summarize_week`, `find_leaks`, `get_insights` |
 | Settings and devices | `get_settings`, `set_settings`, `add_device`, `list_devices`, `delete_device` |
+| Connected agents | `list_agents`, `delete_agent` |
 | Posting progress (Pro) | `add_social_account`, `list_social_accounts`, `delete_social_account`, `get_post_draft`, `add_post` |
+
+0.9.0 is what the AimYear v2 app needs:
+- The app's own Firebase sign-in works as the Bearer on `/mcp` and every app route (verified
+  with revocation checked; same uid as the OAuth flow). OAuth and static tokens work as before.
+- Pro comes from RevenueCat (entitlement `AimYear Pro`, app user id = Firebase uid): the REST
+  API with a one-minute cache, and a webhook that keeps `users/{uid}/aim/pro` current.
+- Every session records who started or logged it (`agent`: `app`, `Claude Code`, `ChatGPT`, …),
+  returned by `get_now`, `list_sessions`, `start_session` and `stop_session`.
+- `list_agents` / `delete_agent` show and disconnect the agents connected to the account.
+- `get_insights`: the week or month at a glance (minutes per day on the aim, other work and
+  life; hard share; an hour × weekday heatmap; comebacks), the numbers the app used to compute.
+- Desktop apps pull their reminders; stand-ups come with Break and Snooze (routes below).
+- `add_device` takes `windows`. Stopping the last running session also stops the timer.
 
 0.8.0 adds posting the day's progress in public, to WIP (wip.co) and Bluesky.
 The draft is written
@@ -118,6 +133,20 @@ other outcome, the first summary stays and a different later one goes to the not
 stop is kept in the session's `stops[]`, and the answer says `applied: ended | shortened |
 recorded`.
 
+### HTTP routes for the apps (0.9)
+
+All take the same Bearer as `/mcp` (the app sends its Firebase ID token); JSON in and out.
+
+| Route | What it does |
+|---|---|
+| `POST /desktop/reminders` | A desktop app (macOS, Windows) polls this about once a minute. Answer: `{ reminders: [{ id, kind, title, body, block_id, due_at, actions }], poll_after_seconds }`. Each reminder comes once. `kind` is `standup`, `block_end` or `break_end`; a stand-up has `actions: ["break", "snooze"]`. The server keeps the stand-up cadence whether or not a desktop app polls, and a forgotten timer still closes itself. |
+| `POST /desktop/reminders/action` | `{ action: "break", minutes? }` stops the timer and every running session (there is no paused state) and queues the "break over" reminder after `minutes` (default the break length); the answer lists the stopped sessions as `paused` so the app can offer to resume. `{ action: "snooze", minutes? }` asks again in `minutes` (default 10); the timer keeps running. |
+| `GET /account/agents` | `{ agents: [{ client_id, name, connected_at, last_active_at, current }], speak }`. |
+| `DELETE /account/agents/:clientId` | Disconnects one agent (deletes its sign-in for this account). 404 when no such agent is connected. |
+| `GET /account/export` | Everything the server keeps about the person, as one JSON download: `{ format: "aimyear-export", version, exported_at, uid, account, data: { "aim/goal": …, "sessions/<id>": … }, server_rows, agents }`. Saved WIP and Bluesky logins are left out. |
+| `POST /account/delete` | `{ confirm: true }`, and only with the app's Firebase sign-in (an agent's or a static token is refused with 403). Deletes `users/{uid}` with everything under it, the person's reminders, OAuth tokens and codes, the OAuth clients only they used, and the Firebase Auth user. It does not cancel a store subscription, and says so. |
+| `POST /revenuecat/webhook` | RevenueCat's webhook. The `Authorization` header must equal `REVENUECAT_WEBHOOK_AUTH`. |
+
 ---
 
 The rest of this file is for working on the server itself. You don't need it to use AimYear.
@@ -133,7 +162,9 @@ The rest of this file is for working on the server itself. You don't need it to 
 | `src/tools.ts` | Tool registration, annotations (read-only / destructive / idempotent) and the server instructions. |
 | `src/service.ts`, `src/domain/` | The rules: goal rubric, classification, attention, plans, sessions. |
 | `src/social/` | Posting progress: the draft (`draft.ts`), the WIP and Bluesky clients (`clients.ts`), credential sealing (`crypto.ts`), connect / check / post / evening offer (`service.ts`). |
-| `src/pro.ts` | The one Pro check point. Today a hand-kept uid list (`AIMYEAR_PRO_UIDS`); RevenueCat later. |
+| `src/pro.ts` | The one Pro check point: `AIMYEAR_PRO_UIDS` (by hand) → RevenueCat REST (cached a minute) → the webhook-fed `users/{uid}/aim/pro`. The webhook handler too. |
+| `src/account.ts` | Connected agents (list, disconnect), export and delete of the whole account. |
+| `src/domain/insights.ts` | Week and month insights and comebacks, the same rules the app used on the device. |
 | `src/surface.ts` | The surface fingerprint behind `surface.lock.json`. |
 | `.githooks/pre-commit` | Regenerates `docs/ACCESS.md` from `src/access.ts` and stages it on every commit, so the committed table can't drift (`npm ci` points `core.hooksPath` at it through the `prepare` script; `test/access.test.ts` still fails on a stale file). |
 
@@ -141,8 +172,10 @@ Data lives in Firestore under `users/{uid}/aim/{goal,path,profile}`, `users/{uid
 `users/{uid}/sessions`, `users/{uid}/blocks`, `users/{uid}/ops` (applied `op_id`s, TTL on
 `expiresAt`), `users/{uid}/social/{wip,bluesky}` (handle and the login sealed with AES-256-GCM),
 `users/{uid}/posts/{date}_{network}` (the posts AimYear made: their ids tell them apart from the
-user's own posts, and the doc is claimed before each post so a retry never posts twice); OAuth under `oauth_clients`, `oauth_requests`, `oauth_codes`, `oauth_tokens`;
-reminders in `pending_notifications` (claimed by a transactional delete before each push).
+user's own posts, and the doc is claimed before each post so a retry never posts twice),
+`users/{uid}/aim/pro` (the RevenueCat status); OAuth under `oauth_clients`, `oauth_requests`, `oauth_codes`, `oauth_tokens`;
+reminders in `pending_notifications` (claimed by a transactional delete before each push) and,
+for desktop apps, `desktop_reminders` (taken once by `POST /desktop/reminders`).
 
 ## Run locally
 
@@ -161,8 +194,10 @@ Env: `AIMYEAR_UID` (stdio), `AIMYEAR_TOKENS` (HTTP: static `token=uid` pairs for
 scripts, the menu bar app and the scheduler), `AIMYEAR_BASE_URL` (the public URL; the OAuth
 issuer), `AIMYEAR_ALLOWED_ORIGINS` (extra browser origins), `AIMYEAR_WORKPLACE`, `AIMYEAR_TZ`,
 `AIMYEAR_SOCIAL_KEY` (32 random bytes, base64, from Secret Manager: seals WIP and Bluesky logins;
-without it connecting a network refuses), `AIMYEAR_PRO_UIDS` (comma-separated uids that have Pro
-until RevenueCat is wired; unset means nobody).
+without it connecting a network refuses), `AIMYEAR_PRO_UIDS` (comma-separated uids that always
+have Pro), `REVENUECAT_SECRET_KEY` (a RevenueCat secret API key, for the REST check; a secret),
+`REVENUECAT_ENTITLEMENT` (default `AimYear Pro`), `REVENUECAT_WEBHOOK_AUTH` (the Authorization
+value set on the RevenueCat webhook; a secret; unset refuses every webhook call).
 
 ## Tests
 
@@ -189,7 +224,9 @@ gcloud run deploy aimyear-mcp --source . --project aimyear-app --region us-centr
 
 Env vars on the service: `AIMYEAR_TOKENS`, `AIMYEAR_TZ`, `AIMYEAR_PROJECT`,
 `AIMYEAR_BASE_URL=https://mcp.aimyear.com`, `AIMYEAR_SOCIAL_KEY` (as a Secret Manager secret,
-never a plain env value), `AIMYEAR_PRO_UIDS`. `mcp.aimyear.com` is a Cloud Run domain mapping
+never a plain env value), `AIMYEAR_PRO_UIDS`, and for Pro `REVENUECAT_SECRET_KEY` and
+`REVENUECAT_WEBHOOK_AUTH` (Secret Manager secrets) and optionally `REVENUECAT_ENTITLEMENT`.
+The RevenueCat webhook URL is `https://mcp.aimyear.com/revenuecat/webhook`. `mcp.aimyear.com` is a Cloud Run domain mapping
 (CNAME to `ghs.googlehosted.com` in Route 53) and is in Firebase Auth's authorized domains.
 Health: `/health`. The legacy URL `https://<service>/c/<token>/mcp` still works.
 

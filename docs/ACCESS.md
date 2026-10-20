@@ -59,11 +59,14 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `summarize_day` | auth | reads the signed-in person's private data |
 | `summarize_week` | auth | reads the signed-in person's private data |
 | `find_leaks` | auth | reads the signed-in person's private data |
+| `get_insights` | auth | reads the signed-in person's private data |
 | `get_settings` | auth | reads the signed-in person's private data |
 | `set_settings` | auth | changes the signed-in person's data |
 | `add_device` | auth | changes the signed-in person's data |
 | `list_devices` | auth | reads the signed-in person's private data |
 | `delete_device` | auth | changes the signed-in person's data |
+| `list_agents` | auth | reads which agents are connected to the person's account (never their tokens) |
+| `delete_agent` | auth | disconnects one of the person's own agents |
 | `add_social_account` | auth | stores the person's own WIP or Bluesky login, encrypted |
 | `list_social_accounts` | auth | reads which networks the person connected (never the logins) |
 | `delete_social_account` | auth | deletes the person's saved network login |
@@ -75,7 +78,7 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | Route | Access | Why |
 |---|---|---|
 | `GET /health` | public | liveness and version |
-| `POST /mcp` | auth | MCP endpoint; methods marked public in METHODS answer without a token |
+| `POST /mcp` | auth | MCP endpoint (Bearer: OAuth access token, static token or the app's Firebase ID token); methods marked public in METHODS answer without a token |
 | `POST /c/:token/mcp` | auth | legacy connector URL with the token in the path |
 | `GET /mcp` | public | 405: the server is stateless, POST only |
 | `DELETE /mcp` | public | 405: the server is stateless, POST only |
@@ -85,6 +88,13 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `POST /pull/:token` | auth | claims the person's desktop reminders |
 | `POST /social/post` | auth | the Post action of the evening offer: posts the person's day at their explicit request (Bearer token) |
 | `POST /tick/:token` | admin | scheduler: delivers due reminders for everyone |
+| `POST /desktop/reminders` | auth | a desktop app takes the person's due reminders (Bearer token) |
+| `POST /desktop/reminders/action` | auth | Break or Snooze on the person's stand-up reminder (Bearer token) |
+| `GET /account/agents` | auth | the agents connected to the person's account (Bearer token) |
+| `DELETE /account/agents/:clientId` | auth | disconnects one of the person's agents (Bearer token) |
+| `GET /account/export` | auth | everything the server keeps about the person, as JSON (Bearer token) |
+| `POST /account/delete` | auth | deletes the person's account and data; the app's Firebase sign-in only, with {"confirm": true} |
+| `POST /revenuecat/webhook` | admin | RevenueCat subscription events; the Authorization header must equal REVENUECAT_WEBHOOK_AUTH |
 | `GET /.well-known/oauth-authorization-server` | public | OAuth discovery (RFC 8414) |
 | `GET /.well-known/oauth-protected-resource` | public | OAuth discovery (RFC 9728) |
 | `GET /.well-known/oauth-protected-resource/mcp` | public | OAuth discovery for the /mcp resource |

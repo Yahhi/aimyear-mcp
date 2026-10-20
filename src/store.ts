@@ -2,7 +2,7 @@ import { initializeApp, cert, getApps, applicationDefault } from 'firebase-admin
 import { getFirestore, Firestore, FieldValue } from 'firebase-admin/firestore';
 import { readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import type { Goal, Path, Profile, Day, Block, Session, Mode, Workplace, Commitment, Device, Pending, Direction, Routine, AppliedOp, Network, SocialAccount, PostRecord } from './types.js';
+import type { Goal, Path, Profile, Day, Block, Session, Mode, Workplace, Commitment, Device, Pending, Direction, Routine, AppliedOp, Network, SocialAccount, PostRecord, DesktopReminder } from './types.js';
 
 let dbSingleton: Firestore | null = null;
 export function initFirestore(): Firestore {
@@ -26,6 +26,8 @@ export const newId = () => randomUUID().slice(0, 12);
 
 /** Reminders live in one top-level collection so /tick needs a single-field index only. */
 export const PENDING = 'pending_notifications';
+/** Reminders ready for a desktop app to pull (POST /desktop/reminders), one top-level collection keyed by id. */
+export const DESKTOP_REMINDERS = 'desktop_reminders';
 
 /** Cross-user helpers used by the /tick endpoint. */
 export class Notifications {
@@ -65,6 +67,17 @@ export class Notifications {
     const rows: Pending[] = [];
     for (const d of mine) if (await this.claim(d.id)) rows.push(d.data() as Pending);
     return rows;
+  }
+  async saveDesktopReminder(r: DesktopReminder) { await this.db.collection(DESKTOP_REMINDERS).doc(r.id).set(r); }
+  /** Takes every reminder waiting for this user's desktop: each one is handed out once. */
+  async takeDesktopReminders(uid: string): Promise<DesktopReminder[]> {
+    const snap = await this.db.collection(DESKTOP_REMINDERS).where('uid', '==', uid).limit(50).get();
+    const out: DesktopReminder[] = [];
+    for (const d of snap.docs) {
+      const got = await this.db.runTransaction(async tx => { const x = await tx.get(d.ref); if (!x.exists) return false; tx.delete(d.ref); return true; });
+      if (got) out.push(d.data() as DesktopReminder);
+    }
+    return out;
   }
   async devicesOf(uid: string): Promise<Device[]> {
     const snap = await this.db.collection('users').doc(uid).collection('devices').get();

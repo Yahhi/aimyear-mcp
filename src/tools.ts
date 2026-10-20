@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { AimService, AimError } from './service.js';
 import { AREAS, NETWORKS } from './types.js';
 import type { SocialService } from './social/service.js';
+import type { AccountService } from './account.js';
 import { levelOfTool } from './access.js';
 
 const area = z.enum(AREAS);
@@ -14,10 +15,11 @@ type Handler = (args: any) => Promise<unknown>;
 /** What each tool does to the person's data. Clients show these before they approve a call. */
 type Kind = 'read' | 'write' | 'idempotent' | 'destructive';
 const READ = ['get_goal', 'check_goal_draft', 'get_path', 'next_steps', 'get_commitments', 'get_capacity', 'get_planning_context', 'get_plan', 'get_routines',
-  'get_now', 'list_sessions', 'find_gaps', 'summarize_day', 'summarize_week', 'find_leaks', 'get_settings', 'list_devices', 'list_social_accounts', 'get_post_draft'];
+  'get_now', 'list_sessions', 'find_gaps', 'summarize_day', 'summarize_week', 'find_leaks', 'get_settings', 'list_devices', 'list_social_accounts', 'get_post_draft',
+  'get_insights', 'list_agents'];
 // Replaces a whole list or removes something: an earlier value is gone after the call.
 const DESTRUCTIVE = ['set_goal', 'set_levers', 'set_projects', 'set_milestones', 'set_commitments', 'set_routines', 'set_plan',
-  'delete_step', 'delete_plan_item', 'delete_session', 'delete_device', 'stop_timer', 'delete_social_account'];
+  'delete_step', 'delete_plan_item', 'delete_session', 'delete_device', 'stop_timer', 'delete_social_account', 'delete_agent'];
 // Calling twice with the same arguments leaves the same result.
 const IDEMPOTENT = ['record_progress', 'edit_milestone', 'edit_step', 'edit_plan_item', 'set_day_mode', 'split_attention', 'edit_session', 'set_settings', 'add_device',
   // Connecting again replaces the saved login; a day's post goes to each network once, however often it is called.
@@ -46,7 +48,7 @@ export const INSTRUCTIONS = `AimYear keeps one person's big aim for the year, th
 
 Names: get_ reads one thing, list_ reads several, find_ looks for problems, set_ replaces a whole list, add_ / edit_ / delete_ change one entry. A session is one piece of work; the timer runs while sessions run.
 
-Typical flow: get_goal (or check_goal_draft → set_goal), get_path, get_planning_context → set_plan with one main step (routines from set_routines are added to each day's plan by the server), start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Hard first: the first step of each stage and each day's main step should be on a hard lever (the work the user puts off: outreach, applications, selling, publishing). Preparation (CV, profile, research, polishing) comes only when it blocks the hard step, and only as much as it blocks; do the hard step with what exists now and improve after the replies. set_plan, add_steps and set_levers warn when this is broken: fix it before moving on. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine. Posting progress in public (WIP, Bluesky; Pro): get_post_draft shows the day's draft from the record; add_post publishes it only when the user explicitly asks, with their edits.`;
+Typical flow: get_goal (or check_goal_draft → set_goal), get_path, get_planning_context → set_plan with one main step (routines from set_routines are added to each day's plan by the server), start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Hard first: the first step of each stage and each day's main step should be on a hard lever (the work the user puts off: outreach, applications, selling, publishing). Preparation (CV, profile, research, polishing) comes only when it blocks the hard step, and only as much as it blocks; do the hard step with what exists now and improve after the replies. set_plan, add_steps and set_levers warn when this is broken: fix it before moving on. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine. Posting progress in public (WIP, Bluesky; Pro): get_post_draft shows the day's draft from the record; add_post publishes it only when the user explicitly asks, with their edits. get_insights gives the week or month at a glance (aim/other/life minutes, hard share, when hard work happens, comebacks). list_agents shows the agents connected to the account; delete_agent disconnects one, only when the user asks.`;
 
 function wrap(name: string, fn: Handler, signedIn: boolean) {
   return async (args: any) => {
@@ -66,9 +68,10 @@ function wrap(name: string, fn: Handler, signedIn: boolean) {
 }
 
 /** svc is null for an anonymous caller: the tools are listed, and every call is refused. */
-export function registerTools(server: McpServer, maybeSvc: AimService | null, maybeSocial: SocialService | null = null) {
+export function registerTools(server: McpServer, maybeSvc: AimService | null, maybeSocial: SocialService | null = null, maybeAccount: AccountService | null = null) {
   const svc = maybeSvc as AimService;
   const social = maybeSocial as SocialService;
+  const account = maybeAccount as AccountService;
   const t = (name: string, description: string, shape: Record<string, z.ZodTypeAny>, fn: Handler) =>
     server.registerTool(name, { title: title(name), description, inputSchema: shape, annotations: annotationsFor(name) }, wrap(name, fn, maybeSvc !== null));
 
@@ -173,6 +176,9 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
   // ---- reviews ----
   t('summarize_day', 'Full summary of a day: wall and attention minutes per area, classification and lever, sessions, gaps, overlaps, overrides.', { date: date.optional() }, a => svc.daySummary(a.date));
   t('summarize_week', 'A week, Monday to Sunday (to today for the current week): main-step days, goal share, hard share, area balance, overrides, streak, milestone pace.', { date: date.optional().describe('any day of the week, default today') }, a => svc.weekSummary(a.date));
+  t('get_insights', 'Week (the last 7 days) or month (the last 30 days) ending on to (default today): minutes per day on the aim, other work and life; hard vs comfortable share of aim time; an hour × weekday heatmap of aim minutes (6:00–23:00, Mon–Sun) with its hard part and the peak; main-step days; and comebacks (active days after 2+ days away, over 90 days). Wall minutes of finished sessions, as the app shows them.', {
+    range: z.enum(['week', 'month']).optional().describe('default week'), to: date.optional().describe('last day, default today'),
+  }, a => svc.getInsights(a.range, a.to));
   t('find_leaks', 'Where time leaks: comfortable goal work while the main step waited, overrides, unplanned work, gaps, switching, missed main steps, days without a plan. Default the last 7 days.', { from: date.optional(), to: date.optional() }, a => svc.leaks(a.from, a.to));
 
   // ---- settings & devices ----
@@ -182,10 +188,14 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
     post_to: z.array(network).optional().describe('which connected networks get the day\'s progress post (the app sets it); [] for none'),
   }, a => svc.setSettings(a));
   t('add_device', 'Register a device token so server reminders (stand up, break over) can reach it. The phone app registers itself; use this for testing or a manual token.', {
-    token: z.string().min(20), platform: z.enum(['ios', 'android', 'macos', 'web']), label: z.string().optional(),
+    token: z.string().min(20), platform: z.enum(['ios', 'android', 'macos', 'windows', 'web']), label: z.string().optional(),
   }, a => svc.addDevice(a.token, a.platform, a.label));
   t('list_devices', 'Which devices can receive reminders, and when each was last seen.', {}, () => svc.listDevices());
   t('delete_device', 'Remove a device so it stops receiving reminders.', { token: z.string() }, a => svc.deleteDevice(a.token));
+
+  // ---- connected agents ----
+  t('list_agents', 'Agents connected to this AimYear account (Claude, ChatGPT, Claude Code, the AimYear app…): name, client_id, when it connected and when it was last active. current marks the one calling.', {}, () => account.listAgents());
+  t('delete_agent', 'Disconnect one agent: its sign-in for this account is deleted and it can no longer read or change anything until it connects again. Only on the user\'s explicit request. client_id from list_agents.', { client_id: z.string().min(1).max(200) }, a => account.disconnectAgent(a.client_id));
 
   // ---- posting progress in public (Pro) ----
   t('add_social_account', 'Connect WIP (wip.co) or Bluesky so AimYear can post the day\'s progress there when the user says Post (Pro). WIP: api_key from wip.co settings. Bluesky: handle and an app password (Settings → Privacy and security → App passwords), never the account password. The login is checked, stored encrypted and never shown again. The app\'s connect screen usually calls this; if the user pastes a key into the chat, use it once and do not repeat it.', {

@@ -5,7 +5,7 @@ import { AimService } from '../src/service.js';
 import { SocialService, PRO_ONLY, offerId, type SocialDeps } from '../src/social/service.js';
 import { buildDraft, SIGNATURE } from '../src/social/draft.js';
 import { NetworkError, blueskyClient, graphemes, linkFacets, wipClient, type FeedPost, type NetworkClient } from '../src/social/clients.js';
-import { isPro } from '../src/pro.js';
+import { isPro, createPro } from '../src/pro.js';
 import { addDays, startOfDay } from '../src/dates.js';
 import { FakeStore } from './fake-store.js';
 import { startApp } from './helpers.js';
@@ -167,13 +167,14 @@ test('the whole feature is Pro: connecting, the draft and posting; listing and d
 });
 
 test('the Pro check point reads AIMYEAR_PRO_UIDS and fails closed', async () => {
-  const prev = process.env.AIMYEAR_PRO_UIDS;
-  delete process.env.AIMYEAR_PRO_UIDS;
-  assert.equal(await isPro('u1'), false);
-  process.env.AIMYEAR_PRO_UIDS = 'u0, u1';
-  assert.equal(await isPro('u1'), true);
-  assert.equal(await isPro(''), false);
-  if (prev === undefined) delete process.env.AIMYEAR_PRO_UIDS; else process.env.AIMYEAR_PRO_UIDS = prev;
+  // No RevenueCat key and nothing stored: not Pro. The override list always wins.
+  const env: Record<string, string | undefined> = {};
+  const pro = createPro({ env, fetch: (async () => { throw new Error('no network in tests'); }) as any, now: () => new Date(), getStatus: async () => null, saveStatus: async () => {} });
+  assert.equal(await pro.isPro('u1'), false);
+  env.AIMYEAR_PRO_UIDS = 'u0, u1';
+  assert.equal(await pro.isPro('u1'), true);
+  assert.equal(await pro.isPro(''), false);
+  assert.equal(typeof isPro, 'function', 'the one check point keeps its signature');
 });
 
 // ---------- credentials ----------

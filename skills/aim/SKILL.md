@@ -57,7 +57,7 @@ on their AimYear account, on every device.
 | `/aim routines` | `get_routines` / `set_routines`: small daily checks ("talk with one person on Reddit") the server adds to every matching day, or weekly counts (`perWeek`: "talk to 5 people a week"). |
 | `/aim focus <task>` | `start_session`. Honor the verdict (below). |
 | `/aim pause` | `stop_timer` with a real `summary` and `outcome`. It stops the timer and closes every running session; there is no paused session. Resume = `start_session`. |
-| `/aim done [summary]` | `stop_session` with an outcome and a real summary (what changed, not the task name). Pass the `session_id` from `get_now`; without it the server stops only this connection's single running session and otherwise lists the candidates. `op_id`, `end_at` and `start_at` are for apps replaying queued requests: never invent them. The timer keeps running for other sessions. |
+| `/aim done [summary]` | `stop_session` with an outcome and a real summary (what changed, not the task name). Pass the `session_id` from `get_now`; without it the server stops only this connection's single running session and otherwise lists the candidates. `op_id`, `end_at` and `start_at` are for apps replaying queued requests: never invent them. The timer keeps running for other sessions; stopping the last one stops the timer too. |
 | `/aim log <minutes> <what>` | `add_session` with the right area. Use it for past work, calls, kids, workout. |
 | `/aim fix` | `list_sessions` to find the id, then `edit_session` (times, task, area, lever, project, summary, attention) or `delete_session`. Use it when a timer was forgotten or a session was labelled wrong. Never use `stop_session` on a session that already ended. |
 | `/aim split 70/30` | `split_attention` across running sessions. |
@@ -65,6 +65,8 @@ on their AimYear account, on every device.
 | `/aim settings` | `get_settings` / `set_settings`: timezone, where reminders go, stand-up interval. |
 | `/aim off` | `set_day_mode` off for today: a timer only, nothing stored, no plan required. |
 | `/aim review` | Evening: `summarize_day` + `find_gaps`. Weekly: `summarize_week` + `find_leaks` + milestone pace. |
+| `/aim insights` (week / month) | `get_insights`: minutes per day on the aim, other work and life, the hard share, when hard work happens (the heatmap peak) and comebacks. |
+| `/aim agents` | `list_agents` shows the agents connected to the account (each session's `agent` says who started it). `delete_agent` disconnects one, only when the user asks for that one by name. |
 | `/aim post` | Post today's progress in public (Pro): `get_post_draft`, show it, let the user edit, then `add_post` only on their explicit yes. See below. |
 | `/aim connect wip` / `bluesky` | `add_social_account`; `list_social_accounts` shows what is connected, `delete_social_account` removes a login. Which networks get posts: `set_settings` `post_to`. |
 
@@ -201,6 +203,9 @@ if it was clearly lower (`attention_share`).
   leaks. Offer `add_session`, then offer to plan tomorrow.
 - **Weekly:** `summarize_week` + `find_leaks` + `get_path` pace. Ask one question: "Is the
   current stage still the right one, or is the next stage now possible?"
+- **Week or month at a glance:** `get_insights` (`range` week or month). It counts
+  comebacks, not streaks: an active day after two or more days away. Name the comeback
+  if there is one; never frame a gap as a broken streak.
 
 ## Posting progress in public (/aim post, Pro)
 
