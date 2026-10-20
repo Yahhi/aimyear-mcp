@@ -544,8 +544,15 @@ export class AimService {
       }
     }
     const prev = new Map(day.plan.map(p => [p.stepId ?? p.title, p]));
-    const routineTitles = new Map(this.routinesOn(await this.store.getRoutines(), d).map(r => [r.title.toLowerCase(), r.id]));
-    day.plan = items.map(it => { const old = prev.get(it.stepId ?? it.title); return { id: old?.id ?? newId(), title: it.title.trim(), area: it.area, projectId: it.projectId, leverId: it.leverId ?? (it.stepId ? path.steps.find(s => s.id === it.stepId)?.leverId : undefined), stepId: it.stepId, routineId: old?.routineId ?? (it.isMainStep ? undefined : routineTitles.get(it.title.trim().toLowerCase())), isMainStep: !!it.isMainStep, estimateMin: it.estimateMin ?? 50, done: old?.done ?? false, doneAt: old?.doneAt }; });
+    const routines = this.routinesOn(await this.store.getRoutines(), d);
+    const routineTitles = new Map(routines.map(r => [r.title.toLowerCase(), r.id]));
+    day.plan = items.map(it => {
+      const old = prev.get(it.stepId ?? it.title);
+      const routineId = old?.routineId ?? (it.isMainStep ? undefined : routineTitles.get(it.title.trim().toLowerCase()));
+      // A routine passed back with only its title keeps the routine's own project, lever and estimate.
+      const r = routineId ? routines.find(x => x.id === routineId) : undefined;
+      return { id: old?.id ?? newId(), title: it.title.trim(), area: it.area, projectId: it.projectId ?? r?.projectId ?? old?.projectId, leverId: it.leverId ?? (it.stepId ? path.steps.find(s => s.id === it.stepId)?.leverId : undefined) ?? r?.leverId ?? old?.leverId, stepId: it.stepId, routineId, isMainStep: !!it.isMainStep, estimateMin: it.estimateMin ?? r?.estimateMin ?? old?.estimateMin ?? 50, done: old?.done ?? false, doneAt: old?.doneAt, count: old?.count, level: old?.level };
+    });
     // Routine items stay when the agent leaves them out: skipping one for a day is delete_plan_item.
     for (const old of prev.values()) if (old.routineId && !day.plan.some(p => p.routineId === old.routineId)) day.plan.push(old);
     await this.applyRoutines(day);

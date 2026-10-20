@@ -131,3 +131,23 @@ test('a check already planned by hand becomes the routine item instead of a dupl
   assert.equal(linked.done, true);
   assert.equal(plan.length, 4);
 });
+
+test('set_plan keeps a routine\'s project, lever and estimate when the agent passes only its title', async () => {
+  const { store, svc } = setup();
+  const today = await svc.today();
+  await svc.setRoutines(CHECKS.map(c => ({ ...c, projectId: 'aimyear' })));
+  const reddit = store.days.get(today)!.plan.find(p => p.title === CHECKS[0].title)!;
+  await svc.editPlanItem(reddit.id, undefined, { done: true });
+  await svc.setPlan(today, [
+    { title: 'Publish the article', area: 'money', isMainStep: true, leverId: 'posting-publicly', estimateMin: 90 },
+    ...CHECKS.map(c => ({ title: c.title, area: c.area })),
+  ]);
+  const plan = store.days.get(today)!.plan;
+  for (const c of CHECKS) {
+    const p = plan.find(x => x.title === c.title)!;
+    assert.equal(p.projectId, 'aimyear');
+    assert.equal(p.leverId, c.leverId);
+    assert.equal(p.estimateMin, 15);
+  }
+  assert.equal(plan.find(p => p.title === CHECKS[0].title)!.done, true);
+});
