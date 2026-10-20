@@ -218,6 +218,10 @@ test('tick turns a due desktop stand-up into a desktop reminder with Break and S
   await tick(notif as any);
   assert.deepEqual(notif.autoClosed, ['b3']);
   assert.deepEqual([...notif.inbox.values()].find(r => r.blockId === 'b3')!.actions, [], 'the final notice has no buttons');
+  // Reminders nobody pulls do not pile up.
+  notif.inbox.set('old', { ...[...notif.inbox.values()][0], id: 'old', dueAt: minutesAgo(45) });
+  await tick(notif as any);
+  assert.equal(notif.inbox.has('old'), false);
 });
 
 test('the desktop pull hands each reminder out once, claiming due ones tick has not reached', async () => {

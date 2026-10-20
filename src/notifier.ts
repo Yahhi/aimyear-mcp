@@ -147,6 +147,8 @@ export async function pullDesktop(uid: string, notif: Notifications, now = new D
  */
 export async function tick(notif: Notifications, now = new Date(), socialFor: SocialFor = realSocialFor) {
   const due = await notif.due(now.toISOString());
+  // Without a desktop app polling, its reminders would pile up: drop the ones too old to say.
+  try { await notif.dropStaleDesktopReminders(new Date(now.getTime() - DESKTOP_STALE_MS).toISOString()); } catch (e) { console.error('[tick] desktop sweep failed', (e as Error).message); }
   const results: { id: string; kind: string; sent: number; failed: number; reason?: string; continued?: string }[] = [];
   for (const p of due) {
     if (!(await notif.claim(p.id))) continue;

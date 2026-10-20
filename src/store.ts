@@ -68,6 +68,12 @@ export class Notifications {
     for (const d of mine) if (await this.claim(d.id)) rows.push(d.data() as Pending);
     return rows;
   }
+  /** Desktop reminders nobody pulled in time (no desktop app open): too old to say, so gone. */
+  async dropStaleDesktopReminders(beforeIso: string, limit = 200): Promise<number> {
+    const snap = await this.db.collection(DESKTOP_REMINDERS).where('dueAt', '<', beforeIso).limit(limit).get();
+    await Promise.all(snap.docs.map(d => d.ref.delete()));
+    return snap.size;
+  }
   async saveDesktopReminder(r: DesktopReminder) { await this.db.collection(DESKTOP_REMINDERS).doc(r.id).set(r); }
   /** Takes every reminder waiting for this user's desktop: each one is handed out once. */
   async takeDesktopReminders(uid: string): Promise<DesktopReminder[]> {

@@ -15,6 +15,7 @@ export class FakeNotifications {
     const mine = [...this.pending.values()].filter(p => p.uid === uid && p.workplace === 'desktop' && p.dueAt <= nowIso);
     return mine.filter(p => this.pending.delete(p.id));
   }
+  async dropStaleDesktopReminders(beforeIso: string) { let n = 0; for (const [k, r] of this.inbox) if (r.dueAt < beforeIso) { this.inbox.delete(k); n++; } return n; }
   async saveDesktopReminder(r: DesktopReminder) { this.inbox.set(r.id, structuredClone(r)); }
   async takeDesktopReminders(uid: string) {
     const mine = [...this.inbox.values()].filter(r => r.uid === uid);
