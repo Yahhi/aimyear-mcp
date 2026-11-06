@@ -3,7 +3,7 @@ import { addDays, daysBetween, endOfDay, isValidDate, localDate, localTime, minu
 import { computeAttention, findGaps } from './domain/attention.js';
 import { computeComebacks, computeInsights, COMEBACK_HISTORY_DAYS, type InsightRow } from './domain/insights.js';
 import { checkGoal, checkStepTitle, type GoalDraft } from './domain/goal.js';
-import { classify, decideVerdict, isGoalWork, leverFor } from './domain/classify.js';
+import { classify, decideVerdict, isGoalWork, leverFor, linkedPlanItem, withPlanItem } from './domain/classify.js';
 import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, Track, PlanItem, Profile, Project, Routine, Session, Step, Stop, Workplace, Network, Move, Tracking } from './types.js';
 import { NETWORKS, TRACKINGS } from './types.js';
 
@@ -944,8 +944,10 @@ export class AimService {
     const start = input.startAt !== undefined ? this.deviceTime('start_at', input.startAt, now) : now;
     const day = await this.store.getOrCreateDay(today, prof.defaultMode);
     const goal = await this.store.getGoal();
-    const area = input.area ?? 'work';
-    const cls = classify({ area, projectId: input.projectId, leverId: input.leverId, stepId: input.stepId, itemId: input.itemId, task: input.task }, goal, day);
+    // A non-main plan item's own lever, project, step and area fill what the caller left out.
+    const link = withPlanItem({ area: input.area, projectId: input.projectId, leverId: input.leverId, stepId: input.stepId, itemId: input.itemId }, day);
+    const area = link.area;
+    const cls = classify({ ...link, task: input.task }, goal, day);
     const verdict = decideVerdict(cls.classification, day, goal, !!input.override, (await this.windowMinutesFor(today)) > 0);
     const workplace = input.workplace ?? this.clientWorkplace ?? prof.defaultWorkplace;
 
@@ -962,7 +964,7 @@ export class AimService {
     const mainItem = day.plan.find(p => p.isMainStep);
     const session: Session = {
       id: input.sessionId ?? newId(), start: start.toISOString(), source: 'agent', clientSessionId: this.clientSessionId, weight: input.weight ?? 1, exclusive: input.exclusive, workplace,
-      area, projectId: cls.projectId ?? input.projectId, leverId: cls.leverId ?? input.leverId, stepId: input.stepId ?? (cls.classification === 'main_step' ? mainItem?.stepId : undefined), itemId: input.itemId ?? (cls.classification === 'main_step' ? mainItem?.id : undefined),
+      area, projectId: cls.projectId ?? link.projectId, leverId: cls.leverId ?? link.leverId, stepId: link.stepId ?? (cls.classification === 'main_step' ? mainItem?.stepId : undefined), itemId: input.itemId ?? (cls.classification === 'main_step' ? mainItem?.id : undefined),
       task: input.task.trim(), notes: [], classification: cls.classification, unclassified: cls.unclassified, verdictAtStart: verdict.verdict, override: !!input.override && verdict.note === 'override',
       agent: await this.agent(),
     };
@@ -1130,6 +1132,12 @@ export class AimService {
     if (patch.task?.trim()) { s.task = patch.task.trim(); changed.push('task'); }
     if (patch.area) { s.area = patch.area; changed.push('area'); }
     for (const k of ['projectId', 'leverId', 'stepId', 'itemId'] as const) if (patch[k] !== undefined) { s[k] = patch[k] || undefined; changed.push(k); }
+    // Linking a session to a plan item (not the main step) says what it was: the item's own area,
+    // project, lever and step replace the stored ones, except those this same edit passes.
+    if (patch.itemId) {
+      const item = linkedPlanItem(patch.itemId, await this.store.getDay(localDate(new Date(s.start), tz)));
+      if (item) for (const k of ['area', 'projectId', 'leverId', 'stepId'] as const) if (patch[k] === undefined && item[k] !== undefined) (s as any)[k] = item[k];
+    }
     if (patch.summary !== undefined) { s.summary = patch.summary.trim(); changed.push('summary'); }
     if (patch.outcome) { s.outcome = patch.outcome; changed.push('outcome'); }
     if (patch.attentionShare !== undefined) { s.attentionShareOverride = Math.min(1, Math.max(0, patch.attentionShare)); changed.push('attention'); }
@@ -1165,13 +1173,14 @@ export class AimService {
     const day = await this.store.getOrCreateDay(date, prof.defaultMode);
     if (day.mode === 'off') return { ok: false, speak: `Mode is off for ${date}; nothing stored. Use set_day_mode to turn tracking on for that day.` };
     const goal = await this.store.getGoal();
-    const area = input.area ?? 'work';
-    const cls = classify({ area, projectId: input.projectId, leverId: input.leverId, stepId: input.stepId, itemId: input.itemId, task: input.task }, goal, day);
+    const link = withPlanItem({ area: input.area, projectId: input.projectId, leverId: input.leverId, stepId: input.stepId, itemId: input.itemId }, day);
+    const area = link.area;
+    const cls = classify({ ...link, task: input.task }, goal, day);
     const v = decideVerdict(cls.classification, day, goal, true, (await this.windowMinutesFor(date)) > 0);
     const session: Session = {
       id: newId(), start: start.toISOString(), end: end.toISOString(), source: 'manual', clientSessionId: this.clientSessionId, weight: input.weight ?? 1, exclusive: input.exclusive, workplace: input.workplace ?? prof.defaultWorkplace,
-      area, projectId: cls.projectId ?? input.projectId, leverId: cls.leverId ?? input.leverId,
-      stepId: input.stepId ?? (cls.classification === 'main_step' ? day.plan.find(p => p.isMainStep)?.stepId : undefined), itemId: input.itemId ?? (cls.classification === 'main_step' ? day.plan.find(p => p.isMainStep)?.id : undefined),
+      area, projectId: cls.projectId ?? link.projectId, leverId: cls.leverId ?? link.leverId,
+      stepId: link.stepId ?? (cls.classification === 'main_step' ? day.plan.find(p => p.isMainStep)?.stepId : undefined), itemId: input.itemId ?? (cls.classification === 'main_step' ? day.plan.find(p => p.isMainStep)?.id : undefined),
       task: input.task.trim(), notes: [], classification: cls.classification, unclassified: cls.unclassified, verdictAtStart: v.verdict, outcome: 'done',
       agent: await this.agent(),
     };
@@ -1213,13 +1222,14 @@ export class AimService {
     if (day.mode === 'off') return { ok: false, speak: `Mode is off for ${date}; nothing stored. Use set_day_mode to turn tracking on for that day.` };
     if (input.completesItem && !input.itemId) throw new AimError('completes_item needs item_id: the plan item this move finishes');
     const goal = await this.store.getGoal();
-    const area = input.area ?? 'work';
-    const cls = classify({ area, projectId: input.projectId, leverId: input.leverId, stepId: input.stepId, itemId: input.itemId, task }, goal, day);
+    const link = withPlanItem({ area: input.area, projectId: input.projectId, leverId: input.leverId, stepId: input.stepId, itemId: input.itemId }, day);
+    const area = link.area;
+    const cls = classify({ ...link, task }, goal, day);
     const main = day.plan.find(p => p.isMainStep);
     const move: Move = {
       id: newId(), date, at: at.toISOString(), task, area,
-      projectId: cls.projectId ?? input.projectId, leverId: cls.leverId ?? input.leverId,
-      stepId: input.stepId ?? (cls.classification === 'main_step' ? main?.stepId : undefined),
+      projectId: cls.projectId ?? link.projectId, leverId: cls.leverId ?? link.leverId,
+      stepId: link.stepId ?? (cls.classification === 'main_step' ? main?.stepId : undefined),
       itemId: input.itemId ?? (cls.classification === 'main_step' ? main?.id : undefined),
       classification: cls.classification, unclassified: cls.unclassified, source: 'agent', agent: await this.agent(), createdAt: new Date().toISOString(),
     };
