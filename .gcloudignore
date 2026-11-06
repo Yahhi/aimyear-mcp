@@ -2,3 +2,5 @@ node_modules
 dist
 .git
 test
+# The /aim skill is served by the server (prompt "aim", resource aimyear://skill/aim).
+!skills/aim/SKILL.md

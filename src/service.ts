@@ -4,14 +4,26 @@ import { computeAttention, findGaps } from './domain/attention.js';
 import { computeComebacks, computeInsights, COMEBACK_HISTORY_DAYS, type InsightRow } from './domain/insights.js';
 import { checkGoal, checkStepTitle, type GoalDraft } from './domain/goal.js';
 import { classify, decideVerdict, isGoalWork, leverFor } from './domain/classify.js';
-import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, PlanItem, Profile, Project, Routine, Session, Step, Stop, Workplace, Network } from './types.js';
-import { NETWORKS } from './types.js';
+import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, Track, PlanItem, Profile, Project, Routine, Session, Step, Stop, Workplace, Network, Move, Tracking } from './types.js';
+import { NETWORKS, TRACKINGS } from './types.js';
 
 export class AimError extends Error {}
 /** A Pro-only feature refused for lack of Pro. Clients key on `code`, never on the wording. */
 export class ProRequiredError extends AimError { readonly code = 'pro_required'; }
 
 const round = (n: number) => Math.round(n);
+
+/** Days a week toward the aim when the person set no weekly target (docs/moves.md). */
+export const DEFAULT_WEEKLY_TARGET = 4;
+/** Minutes of sessions on the aim that make a day count toward the weekly target. */
+export const AIM_DAY_MIN = 10;
+/** Said instead of a session start or log when the person records moves, not time. */
+const TRACKING_TEXT: Record<Tracking, string> = {
+  time: 'Tracking: time and moves.',
+  moves: 'Tracking: moves only, no timer and no minutes.',
+  quiet: 'Tracking: quiet numbers, the record is kept but spoken in words and days.',
+};
+const MOVES_ONLY = 'You record moves, not time (tracking: moves), so there is no timer. Log what changed with add_move, or switch to time with set_settings tracking "time".';
 
 export interface SessionInput {
   direction?: Direction;
@@ -196,21 +208,28 @@ export class AimService {
   async getPath() {
     const path = await this.store.getPath();
     const today = await this.today();
-    const milestones = path.milestones.map((m, i) => ({ ...m, ...this.milestonePace(m, path.milestones[i - 1], path.steps, today), steps: path.steps.filter(s => s.milestoneId === m.id).sort((a, b) => a.order - b.order) }));
+    // A stage's pace counts from the previous stage of its own track (docs/path-tracks.md).
+    const milestones = path.milestones.map(m => { const own = sameTrack(path, m); return { ...m, ...this.milestonePace(m, own[own.indexOf(m) - 1], path.steps, today), steps: path.steps.filter(s => s.milestoneId === m.id).sort((a, b) => a.order - b.order) }; });
     const current = milestones.find(isOpen);
-    return { milestones, current_milestone_id: current?.id ?? null, speak: current ? `Current milestone: "${current.title}" due ${current.due}, ${milestoneProgressText(current)}, ${current.pace}.` : 'No open milestones.' };
+    const tracks = (path.tracks ?? []).map(t => ({ ...t, milestone_ids: milestones.filter(m => m.trackId === t.id).map(m => m.id), current_milestone_id: milestones.find(m => m.trackId === t.id && isOpen(m))?.id ?? null }));
+    const said = (m: (typeof milestones)[number]) => `"${m.title}" due ${m.due}, ${milestoneProgressText(m)}, ${m.pace}`;
+    const speak = tracks.length
+      ? `${tracks.length} tracks to the aim, each able to reach it alone. ${tracks.map(t => { const c = milestones.find(m => m.id === t.current_milestone_id); return `${t.title}${t.reach ? ` (${t.reach})` : ''}: ${c ? `now ${said(c)}` : 'every stage closed'}`; }).join('; ')}.`
+      : current ? `Current milestone: ${said(current)}.` : 'No open milestones.';
+    return { tracks, milestones, current_milestone_id: current?.id ?? null, speak };
   }
 
-  async setMilestones(items: { id?: string; title: string; kind?: 'count' | 'steps'; metric?: string; target?: number; due: string }[]) {
+  async setMilestones(items: { id?: string; title: string; kind?: 'count' | 'steps'; metric?: string; target?: number; due: string; trackId?: string }[]) {
     const goal = await this.requireGoal();
     const path = await this.store.getPath();
     const problems: string[] = [];
-    if (items.length < 2 || items.length > 6) problems.push('use 2 to 6 milestones');
-    let lastDue = '';
+    const tracked = !!path.tracks?.length;
+    if (items.length < 2 || items.length > (tracked ? 6 * path.tracks!.length + 6 : 6)) problems.push(tracked ? 'use 2 milestones or more, up to 6 per track' : 'use 2 to 6 milestones');
     for (const it of items) {
       if (!isValidDate(it.due)) problems.push(`milestone "${it.title}": due must be YYYY-MM-DD`);
-      else { if (it.due > goal.deadline) problems.push(`milestone "${it.title}" is due after the goal deadline ${goal.deadline}`); if (lastDue && it.due < lastDue) problems.push(`milestone "${it.title}" is due before the previous one`); lastDue = it.due; }
+      else if (it.due > goal.deadline) problems.push(`milestone "${it.title}" is due after the goal deadline ${goal.deadline}`);
       if (it.kind === 'count' && (!it.metric?.trim() || !(it.target! > 0))) problems.push(`milestone "${it.title}" is countable: it needs a metric and a target above 0`);
+      if (it.trackId && !tracked) problems.push(`milestone "${it.title}" names track "${it.trackId}", but the path has no tracks: set_tracks first`);
     }
     if (problems.length) return { ok: false, problems, speak: problems.join('; ') };
     const now = new Date().toISOString();
@@ -219,12 +238,44 @@ export class AimService {
       const id = it.id ?? slug(it.title); const prev = byId.get(id);
       // Unsaid kind: an existing milestone keeps its own; a new one is countable when it names a number.
       const kind = it.kind ?? (prev ? milestoneKind(prev) : it.metric?.trim() && it.target! > 0 ? 'count' : 'steps');
-      return { id, title: it.title.trim(), kind, metric: (it.metric ?? '').trim(), target: kind === 'count' ? it.target! : (it.target ?? 0), due: it.due, status: prev?.status ?? 'todo', createdAt: prev?.createdAt ?? now, doneAt: prev?.doneAt, progress: prev?.progress };
+      const trackId = tracked ? it.trackId ?? prev?.trackId : undefined;
+      return { id, title: it.title.trim(), kind, metric: (it.metric ?? '').trim(), target: kind === 'count' ? it.target! : (it.target ?? 0), due: it.due, status: prev?.status ?? 'todo', createdAt: prev?.createdAt ?? now, doneAt: prev?.doneAt, progress: prev?.progress, ...(trackId ? { trackId } : {}) };
     });
+    const invalid = pathProblems(path, { order: true });
+    if (invalid.length) return { ok: false, problems: invalid, speak: invalid.join('; ') };
     const keep = new Set(path.milestones.map(m => m.id));
     path.steps = path.steps.filter(s => keep.has(s.milestoneId));
     await this.store.savePath(path);
-    return { ok: true, milestones: path.milestones, speak: `${path.milestones.length} milestones saved (${path.milestones.map(m => `"${m.title}": ${m.kind === 'count' ? `count to ${m.target} ${m.metric}` : 'steps'}`).join('; ')}). Now add concrete steps for the first one ("${path.milestones[0].title}") with add_steps.${path.milestones.some(m => m.kind === 'count') ? ' Record a countable milestone\'s value with record_progress and its milestoneId.' : ''}` };
+    const now_ = currentStages(path);
+    return { ok: true, milestones: path.milestones, speak: `${path.milestones.length} milestones saved (${path.milestones.map(m => `"${m.title}": ${m.kind === 'count' ? `count to ${m.target} ${m.metric}` : 'steps'}`).join('; ')}).${now_.length ? ` Now add concrete steps for ${now_.map(m => `"${m.title}"`).join(' and ')} with add_steps.` : ''}${path.milestones.some(m => m.kind === 'count') ? ' Record a countable milestone\'s value with record_progress and its milestoneId.' : ''}` };
+  }
+
+  /** docs/path-tracks.md: replace the tracks (0 to 3). milestoneIds moves those stages into the track, in that order. */
+  async setTracks(items: { id?: string; title: string; reach?: string; milestoneIds?: string[] }[]) {
+    await this.requireGoal();
+    const path = await this.store.getPath();
+    const problems: string[] = [];
+    if (items.length > 3) problems.push('use at most 3 tracks: every one of them leads to the same aim');
+    const tracks: Track[] = items.map(it => ({ id: it.id ?? slug(it.title), title: it.title.trim(), reach: (it.reach ?? '').trim() }));
+    if (new Set(tracks.map(t => t.id)).size !== tracks.length) problems.push('two tracks have the same id');
+    const ids = new Set(path.milestones.map(m => m.id));
+    for (const it of items) for (const mid of it.milestoneIds ?? []) if (!ids.has(mid)) problems.push(`milestone "${mid}" not found; ids: ${[...ids].join(', ')}`);
+    if (problems.length) return { ok: false, problems, speak: problems.join('; ') };
+    const known = new Set(tracks.map(t => t.id));
+    for (const m of path.milestones) if (!m.trackId || !known.has(m.trackId)) delete m.trackId;
+    tracks.forEach((t, i) => { for (const mid of items[i].milestoneIds ?? []) path.milestones.find(m => m.id === mid)!.trackId = t.id; });
+    // Each track's stages in the order given; the list keeps the tracks' order, closed stages without a track first.
+    if (tracks.length) {
+      const rank = (m: Milestone) => m.trackId ? tracks.findIndex(t => t.id === m.trackId) : -1;
+      const pos = (m: Milestone) => { const i = tracks.findIndex(t => t.id === m.trackId); const at = (items[i]?.milestoneIds ?? []).indexOf(m.id); return at < 0 ? 1e3 + path.milestones.indexOf(m) : at; };
+      path.milestones.sort((a, b) => rank(a) - rank(b) || pos(a) - pos(b));
+      path.tracks = tracks;
+    } else delete path.tracks;
+    const invalid = pathProblems(path);
+    if (invalid.length) return { ok: false, problems: invalid, speak: invalid.join('; ') };
+    await this.store.savePath(path);
+    const view = await this.getPath();
+    return { ok: true, tracks: view.tracks, speak: tracks.length ? `Tracks saved. ${view.speak}` : `Tracks removed: the path is one list again. ${view.speak}` };
   }
 
   /** Prep-first check: a stage whose first open step is not on a hard lever. Returns a warning or null. */
@@ -260,7 +311,7 @@ export class AimService {
     });
   }
 
-  async editMilestone(milestoneId: string, patch: { title?: string; kind?: 'count' | 'steps'; metric?: string; target?: number; due?: string; status?: MilestoneStatus }) {
+  async editMilestone(milestoneId: string, patch: { title?: string; kind?: 'count' | 'steps'; metric?: string; target?: number; due?: string; status?: MilestoneStatus; trackId?: string }) {
     const path = await this.store.getPath();
     const m = path.milestones.find(x => x.id === milestoneId);
     if (!m) throw new AimError(`milestone "${milestoneId}" not found; ids: ${path.milestones.map(x => x.id).join(', ')}`);
@@ -276,9 +327,14 @@ export class AimService {
     if (patch.kind) m.kind = patch.kind;
     if (milestoneKind(m) === 'count' && (!m.metric || !(m.target > 0))) return { ok: false, problems: ['a countable milestone needs a metric and a target above 0'], speak: `"${m.title}" is countable: give it a metric and a target above 0.` };
     if (patch.status) { m.status = patch.status; m.doneAt = patch.status === 'done' || patch.status === 'retired' ? new Date().toISOString() : undefined; }
+    if (patch.trackId !== undefined) {
+      if (!path.tracks?.some(t => t.id === patch.trackId)) return { ok: false, problems: [`no track "${patch.trackId}"; tracks: ${(path.tracks ?? []).map(t => t.id).join(', ') || 'none (set_tracks first)'}`], speak: `There is no track "${patch.trackId}".` };
+      m.trackId = patch.trackId;
+    }
+    const invalid = pathProblems(path);
+    if (invalid.length) return { ok: false, problems: invalid, speak: invalid.join('; ') };
     await this.store.savePath(path);
-    const next = path.milestones.find(isOpen);
-    return { ok: true, milestone: m, speak: `Milestone "${m.title}": ${m.status}, due ${m.due}.${patch.status && !isOpen(m) ? ` Current milestone is now ${next ? `"${next.title}"` : 'none'}.` : ''}` };
+    return { ok: true, milestone: m, speak: `Milestone "${m.title}": ${m.status}, due ${m.due}.${patch.status && !isOpen(m) ? ` ${nextStageText(path, m)}` : ''}` };
   }
 
   private async recordMilestoneProgress(milestoneId: string, value: number, d: string) {
@@ -292,8 +348,7 @@ export class AimService {
     let closed = false;
     if (reached && isOpen(m)) { m.status = 'done'; m.doneAt = new Date().toISOString(); closed = true; }
     await this.store.savePath(path);
-    const next = path.milestones.find(isOpen);
-    return { ok: true, milestone: m, history: m.progress, milestone_reached: reached, speak: `Recorded ${m.metric} = ${value} of ${m.target} for "${m.title}" on ${d}.${closed ? ` Milestone done. Current milestone is now ${next ? `"${next.title}"` : 'none'}.` : ''}` };
+    return { ok: true, milestone: m, history: m.progress, milestone_reached: reached, speak: `Recorded ${m.metric} = ${value} of ${m.target} for "${m.title}" on ${d}.${closed ? ` Milestone done. ${nextStageText(path, m)}` : ''}` };
   }
 
   async deleteStep(stepId: string) {
@@ -331,11 +386,28 @@ export class AimService {
   async nextSteps(count = 5) {
     const goal = await this.store.getGoal();
     const path = await this.store.getPath();
-    const current = path.milestones.find(isOpen);
-    if (!current) return { steps: [], speak: 'No open milestone. Set milestones first.' };
+    // One current stage per track (docs/path-tracks.md); the main step can come from any of them.
+    const currents = currentStages(path);
+    if (!currents.length) return { steps: [], speak: 'No open milestone. Set milestones first.' };
     const hard = new Set((goal?.levers ?? []).filter(l => l.kind === 'hard').map(l => l.id));
-    const open = path.steps.filter(s => s.milestoneId === current.id && s.status !== 'done').sort((a, b) => (Number(hard.has(b.leverId ?? '')) - Number(hard.has(a.leverId ?? ''))) || a.order - b.order).slice(0, count);
-    return { milestone: { id: current.id, title: current.title, due: current.due }, steps: open.map(s => ({ ...s, hard: hard.has(s.leverId ?? '') })), speak: open.length ? `Candidates for the main step (hard first): ${open.map(s => `[${s.id}] ${s.title}`).join('; ')}.` : `Milestone "${current.title}" has no open steps. Add some with add_steps.` };
+    const trackTitle = (m: Milestone) => path.tracks?.find(t => t.id === m.trackId)?.title ?? null;
+    // Steps keep their path order: a later step waits for the earlier undone one (docs/path-tracks.md).
+    const lists = currents.map(m => path.steps.filter(s => s.milestoneId === m.id && s.status !== 'done').sort((a, b) => a.order - b.order)
+      .map((s, i, all) => ({ ...s, hard: hard.has(s.leverId ?? ''), track: trackTitle(m), ...(i ? { after: all[i - 1].title } : {}) })));
+    // Hard first between tracks: the track whose next step is hard goes first.
+    lists.sort((a, b) => Number(!!b[0]?.hard) - Number(!!a[0]?.hard));
+    // Taken in turns, so one track's long list doesn't hide the others.
+    const open: (typeof lists)[number] = [];
+    for (let i = 0; open.length < count && lists.some(l => l.length > i); i++) for (const l of lists) if (l[i] && open.length < count) open.push(l[i]);
+    const empty = currents.filter(m => !path.steps.some(s => s.milestoneId === m.id && s.status !== 'done'));
+    const current = currents[0];
+    return {
+      milestone: { id: current.id, title: current.title, due: current.due },
+      milestones: currents.map(m => ({ id: m.id, title: m.title, due: m.due, track: trackTitle(m) })),
+      steps: open,
+      speak: (open.length ? `Candidates for the main step (in path order${currents.length > 1 ? ', from every track' : ''}): ${open.map(s => `[${s.id}] ${s.track ? `${s.track}: ` : ''}${s.title}${s.after ? ` (after "${s.after}")` : ''}`).join('; ')}.` : '')
+        + (empty.length ? `${open.length ? ' ' : ''}${empty.map(m => `Milestone "${m.title}"`).join(' and ')} ${empty.length > 1 ? 'have' : 'has'} no open steps. Add some with add_steps.` : ''),
+    };
   }
 
   // ---------- profile ----------
@@ -343,19 +415,29 @@ export class AimService {
     const p = prof.pomodoro;
     return {
       timezone: prof.timezone, workplace: prof.defaultWorkplace, ...p, post_to: prof.postTo ?? null,
-      speak: `Timezone ${prof.timezone}. Reminders go to ${prof.defaultWorkplace}. Stand-up every ${p.workMin} min${p.standup ? '' : ' (stand-up reminders off)'}, ${p.breakMin} min break, a ${p.longBreakMin} min break every ${p.longBreakEvery} blocks.${prof.postTo ? ` Progress posts go to: ${prof.postTo.join(', ') || 'no network'}.` : ''}`,
+      tracking: prof.tracking ?? 'time', weekly_target: prof.weeklyTarget ?? DEFAULT_WEEKLY_TARGET,
+      speak: `Timezone ${prof.timezone}. Reminders go to ${prof.defaultWorkplace}. Stand-up every ${p.workMin} min${p.standup ? '' : ' (stand-up reminders off)'}, ${p.breakMin} min break, a ${p.longBreakMin} min break every ${p.longBreakEvery} blocks.${prof.postTo ? ` Progress posts go to: ${prof.postTo.join(', ') || 'no network'}.` : ''} ${TRACKING_TEXT[prof.tracking ?? 'time']} Weekly target: ${prof.weeklyTarget ?? DEFAULT_WEEKLY_TARGET} day(s) toward the aim.`,
     };
   }
   async getSettings() { return this.settingsView(await this.profile()); }
-  async setSettings(s: { timezone?: string; workplace?: Workplace; workMin?: number; breakMin?: number; longBreakEvery?: number; longBreakMin?: number; standup?: boolean; post_to?: Network[] }) {
+  async setSettings(s: { timezone?: string; workplace?: Workplace; workMin?: number; breakMin?: number; longBreakEvery?: number; longBreakMin?: number; standup?: boolean; post_to?: Network[]; tracking?: Tracking; weekly_target?: number }) {
     const prof = await this.profile();
+    if (s.tracking !== undefined) {
+      if (!TRACKINGS.includes(s.tracking)) throw new AimError(`tracking must be one of ${TRACKINGS.join(', ')}`);
+      if (s.tracking === 'moves' && (await this.store.getRunningSessions()).length) throw new AimError('A session is running. Stop it first (stop_session), then switch to moves.');
+      prof.tracking = s.tracking;
+    }
+    if (s.weekly_target !== undefined) {
+      if (!(Number.isInteger(s.weekly_target) && s.weekly_target >= 1 && s.weekly_target <= 7)) throw new AimError('weekly_target is the number of days a week, 1 to 7');
+      prof.weeklyTarget = s.weekly_target;
+    }
     if (s.timezone !== undefined) {
       try { new Intl.DateTimeFormat('en', { timeZone: s.timezone }); } catch { throw new AimError(`unknown timezone "${s.timezone}"; use an IANA name such as Europe/Madrid`); }
       prof.timezone = s.timezone;
     }
     if (s.workplace) prof.defaultWorkplace = s.workplace;
     if (s.post_to) prof.postTo = NETWORKS.filter(n => s.post_to!.includes(n));
-    const { timezone: _t, workplace: _w, post_to: _p, ...pom } = s;
+    const { timezone: _t, workplace: _w, post_to: _p, tracking: _k, weekly_target: _g, ...pom } = s;
     prof.pomodoro = { ...prof.pomodoro, ...Object.fromEntries(Object.entries(pom).filter(([, v]) => v !== undefined)) };
     await this.store.saveProfile(prof); this.profileCache = prof;
     const view = this.settingsView(prof);
@@ -593,11 +675,13 @@ export class AimService {
     }
     const path = await this.store.getPath();
     for (const it of items) if (it.stepId && !path.steps.some(s => s.id === it.stepId)) return { ok: false, problems: [`stepId "${it.stepId}" not found in path`], speak: `Step ${it.stepId} is not in the path.` };
+    const skipped = stepOrderWarning(path, mains[0]?.stepId);
+    if (skipped) warnings.push(skipped);
     if (day.mode !== 'off' && windowMin > 0) {
       const goal = await this.store.getGoal();
       const hard = goal?.levers.filter(l => l.kind === 'hard') ?? [];
       if (hard.length && !items.some(it => leverFor(it, goal, path.steps)?.kind === 'hard')) {
-        warnings.push(`Nothing in this plan is on a hard lever (${hard.map(l => l.name).join(', ')}): the day is preparation only. Make the main step a short hard-lever step, done with what exists now (next_steps lists them first), or swap one item for one, then call set_plan again.`);
+        warnings.push(`Nothing in this plan is on a hard lever (${hard.map(l => l.name).join(', ')}): the day is preparation only. Make the main step a short hard-lever step, done with what exists now (see next_steps), or swap one item for one, then call set_plan again.`);
       }
     }
     const prev = new Map(day.plan.map(p => [p.stepId ?? p.title, p]));
@@ -660,6 +744,10 @@ export class AimService {
         notes.push(patch.done ? `Path step done: "${r.step?.title}".` : `Path step "${r.step?.title}" is open again.`);
       }
     }
+    if (item.isMainStep && !item.done && (patch.stepId || patch.isMainStep)) {
+      const skipped = stepOrderWarning(await this.store.getPath(), item.stepId);
+      if (skipped) notes.push(skipped);
+    }
     await this.store.saveDay(day);
     const routine = item.routineId ? (await this.store.getRoutines()).find(r => r.id === item.routineId) : undefined;
     if (routine?.perWeek) {
@@ -680,6 +768,20 @@ export class AimService {
     return { ok: true, plan: day.plan, speak: `Removed "${item.title}" from the plan for ${day.date}.${item.routineId ? ' It is a routine: skipped for this day only.' : ''}${item.isMainStep ? ' That was the main step: set another one with edit_plan_item (isMainStep) or set_plan.' : ''}` };
   }
 
+  /** The last planned main step before d, if it is still not done (looks back a week). */
+  private async undoneMainStep(d: string) {
+    const path = await this.store.getPath();
+    for (let i = 1; i <= 7; i++) {
+      const day = await this.store.getDay(addDays(d, -i));
+      const main = day?.plan.find(p => p.isMainStep);
+      if (!main) continue;
+      const step = main.stepId ? path.steps.find(s => s.id === main.stepId) : undefined;
+      if (main.done || step?.status === 'done') return null;
+      return { date: day!.date, item_id: main.id, title: main.title, step_id: main.stepId ?? null };
+    }
+    return null;
+  }
+
   async getPlanningContext(date?: string) {
     const d = date ?? addDays(await this.today(), 1); this.assertDate(d);
     const goal = await this.getGoal();
@@ -688,6 +790,7 @@ export class AimService {
     const ySum = await this.daySummary(yesterday);
     const yDay = await this.store.getDay(yesterday);
     const undone = (yDay?.plan ?? []).filter(p => !p.done);
+    const carryOver = await this.undoneMainStep(d);
     const week = await this.weekSummary(addDays(d, -1));
     const daysSinceHard = await this.daysSinceHardLever(d);
     const existing = await this.dayWithRoutines(d);
@@ -699,10 +802,11 @@ export class AimService {
     return {
       date: d, commitments, committed_minutes_that_day: committedToday, focus_window_minutes: windowMinutes, capacity: cap, goal: goal.goal ? { title: goal.goal.title, metric: goal.goal.metric, current: goal.current_value, target: goal.goal.target, days_left: goal.days_left, levers: goal.goal.levers, projects: goal.goal.projects } : null,
       milestone: next.milestone ?? null, next_steps: next.steps,
+      carry_over: carryOver,
       yesterday: { date: yesterday, main_step_done: ySum.main_step.done, goal_attention_min: ySum.goal_attention_min, by_area: ySum.by_area, undone_items: undone },
       week: { main_step_days: week.main_step_days, goal_share: week.goal_share, hard_share: week.hard_share, by_area: week.by_area },
       days_since_hard_lever: daysSinceHard, existing_plan: existing?.plan ?? [], routines,
-      speak: `Planning ${d}. ${windowMinutes === 0 ? 'NO focus window that day: do not plan goal work, and do not ask for a main step. ' : `Focus window: ${Math.round(windowMinutes / 6) / 10} h. `}Fixed that day: ${commitments.length ? commitments.map(c => `${c.title} ${c.minutes}min${c.usableForWork ? ' (usable)' : ''}`).join(', ') : 'nothing recorded'} = ${Math.round(committedToday / 6) / 10} h. ${goal.speak} Days since a hard lever: ${daysSinceHard ?? 'never'}. Yesterday main step ${ySum.main_step.done ? 'done' : 'NOT done'}${undone.length ? `, ${undone.length} items left undone` : ''}. Pick the main step from next_steps (hard first), then fit paid work, family, workout.${routines.length ? ` Routines that day (already in the plan, set_plan keeps them): ${routines.map(r => r.title).join('; ')}.` : ''}`,
+      speak: `Planning ${d}. ${windowMinutes === 0 ? 'NO focus window that day: do not plan goal work, and do not ask for a main step. ' : `Focus window: ${Math.round(windowMinutes / 6) / 10} h. `}Fixed that day: ${commitments.length ? commitments.map(c => `${c.title} ${c.minutes}min${c.usableForWork ? ' (usable)' : ''}`).join(', ') : 'nothing recorded'} = ${Math.round(committedToday / 6) / 10} h. ${goal.speak} Days since a hard lever: ${daysSinceHard ?? 'never'}. Yesterday main step ${ySum.main_step.done ? 'done' : 'NOT done'}${undone.length ? `, ${undone.length} items left undone` : ''}. ${carryOver ? `The main step of ${carryOver.date} is not done: "${carryOver.title}". Plan it again as the main step unless the user says otherwise.` : 'Pick the main step from next_steps: the first open step of a track, in path order.'} Then fit paid work, family, workout.${routines.length ? ` Routines that day (already in the plan, set_plan keeps them): ${routines.map(r => r.title).join('; ')}.` : ''}`,
     };
   }
 
@@ -834,6 +938,7 @@ export class AimService {
 
   private async startFresh(input: SessionInput & { minutes?: number; startAt?: string; sessionId?: string }, op: OpRef | undefined) {
     const prof = await this.profile();
+    if (prof.tracking === 'moves') throw new AimError(MOVES_ONLY);
     const today = await this.today();
     const now = new Date();
     const start = input.startAt !== undefined ? this.deviceTime('start_at', input.startAt, now) : now;
@@ -1048,6 +1153,7 @@ export class AimService {
     const op = this.opRef('add_session', input.opId);
     const tz = await this.tz();
     const prof = await this.profile();
+    if (prof.tracking === 'moves') throw new AimError(MOVES_ONLY);
     let start: Date, end: Date;
     if (input.start && input.end) {
       const d = input.date ?? await this.today(); this.assertDate(d);
@@ -1074,6 +1180,128 @@ export class AimService {
       const view = await this.sessionView(session);
       return { result: { ok: true, session: view, classification: cls.classification, matched_by: cls.matchedBy, speak: `Logged [${session.id}] "${session.task}" ${localTime(start, tz)}–${localTime(end, tz)} on ${date}: ${view.wall_min} min wall, ${view.attention_min} min attention → ${cls.classification}${cls.unclassified ? ' (unclassified)' : ''}.` }, sessionId: session.id };
     });
+  }
+
+  // ---------- moves (docs/moves.md) ----------
+  /** How much time this person records and hears about. */
+  async tracking(): Promise<Tracking> { return (await this.profile()).tracking ?? 'time'; }
+  /** quiet and moves: speak in words and days, never minutes or percentages. */
+  private async quietNumbers() { return (await this.tracking()) !== 'time'; }
+
+  private moveIsHard(m: { classification: Classification; leverId?: string }, goal: Goal | null) {
+    return m.classification === 'goal_hard' || (m.classification === 'main_step' && goal?.levers.find(l => l.id === m.leverId)?.kind === 'hard');
+  }
+
+  private moveView(m: Move, goal: Goal | null) {
+    return { id: m.id, date: m.date, task: m.task, area: m.area, classification: m.classification, toward_aim: isGoalWork(m.classification), hard: this.moveIsHard(m, goal), lever_id: m.leverId ?? null, project_id: m.projectId ?? null, step_id: m.stepId ?? null, item_id: m.itemId ?? null, agent: m.agent ?? null };
+  }
+
+  /**
+   * One action toward the aim with no duration: what changed, classified like a session.
+   * completesItem ticks the plan item (and its path step), so a move can finish the main step.
+   */
+  async addMove(input: { task: string; date?: string; time?: string; area?: Area; projectId?: string; leverId?: string; stepId?: string; itemId?: string; completesItem?: boolean }) {
+    const task = input.task?.trim();
+    if (!task) throw new AimError('say what changed, e.g. "fixed the signup button text on the landing page"');
+    const prof = await this.profile();
+    const tz = prof.timezone;
+    const today = await this.today();
+    const date = input.date ?? today; this.assertDate(date);
+    if (date > today) throw new AimError(`${date} is in the future; a move records something already done`);
+    const at = input.time ? parseLocal(date, input.time, tz) : (date === today ? new Date() : parseLocal(date, '12:00', tz));
+    const day = await this.store.getOrCreateDay(date, prof.defaultMode);
+    if (day.mode === 'off') return { ok: false, speak: `Mode is off for ${date}; nothing stored. Use set_day_mode to turn tracking on for that day.` };
+    if (input.completesItem && !input.itemId) throw new AimError('completes_item needs item_id: the plan item this move finishes');
+    const goal = await this.store.getGoal();
+    const area = input.area ?? 'work';
+    const cls = classify({ area, projectId: input.projectId, leverId: input.leverId, stepId: input.stepId, itemId: input.itemId, task }, goal, day);
+    const main = day.plan.find(p => p.isMainStep);
+    const move: Move = {
+      id: newId(), date, at: at.toISOString(), task, area,
+      projectId: cls.projectId ?? input.projectId, leverId: cls.leverId ?? input.leverId,
+      stepId: input.stepId ?? (cls.classification === 'main_step' ? main?.stepId : undefined),
+      itemId: input.itemId ?? (cls.classification === 'main_step' ? main?.id : undefined),
+      classification: cls.classification, unclassified: cls.unclassified, source: 'agent', agent: await this.agent(), createdAt: new Date().toISOString(),
+    };
+    await this.store.saveMove(move);
+    const notes: string[] = [];
+    if (input.completesItem && input.itemId) {
+      const r = await this.editPlanItem(input.itemId, date, { done: true });
+      notes.push(r.speak);
+    }
+    const week = await this.weekProgress(date);
+    const view = this.moveView(move, goal);
+    const what = view.toward_aim ? `toward the aim${view.hard ? ', on the hard part' : ''}` : cls.classification === 'life' ? 'for life' : 'on other work';
+    return {
+      ok: true, move: view, classification: cls.classification, matched_by: cls.matchedBy, week,
+      speak: `Move recorded for ${date === today ? 'today' : date}: "${task}", ${what}${cls.unclassified ? ' (unclassified: say which kind of work it was and fix it with delete_move and add_move)' : ''}.${notes.length ? ' ' + notes.join(' ') : ''} ${week.speak}`,
+    };
+  }
+
+  async listMoves(from?: string, to?: string) {
+    const today = await this.today();
+    const t = to ?? today, f = from ?? addDays(t, -6); this.assertDate(f); this.assertDate(t);
+    const goal = await this.store.getGoal();
+    const moves = (await this.store.getMovesInRange(f, t)).sort((a, b) => a.at.localeCompare(b.at)).map(m => this.moveView(m, goal));
+    const aim = moves.filter(m => m.toward_aim).length;
+    return { from: f, to: t, count: moves.length, toward_aim: aim, moves, speak: moves.length ? `${moves.length} move(s) between ${f} and ${t}, ${aim} toward the aim: ${moves.map(m => `[${m.id}] ${m.date} "${m.task}"`).join('; ')}.` : `No moves between ${f} and ${t}.` };
+  }
+
+  async deleteMove(moveId: string) {
+    const m = await this.store.getMove(moveId);
+    if (!m) throw new AimError(`move "${moveId}" not found; list_moves shows the ids`);
+    await this.store.deleteMove(moveId);
+    return { ok: true, deleted: moveId, speak: `Deleted the move "${m.task}" from ${m.date}. A plan item it ticked stays ticked; untick it with edit_plan_item if needed.` };
+  }
+
+  /** Local days in [from, to] that moved toward the aim: main step done, a move toward the aim, or AIM_DAY_MIN minutes of sessions on it. Days switched off never count. */
+  private async aimDays(from: string, to: string): Promise<Set<string>> {
+    const tz = await this.tz();
+    const days = await this.store.getDaysInRange(from, to);
+    const out = new Set<string>();
+    for (const x of days) if (x.plan.some(p => p.isMainStep && p.done)) out.add(x.date);
+    for (const m of await this.store.getMovesInRange(from, to)) if (isGoalWork(m.classification)) out.add(m.date);
+    const now = new Date();
+    const mins = new Map<string, number>();
+    for (const x of await this.store.getSessionsOverlapping(startOfDay(from, tz).toISOString(), endOfDay(to, tz).toISOString())) {
+      if (!isGoalWork(x.classification)) continue;
+      const k = localDate(new Date(x.start), tz);
+      mins.set(k, (mins.get(k) ?? 0) + minutesBetween(new Date(x.start), x.end ? new Date(x.end) : now));
+    }
+    for (const [k, v] of mins) if (v >= AIM_DAY_MIN && k >= from && k <= to) out.add(k);
+    for (const x of days) if (x.mode === 'off') out.delete(x.date);
+    return out;
+  }
+
+  /**
+   * The weekly target (docs/moves.md): days toward the aim this week (Monday to Sunday,
+   * through `date`) against the target, and how many weeks in a row met it.
+   */
+  async weekProgress(date?: string) {
+    const d = date ?? await this.today(); this.assertDate(d);
+    const prof = await this.profile();
+    const target = prof.weeklyTarget ?? DEFAULT_WEEKLY_TARGET;
+    const monday = weekStart(d);
+    const WEEKS_BACK = 12;
+    const aim = await this.aimDays(addDays(monday, -7 * WEEKS_BACK), d);
+    const dates = [...aim].filter(x => x >= monday && x <= d).sort();
+    const met = dates.length >= target;
+    const daysLeft = 6 - daysBetween(monday, d);
+    // Today can still count if it hasn't yet.
+    const reachable = dates.length + daysLeft + (aim.has(d) ? 0 : 1) >= target;
+    let inARow = 0;
+    for (let w = 1; w <= WEEKS_BACK; w++) {
+      const from = addDays(monday, -7 * w), to = addDays(from, 6);
+      if ([...aim].filter(x => x >= from && x <= to).length >= target) inARow++; else break;
+    }
+    if (met) inARow++;
+    const rowText = inARow > 1 ? ` ${inARow} weeks in a row.` : '';
+    const speak = met
+      ? `This week: ${dates.length} day${dates.length === 1 ? '' : 's'} toward the aim, target of ${target} met.${rowText}`
+      : reachable
+        ? `This week: ${dates.length} of ${target} days toward the aim, ${daysLeft} day(s) left after today.${rowText}`
+        : `This week: ${dates.length} of ${target} days toward the aim; the target is out of reach this week, and a new week starts on Monday.${rowText}`;
+    return { week_of: monday, through: d, target, days: dates.length, dates, met, days_left: daysLeft, reachable, weeks_in_a_row: inARow, speak };
   }
 
   async getCurrent() {
@@ -1111,19 +1339,27 @@ export class AimService {
     const r = (m: Record<string, { wall_min: number; attention_min: number }>) => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, { ...v, wall_min: round(v.wall_min), attention_min: round(v.attention_min) }]));
     const goalAtt = ['main_step', 'goal_hard', 'goal_comfortable'].reduce((s, k) => s + (byClass[k]?.attention_min ?? 0), 0);
     const hardAtt = ['main_step', 'goal_hard'].reduce((s, k) => s + (byClass[k]?.attention_min ?? 0), 0);
-    const workAtt = byArea['work']?.attention_min ?? 0;
+    // Work is aim work plus other projects, whatever area they are filed in: aim work on a
+    // money aim sits in "money", so the work area alone made the share go over 100%.
+    const workAtt = goalAtt + (byClass['other_project']?.attention_min ?? 0);
     const totalAtt = Object.values(byArea).reduce((s, v) => s + v.attention_min, 0);
     const main = day?.plan.find(p => p.isMainStep);
     const routines = await this.routineStatus(day);
-    const hardTouched = sessions.some(s => (s.classification === 'goal_hard' || (s.classification === 'main_step' && goal?.levers.find(l => l.id === s.leverId)?.kind === 'hard')) && (att.attention.get(s.id) ?? 0) >= 10);
+    const moves = (await this.store.getMovesInRange(d, d)).sort((a, b) => a.at.localeCompare(b.at)).map(m => this.moveView(m, goal));
+    const aimMoves = moves.filter(m => m.toward_aim).length, hardMoves = moves.filter(m => m.hard).length;
+    const hardTouched = hardMoves > 0 || sessions.some(s => (s.classification === 'goal_hard' || (s.classification === 'main_step' && goal?.levers.find(l => l.id === s.leverId)?.kind === 'hard')) && (att.attention.get(s.id) ?? 0) >= 10);
+    const quiet = await this.quietNumbers();
     const overrides = sessions.filter(s => s.override).length;
     const list = sessions.sort((a, b) => a.start.localeCompare(b.start)).map(s => ({ id: s.id, from: localTime(new Date(s.start), tz), to: s.end ? localTime(new Date(s.end), tz) : 'running', task: s.task, area: s.area, classification: s.classification, lever_id: s.leverId, wall_min: round(att.wall.get(s.id) ?? 0), attention_min: round(s.attentionShareOverride !== undefined ? (att.wall.get(s.id) ?? 0) * s.attentionShareOverride : att.attention.get(s.id) ?? 0), override: s.override ?? false, outcome: s.outcome, summary: s.summary }));
     const gaps = findGaps(sessions, start, end).map(g => ({ from: localTime(new Date(g.start), tz), to: localTime(new Date(g.end), tz), minutes: g.minutes }));
     return {
       date: d, mode: day?.mode ?? 'full', main_step: { title: main?.title ?? null, done: !!main?.done, planned: !!main }, routines,
-      total_attention_min: round(totalAtt), goal_attention_min: round(goalAtt), goal_share_of_work: workAtt ? Math.round((goalAtt / workAtt) * 100) / 100 : 0, hard_share_of_goal: goalAtt ? Math.round((hardAtt / goalAtt) * 100) / 100 : 0,
+      total_attention_min: round(totalAtt), work_attention_min: round(workAtt), goal_attention_min: round(goalAtt), goal_share_of_work: workAtt ? Math.round((goalAtt / workAtt) * 100) / 100 : 0, hard_share_of_goal: goalAtt ? Math.round((hardAtt / goalAtt) * 100) / 100 : 0,
       hard_lever_touched: hardTouched, overrides, by_area: r(byArea), by_classification: r(byClass), by_lever: r(byLever), overlaps: att.overlaps.map(o => ({ from: localTime(new Date(o.start), tz), to: localTime(new Date(o.end), tz), count: o.count })), gaps, sessions: list,
-      speak: `${d}: ${round(totalAtt)} min tracked, ${round(goalAtt)} min on the goal (${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work), hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%. Main step ${main ? (main.done ? 'done' : `NOT done ("${main.title}")`) : 'not planned'}. Hard lever ${hardTouched ? 'touched' : 'not touched'}.${routines.total || routines.skipped ? ` Routines ${routineText(routines)}.` : ''} ${overrides ? `${overrides} override(s). ` : ''}${gaps.length ? `${gaps.length} gap(s).` : ''}`,
+      moves, aim_moves: aimMoves, hard_moves: hardMoves, quiet_numbers: quiet,
+      speak: quiet
+        ? `${d}: ${aimMoves ? `${aimMoves} move(s) toward the aim${hardMoves ? `, ${hardMoves} on the hard part` : ''}` : 'no moves toward the aim'}${goalAtt >= AIM_DAY_MIN ? `, ${aimMoves ? 'and ' : 'but '}focused time on the aim` : ''}. Main step ${main ? (main.done ? 'done' : `not done ("${main.title}")`) : 'not planned'}. Hard lever ${hardTouched ? 'touched' : 'not touched'}.${routines.total || routines.skipped ? ` Routines ${routineText(routines)}.` : ''}`
+        : `${d}: ${round(totalAtt)} min tracked, ${round(goalAtt)} min on the goal (${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work), hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%. Main step ${main ? (main.done ? 'done' : `NOT done ("${main.title}")`) : 'not planned'}. Hard lever ${hardTouched ? 'touched' : 'not touched'}.${aimMoves ? ` ${aimMoves} move(s) toward the aim.` : ''}${routines.total || routines.skipped ? ` Routines ${routineText(routines)}.` : ''} ${overrides ? `${overrides} override(s). ` : ''}${gaps.length ? `${gaps.length} gap(s).` : ''}`,
     };
   }
 
@@ -1137,22 +1373,30 @@ export class AimService {
     const sum = (f: (x: typeof days[number]) => number) => days.reduce((s, x) => s + f(x), 0);
     const byArea: Record<string, number> = {};
     for (const x of days) for (const [k, v] of Object.entries(x.by_area)) byArea[k] = (byArea[k] ?? 0) + v.attention_min;
-    const goalAtt = sum(x => x.goal_attention_min), workAtt = byArea['work'] ?? 0;
+    const goalAtt = sum(x => x.goal_attention_min), workAtt = sum(x => x.work_attention_min);
     const hardAtt = sum(x => Math.round(x.goal_attention_min * x.hard_share_of_goal));
     const path = await this.getPath();
     const current = path.milestones.find(m => m.id === path.current_milestone_id);
     const st = await this.streak();
     const routineDays = days.filter(x => x.routines.total > 0);
     const weekly = await this.routineWeeks(through);
+    const week = await this.weekProgress(through);
+    const quiet = await this.quietNumbers();
+    const aimMoves = sum(x => x.aim_moves), hardMoves = sum(x => x.hard_moves);
+    const routinesText = routineDays.length ? ` Routines all done on ${routineDays.filter(x => x.routines.done === x.routines.total).length}/${routineDays.length} days (${sum(x => x.routines.done)}/${sum(x => x.routines.total)} checks: ${routineText({ full: sum(x => x.routines.full), minimum: sum(x => x.routines.minimum), skipped: sum(x => x.routines.skipped), total: sum(x => x.routines.total) })}).` : '';
+    const weeklyText = weekly.length ? ` Weekly counts: ${weekly.map(w => `"${w.title}" ${w.done_this_week}/${w.per_week}${w.met ? ' ✓' : ''}`).join(', ')}.` : '';
+    const milestoneText = current ? `Milestone "${current.title}": ${milestoneProgressText(current)}, ${current.pace}, due ${current.due}.` : '';
     return {
-      streak_days: st.streak_days,
-      week_of: from, through, days: days.map(x => ({ date: x.date, main_step_done: x.main_step.done, routines_done: x.routines.done, routines_full: x.routines.full, routines_minimum: x.routines.minimum, routines_skipped: x.routines.skipped, routines_total: x.routines.total, goal_attention_min: x.goal_attention_min, total_attention_min: x.total_attention_min, hard_lever_touched: x.hard_lever_touched, overrides: x.overrides })),
+      streak_days: st.streak_days, week, aim_moves: aimMoves, hard_moves: hardMoves, quiet_numbers: quiet,
+      week_of: from, through, days: days.map(x => ({ date: x.date, toward_aim: week.dates.includes(x.date), aim_moves: x.aim_moves, main_step_done: x.main_step.done, routines_done: x.routines.done, routines_full: x.routines.full, routines_minimum: x.routines.minimum, routines_skipped: x.routines.skipped, routines_total: x.routines.total, goal_attention_min: x.goal_attention_min, total_attention_min: x.total_attention_min, hard_lever_touched: x.hard_lever_touched, overrides: x.overrides })),
       main_step_days: days.filter(x => x.main_step.done).length, days_counted: days.length,
       routines: { days_with_routines: routineDays.length, days_all_done: routineDays.filter(x => x.routines.done === x.routines.total).length, done: sum(x => x.routines.done), full: sum(x => x.routines.full), minimum: sum(x => x.routines.minimum), skipped: sum(x => x.routines.skipped), total: sum(x => x.routines.total), weekly },
       goal_share: workAtt ? Math.round((goalAtt / workAtt) * 100) / 100 : 0, hard_share: goalAtt ? Math.round((hardAtt / goalAtt) * 100) / 100 : 0,
       by_area: Object.fromEntries(Object.entries(byArea).map(([k, v]) => [k, round(v)])), overrides: sum(x => x.overrides),
       milestone: current ? { title: current.title, kind: current.kind, ...(current.kind === 'count' ? { current: current.current, target: current.target, metric: current.metric } : {}), due: current.due, steps_done: current.steps_done, steps_total: current.steps_total, pace: current.pace } : null,
-      speak: `Week of ${from}: main step done ${days.filter(x => x.main_step.done).length}/${days.length} days, goal share ${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work, hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%, ${sum(x => x.overrides)} overrides.${routineDays.length ? ` Routines all done on ${routineDays.filter(x => x.routines.done === x.routines.total).length}/${routineDays.length} days (${sum(x => x.routines.done)}/${sum(x => x.routines.total)} checks: ${routineText({ full: sum(x => x.routines.full), minimum: sum(x => x.routines.minimum), skipped: sum(x => x.routines.skipped), total: sum(x => x.routines.total) })}).` : ''}${weekly.length ? ` Weekly counts: ${weekly.map(w => `"${w.title}" ${w.done_this_week}/${w.per_week}${w.met ? ' ✓' : ''}`).join(', ')}.` : ''} Streak ${st.streak_days} day(s). ${current ? `Milestone "${current.title}": ${milestoneProgressText(current)}, ${current.pace}, due ${current.due}.` : ''}`,
+      speak: quiet
+        ? `Week of ${from}: ${week.speak} Main step done on ${days.filter(x => x.main_step.done).length} of ${days.length} days. ${aimMoves ? `${aimMoves} move(s) toward the aim${hardMoves ? `, ${hardMoves} on the hard part` : ''}.` : 'No moves toward the aim.'}${routinesText}${weeklyText} ${milestoneText}`
+        : `Week of ${from}: ${week.speak} Main step done ${days.filter(x => x.main_step.done).length}/${days.length} days, goal share ${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work, hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%, ${sum(x => x.overrides)} overrides.${aimMoves ? ` ${aimMoves} move(s) toward the aim.` : ''}${routinesText}${weeklyText} ${milestoneText}`,
     };
   }
 
@@ -1185,12 +1429,29 @@ export class AimService {
 
   async streak() {
     const today = await this.today();
-    const days = await this.store.getDaysInRange(addDays(today, -90), today);
-    const done = new Set(days.filter(d => d.plan.some(p => p.isMainStep && p.done)).map(d => d.date));
-    const off = new Set(days.filter(d => d.mode === 'off').map(d => d.date));
-    let n = 0; let cursor = done.has(today) ? today : addDays(today, -1);
-    while (done.has(cursor) || off.has(cursor)) { if (done.has(cursor)) n++; cursor = addDays(cursor, -1); }
-    return { streak_days: n, today_done: done.has(today), speak: `${n} consecutive day(s) with a main step done${done.has(today) ? ', including today' : ', today still pending'}.` };
+    // Most streaks are short: two weeks of days first, all 90 only when the streak reaches past them.
+    for (const span of [14, 90]) {
+      const from = addDays(today, -span);
+      const days = await this.store.getDaysInRange(from, today);
+      const done = new Set(days.filter(d => d.plan.some(p => p.isMainStep && p.done)).map(d => d.date));
+      const off = new Set(days.filter(d => d.mode === 'off').map(d => d.date));
+      let n = 0; let cursor = done.has(today) ? today : addDays(today, -1);
+      while (done.has(cursor) || off.has(cursor)) { if (done.has(cursor)) n++; cursor = addDays(cursor, -1); }
+      if (span === 90 || cursor >= from) return { streak_days: n, today_done: done.has(today), speak: `${n} consecutive day(s) with a main step done${done.has(today) ? ', including today' : ', today still pending'}.` };
+    }
+    throw new Error('unreachable');
+  }
+
+  /**
+   * The app reads the user's data from Firestore and writes through the server
+   * (docs/app-data.md). Before it reads today, the server completes it: the profile
+   * exists and today's plan has its routines, as get_plan would make it.
+   */
+  async openDay() {
+    const today = await this.today();
+    await this.profile();
+    const day = await this.dayWithRoutines(today);
+    return { ok: true, date: today, plan_items: day?.plan.length ?? 0, speak: `Opened ${today}${day ? ` with ${day.plan.length} plan item(s)` : ''}.` };
   }
 
   async history(from?: string, to?: string, area?: Area, projectId?: string) {
@@ -1223,10 +1484,20 @@ export class AimService {
     const p = ins.peak_hard;
     const peakText = p ? ` Hard work happens most on ${WD[p.weekday]} ${p.hour < 12 ? 'mornings' : p.hour < 17 ? 'afternoons' : 'evenings'}, around ${p.hour}:00.` : '';
     const span = range === 'month' ? 'the last 30 days' : 'the last 7 days';
+    const goalNow = goal;
+    const moves = (await this.store.getMovesInRange(f, t)).map(m => this.moveView(m, goalNow));
+    const aimMoves = moves.filter(m => m.toward_aim).length, hardMoves = moves.filter(m => m.hard).length;
+    const aimDays = [...await this.aimDays(f, t)].length;
+    const quiet = await this.quietNumbers();
+    const Span = `${span[0].toUpperCase()}${span.slice(1)}`;
+    const comebackText = cb.count ? `${cb.count} comeback(s) in ${COMEBACK_HISTORY_DAYS} days${inRange ? `, ${inRange} in this range` : ''}.` : 'No comebacks counted yet.';
     return {
       range, from: f, to: t, ...ins,
+      days_toward_aim: aimDays, aim_moves: aimMoves, hard_moves: hardMoves, quiet_numbers: quiet,
       comebacks: { ...cb, in_range: inRange, history_days: COMEBACK_HISTORY_DAYS },
-      speak: `${span[0].toUpperCase()}${span.slice(1)}: ${ins.totals.aim_min} min on the aim, ${ins.totals.other_min} on other work, ${ins.totals.life_min} on life. Hard share ${Math.round(ins.hard_share * 100)}% of aim time. Main step done on ${ins.main_step_days} day(s).${peakText} ${cb.count ? `${cb.count} comeback(s) in ${COMEBACK_HISTORY_DAYS} days${inRange ? `, ${inRange} in this range` : ''}.` : 'No comebacks counted yet.'}`,
+      speak: quiet
+        ? `${Span}: ${aimDays} day(s) toward the aim, ${aimMoves ? `${aimMoves} move(s) toward the aim${hardMoves ? `, ${hardMoves} on the hard part` : ''}` : 'no moves recorded'}. Main step done on ${ins.main_step_days} day(s).${peakText} ${comebackText}`
+        : `${Span}: ${aimDays} day(s) toward the aim${aimMoves ? `, ${aimMoves} move(s)` : ''}. ${ins.totals.aim_min} min on the aim, ${ins.totals.other_min} on other work, ${ins.totals.life_min} on life. Hard share ${Math.round(ins.hard_share * 100)}% of aim time. Main step done on ${ins.main_step_days} day(s).${peakText} ${cb.count ? `${cb.count} comeback(s) in ${COMEBACK_HISTORY_DAYS} days${inRange ? `, ${inRange} in this range` : ''}.` : 'No comebacks counted yet.'}`,
     };
   }
 
@@ -1275,7 +1546,7 @@ export class AimService {
     const windowMin = await this.windowMinutesFor(s.date);
     if (s.mode !== 'off' && windowMin > 0) {
       if (!s.main_step.planned) nudge = 'No main step planned today. Set one with set_plan.';
-      else if (!s.main_step.done && hour >= 14) nudge = `Main step still pending: "${s.main_step.title}". Do 25 minutes on it next.`;
+      else if (!s.main_step.done && hour >= 14) nudge = `Main step still pending: "${s.main_step.title}". ${(await this.tracking()) === 'moves' ? 'Make one move on it next.' : 'Do 25 minutes on it next.'}`;
       else if (s.main_step.done && !s.hard_lever_touched) nudge = 'Main step done. A hard lever has not been touched today.';
     } else if (windowMin === 0 && s.mode !== 'off') {
       nudge = 'No focus window today. Nothing is expected of you toward the goal.';
@@ -1283,7 +1554,8 @@ export class AimService {
     const open = s.routines.open.length ? ` Routines still open today: ${s.routines.open.map(o => `"${o.title}"${o.minimum ? ` (bad day? the minimum: ${o.minimum})` : ''}`).join(', ')}.` : s.routines.total ? ` Routines all done today${s.routines.minimum ? `, ${s.routines.minimum} as the minimum` : ''}.` : '';
     const weekly = await this.routineWeeks(s.date);
     const weeklyText = weekly.length ? ` This week: ${weekly.map(w => `"${w.title}" ${w.done_this_week}/${w.per_week}`).join(', ')}.` : '';
-    return { ...cur, focus_window_minutes_today: windowMin, today: { date: s.date, main_step: s.main_step, routines: s.routines, weekly_routines: weekly, total_attention_min: s.total_attention_min, goal_attention_min: s.goal_attention_min, goal_share_of_work: s.goal_share_of_work, hard_share_of_goal: s.hard_share_of_goal, by_area: s.by_area, overrides: s.overrides }, streak_days: st.streak_days, nudge, speak: `${s.speak} ${cur.speak} Streak ${st.streak_days}. ${nudge}${open}${weeklyText}` };
+    const week = await this.weekProgress(s.date);
+    return { ...cur, focus_window_minutes_today: windowMin, today: { date: s.date, main_step: s.main_step, routines: s.routines, weekly_routines: weekly, total_attention_min: s.total_attention_min, goal_attention_min: s.goal_attention_min, goal_share_of_work: s.goal_share_of_work, hard_share_of_goal: s.hard_share_of_goal, by_area: s.by_area, overrides: s.overrides, moves: s.moves, aim_moves: s.aim_moves }, week, streak_days: st.streak_days, quiet_numbers: s.quiet_numbers, tracking: await this.tracking(), nudge, speak: `${s.speak} ${cur.speak} ${week.speak} ${nudge}${open}${weeklyText}` };
   }
 }
 
@@ -1372,6 +1644,46 @@ const milestoneProgressText = (m: { kind: string; current?: number | null; targe
 
 /** A milestone still to work on: not finished and not retired. */
 const isOpen = (m: Milestone) => m.status !== 'done' && m.status !== 'retired';
+/** docs/path-tracks.md: the stages of m's track in path order; a path without tracks is one track. */
+const sameTrack = (path: Path, m: Milestone) => path.tracks?.length ? path.milestones.filter(x => x.trackId === m.trackId) : path.milestones;
+/** The current stage of each track: one entry on a path without tracks. */
+function currentStages(path: Path): Milestone[] {
+  if (!path.tracks?.length) { const c = path.milestones.find(isOpen); return c ? [c] : []; }
+  return path.tracks.map(t => path.milestones.find(m => m.trackId === t.id && isOpen(m))).filter((m): m is Milestone => !!m);
+}
+/** A main step that skips undone earlier steps of its stage, or a stage that is not yet current (docs/path-tracks.md). */
+function stepOrderWarning(path: Path, stepId?: string): string | undefined {
+  const step = stepId ? path.steps.find(s => s.id === stepId) : undefined;
+  if (!step || step.status === 'done') return undefined;
+  const m = path.milestones.find(x => x.id === step.milestoneId);
+  if (!m) return undefined;
+  const current = currentStages(path).find(c => (c.trackId ?? null) === (m.trackId ?? null));
+  if (current && current.id !== m.id) return `The main step "${step.title}" is in stage "${m.title}", but the current stage${m.trackId ? ' of its track' : ''} is "${current.title}". Plan a step of the current stage unless the user says this one doesn't wait for it.`;
+  const before = path.steps.filter(s => s.milestoneId === m.id && s.id !== step.id && s.status !== 'done' && s.order < step.order).sort((a, b) => a.order - b.order);
+  if (!before.length) return undefined;
+  return `The main step "${step.title}" comes after ${before.length} undone step(s) of its stage: ${before.map(s => `"${s.title}" [${s.id}]`).join(', ')}. Plan "${before[0].title}" first unless the user says this one doesn't depend on it.`;
+}
+/** What comes after m closes, in its own track. */
+function nextStageText(path: Path, m: Milestone) {
+  const next = sameTrack(path, m).find(isOpen);
+  const track = path.tracks?.find(t => t.id === m.trackId);
+  return track ? `Next in ${track.title}: ${next ? `"${next.title}"` : 'none, every stage of this track is closed'}.` : `Current milestone is now ${next ? `"${next.title}"` : 'none'}.`;
+}
+/** The rules of docs/path-tracks.md that a saved path must keep. */
+function pathProblems(path: Path, opts: { order?: boolean } = {}): string[] {
+  const tracks = path.tracks ?? [];
+  // One list: due dates in order are checked where the whole list is set (older paths may not keep it).
+  if (!tracks.length) return opts.order ? path.milestones.flatMap((m, i) => i && m.due < path.milestones[i - 1].due ? [`milestone "${m.title}" is due before the previous one`] : []) : [];
+  const problems: string[] = [];
+  const loose = path.milestones.filter(m => isOpen(m) && !tracks.some(t => t.id === m.trackId));
+  if (loose.length) problems.push(`every open milestone needs a track: ${loose.map(m => `"${m.title}"`).join(', ')} (trackId in set_milestones, edit_milestone or milestoneIds in set_tracks)`);
+  for (const t of tracks) {
+    const own = path.milestones.filter(m => m.trackId === t.id);
+    if (own.length > 6) problems.push(`track "${t.title}" has ${own.length} milestones: use up to 6 per track`);
+    own.forEach((m, i) => { if (i && m.due < own[i - 1].due) problems.push(`milestone "${m.title}" is due before the previous one in track "${t.title}"`); });
+  }
+  return problems;
+}
 
 function slug(s: string) { return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || newId(); }
 

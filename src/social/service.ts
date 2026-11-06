@@ -165,6 +165,8 @@ export class SocialService {
       goalMin: s.goal_attention_min, hardMin: Math.min(hardMin, s.goal_attention_min),
       routines: { full: r.full, minimum: r.minimum, missed: r.skipped + (r.total - r.done) },
       backAfterDays: s.main_step.done ? await this.backAfter(date) : undefined,
+      moves: { aim: s.aim_moves, hard: s.hard_moves }, quiet: s.quiet_numbers,
+      week: await this.aim.weekProgress(date).then(w => ({ days: w.days, target: w.target })),
     };
   }
 

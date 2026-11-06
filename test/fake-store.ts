@@ -1,5 +1,5 @@
 import { DEFAULT_PROFILE, plainOp, type Tx } from '../src/store.js';
-import type { AppliedOp, Block, Commitment, Day, Device, Goal, Mode, Path, Network, Pending, PostRecord, Profile, Routine, Session, SocialAccount } from '../src/types.js';
+import type { AppliedOp, Block, Commitment, Day, Device, Goal, Mode, Move, Path, Network, Pending, PostRecord, Profile, Routine, Session, SocialAccount } from '../src/types.js';
 
 /** The Store's interface kept in memory, so service logic can be tested without Firestore. */
 export class FakeStore {
@@ -11,6 +11,7 @@ export class FakeStore {
   routines: Routine[] = [];
   days = new Map<string, Day>();
   sessions = new Map<string, Session>();
+  moves = new Map<string, Move>();
   blocks = new Map<string, Block>();
   devices = new Map<string, Device>();
   pendings = new Map<string, Pending>();
@@ -61,6 +62,10 @@ export class FakeStore {
   async getSessionsOverlapping(fromIso: string, toIso: string) {
     return [...this.sessions.values()].filter(s => s.start < toIso && (s.end ?? '9999') > fromIso).map(s => structuredClone(s));
   }
+  async saveMove(m: Move) { this.moves.set(m.id, structuredClone(m)); this.writes++; }
+  async getMove(id: string) { const m = this.moves.get(id); return m ? structuredClone(m) : null; }
+  async deleteMove(id: string) { this.moves.delete(id); this.writes++; }
+  async getMovesInRange(from: string, to: string) { return [...this.moves.values()].filter(m => m.date >= from && m.date <= to).map(m => structuredClone(m)); }
   async getRunningSessions() { return [...this.sessions.values()].filter(s => !s.end).map(s => structuredClone(s)); }
   async saveDevice(d: Device) { this.devices.set(d.token, d); }
   async getDevices() { return [...this.devices.values()]; }

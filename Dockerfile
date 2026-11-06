@@ -11,5 +11,7 @@ ENV NODE_ENV=production
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
+# The /aim skill, served as the `aim` prompt and the aimyear://skill/aim resource.
+COPY skills ./skills
 EXPOSE 8080
 CMD ["node", "dist/index.js", "--http"]

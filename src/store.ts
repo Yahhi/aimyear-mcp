@@ -2,7 +2,7 @@ import { initializeApp, cert, getApps, applicationDefault } from 'firebase-admin
 import { getFirestore, Firestore, FieldValue } from 'firebase-admin/firestore';
 import { readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import type { Goal, Path, Profile, Day, Block, Session, Mode, Workplace, Commitment, Device, Pending, Direction, Routine, AppliedOp, Network, SocialAccount, PostRecord, DesktopReminder } from './types.js';
+import type { Goal, Path, Profile, Day, Block, Session, Move, Mode, Workplace, Commitment, Device, Pending, Direction, Routine, AppliedOp, Network, SocialAccount, PostRecord, DesktopReminder } from './types.js';
 
 let dbSingleton: Firestore | null = null;
 export function initFirestore(): Firestore {
@@ -190,6 +190,7 @@ export class Store {
   private aimDoc(name: 'goal' | 'path' | 'profile' | 'commitments' | 'routines') { return this.user().collection('aim').doc(name); }
   private days() { return this.user().collection('days'); }
   private sessions() { return this.user().collection('sessions'); }
+  private moves() { return this.user().collection('moves'); }
   private blocks() { return this.user().collection('blocks'); }
   private ops() { return this.user().collection('ops'); }
 
@@ -288,6 +289,18 @@ export class Store {
     const lowerBound = new Date(new Date(fromIso).getTime() - 2 * 86400000).toISOString();
     const snap = await this.sessions().where('start', '>=', lowerBound).where('start', '<', toIso).get();
     return snap.docs.map(d => d.data() as Session).filter(s => (s.end ?? '9999') > fromIso);
+  }
+  // --- moves (docs/moves.md) ---
+  async saveMove(m: Move) { await this.moves().doc(m.id).set(m); }
+  async getMove(id: string): Promise<Move | null> {
+    const snap = await this.moves().doc(id).get();
+    return snap.exists ? (snap.data() as Move) : null;
+  }
+  async deleteMove(id: string) { await this.moves().doc(id).delete(); }
+  /** Moves whose local day is within [from, to], both YYYY-MM-DD. */
+  async getMovesInRange(from: string, to: string): Promise<Move[]> {
+    const snap = await this.moves().where('date', '>=', from).where('date', '<=', to).get();
+    return snap.docs.map(d => d.data() as Move);
   }
   async getRunningSessions(): Promise<Session[]> {
     const lowerBound = new Date(Date.now() - 2 * 86400000).toISOString();

@@ -188,21 +188,34 @@ export function firestoreAccountBackend(db: Firestore = initFirestore()): Accoun
       const out: Record<string, unknown> = {};
       const root = await userRef(uid).get();
       if (root.exists) out[''] = root.data();
-      const walk = async (ref: FirebaseFirestore.DocumentReference, prefix: string) => {
-        for (const col of await ref.listCollections()) {
-          for (const doc of (await col.get()).docs) {
-            const path = `${prefix}${col.id}/${doc.id}`;
-            out[path] = JSON.parse(JSON.stringify(doc.data()));
-            await walk(doc.ref, `${path}/`);
+      // Every document costs one listCollections round trip, so walking them one after
+      // another took about two minutes for a few hundred documents. Siblings go in
+      // parallel, 25 at a time; the keys are sorted after, so the file reads the same.
+      const walk = async (ref: FirebaseFirestore.DocumentReference, prefix: string): Promise<void> => {
+        await Promise.all((await ref.listCollections()).map(async col => {
+          const docs = (await col.get()).docs;
+          for (let i = 0; i < docs.length; i += 25) {
+            await Promise.all(docs.slice(i, i + 25).map(doc => {
+              const path = `${prefix}${col.id}/${doc.id}`;
+              out[path] = JSON.parse(JSON.stringify(doc.data()));
+              return walk(doc.ref, `${path}/`);
+            }));
           }
-        }
+        }));
       };
       await walk(userRef(uid), '');
-      return out;
+      return Object.fromEntries(Object.entries(out).sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0)));
     },
     async deleteUserTree(uid) {
       let n = 0;
-      const count = async (ref: FirebaseFirestore.DocumentReference) => { for (const col of await ref.listCollections()) for (const d of (await col.get()).docs) { n++; await count(d.ref); } };
+      // In parallel like userTree: one round trip per document, one after another, took minutes.
+      const count = async (ref: FirebaseFirestore.DocumentReference): Promise<void> => {
+        await Promise.all((await ref.listCollections()).map(async col => {
+          const docs = (await col.get()).docs;
+          n += docs.length;
+          for (let i = 0; i < docs.length; i += 25) await Promise.all(docs.slice(i, i + 25).map(d => count(d.ref)));
+        }));
+      };
       await count(userRef(uid));
       await db.recursiveDelete(userRef(uid));
       return n;

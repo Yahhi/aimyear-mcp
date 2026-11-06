@@ -15,6 +15,9 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `tools/list` | public | tool names, descriptions and schemas; public in the README |
 | `prompts/list` | public | prompt names and descriptions; public in the README |
 | `prompts/get` | public | fixed prompt text, the same for everyone |
+| `resources/list` | public | resource names; only the public /aim skill is listed |
+| `resources/templates/list` | public | resource templates; none are private |
+| `resources/read` | public | the /aim skill text, the same for everyone and public in the repo |
 | `tools/call` | auth | every tool reads or writes one person's private aim, plan, timer or history |
 
 ## Tools
@@ -29,6 +32,7 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `set_projects` | auth | changes the signed-in person's data |
 | `get_path` | auth | reads the signed-in person's private data |
 | `set_milestones` | auth | changes the signed-in person's data |
+| `set_tracks` | auth | changes the signed-in person's data |
 | `edit_milestone` | auth | changes the signed-in person's data |
 | `add_steps` | auth | changes the signed-in person's data |
 | `edit_step` | auth | changes the signed-in person's data |
@@ -56,6 +60,9 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `delete_session` | auth | changes the signed-in person's data |
 | `list_sessions` | auth | reads the signed-in person's private data |
 | `find_gaps` | auth | reads the signed-in person's private data |
+| `add_move` | auth | changes the signed-in person's data |
+| `list_moves` | auth | reads the signed-in person's private data |
+| `delete_move` | auth | changes the signed-in person's data |
 | `summarize_day` | auth | reads the signed-in person's private data |
 | `summarize_week` | auth | reads the signed-in person's private data |
 | `find_leaks` | auth | reads the signed-in person's private data |
@@ -90,6 +97,7 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `POST /tick/:token` | admin | scheduler: delivers due reminders for everyone |
 | `POST /desktop/reminders` | auth | a desktop app takes the person's due reminders (Bearer token) |
 | `POST /desktop/reminders/action` | auth | Break or Snooze on the person's stand-up reminder (Bearer token) |
+| `POST /account/open-day` | auth | completes the person's today before the app reads it: routines in the plan, Pro status mirrored (Bearer token) |
 | `GET /account/agents` | auth | the agents connected to the person's account (Bearer token) |
 | `DELETE /account/agents/:clientId` | auth | disconnects one of the person's agents (Bearer token) |
 | `GET /account/export` | auth | everything the server keeps about the person, as JSON (Bearer token) |

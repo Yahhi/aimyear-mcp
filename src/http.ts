@@ -264,6 +264,15 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
     throw new AimError('action must be "break" or "snooze"');
   }));
 
+  // ---- the app's day: docs/app-data.md ----
+  // The app reads Firestore and writes through the server. Opening the day completes what
+  // it will read: today's plan with its routines, and the Pro status at aim/pro.
+  app.post('/account/open-day', signed(async (req, res, who) => {
+    const day = await svcFor(who, req, 'open-day').openDay();
+    const isPro = await (pro ?? realPro()).sync(who.uid).catch(() => null);
+    res.set('Cache-Control', 'no-store').json({ ...day, pro: isPro });
+  }));
+
   // ---- the account: connected agents, export, delete ----
   app.get('/account/agents', signed(async (_req, res, who) => {
     res.json(await new AccountService(accounts(), who.uid, who.clientId).listAgents());

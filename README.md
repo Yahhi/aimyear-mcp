@@ -2,15 +2,15 @@
 
 **An accountability partner inside the AI agent you already use.** Connect AimYear to
 Claude, Claude Code, ChatGPT or any MCP client, and your agent keeps one big aim for your
-year, plans one main step a day toward it, runs the timer while you work and writes down
-what actually got done. When you start comfortable work while the main step is still open,
+year, plans one main step a day toward it, runs the timer while you work (or records moves,
+without hours) and writes down what actually got done. When you start comfortable work while the main step is still open,
 it asks you to do the step first.
 
 Built for indie developers and makers who build all day but keep postponing the work that
 moves the goal: selling, talking to users, publishing.
 
-- **Free:** sign-in on any number of devices, aims, plans, routines, time tracking and
-  reviews through your own agent. No AI runs on AimYear's side, so there are no AI costs.
+- **Free:** sign-in on any number of devices, aims, plans, routines, time tracking,
+  moves without hours, a weekly target and reviews through your own agent. No AI runs on AimYear's side, so there are no AI costs.
 - **Pro** ($49/year or $8/month, with the coming phone app): notifications, reviews
   written by AimYear, AimYear's own AI coach, Google Calendar sync, and posting your
   day's progress to WIP and Bluesky.
@@ -37,6 +37,8 @@ builds the path of stages, and from then on: *"plan my day"*, *"start the timer"
 my week?"*.
 
 The skill that teaches an agent the method is in [skills/aim/SKILL.md](skills/aim/SKILL.md).
+The server also serves it, so a client without the skill installed still gets the method: the
+prompt `aim` and the resource `aimyear://skill/aim` (both answer without sign-in).
 
 ## What happens to your data
 
@@ -55,14 +57,24 @@ for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change 
 | Group | Tools |
 |---|---|
 | Aim | `get_goal`, `check_goal_draft`, `set_goal`, `record_progress`, `set_levers`, `set_projects` |
-| Path | `get_path`, `set_milestones`, `edit_milestone`, `add_steps`, `edit_step`, `delete_step`, `next_steps` |
+| Path | `get_path`, `set_milestones`, `set_tracks`, `edit_milestone`, `add_steps`, `edit_step`, `delete_step`, `next_steps` |
 | Week | `get_commitments`, `set_commitments`, `get_capacity` |
 | Day | `get_planning_context`, `get_plan`, `set_plan`, `edit_plan_item`, `delete_plan_item`, `set_day_mode`, `get_routines`, `set_routines` |
+| Moves (no hours) | `add_move`, `list_moves`, `delete_move` |
 | Timer and sessions | `get_now`, `start_session`, `add_note`, `split_attention`, `stop_session`, `stop_timer`, `add_session`, `edit_session`, `delete_session`, `list_sessions`, `find_gaps` |
 | Reviews | `summarize_day`, `summarize_week`, `find_leaks`, `get_insights` |
 | Settings and devices | `get_settings`, `set_settings`, `add_device`, `list_devices`, `delete_device` |
 | Connected agents | `list_agents`, `delete_agent` |
 | Posting progress (Pro) | `add_social_account`, `list_social_accounts`, `delete_social_account`, `get_post_draft`, `add_post` |
+
+0.12 adds moves and the weekly target:
+- `add_move` records one action toward the aim with no duration ("fixed the signup button
+  text"), classified like a session; past days are fine, and a move can tick a plan item.
+- `set_settings` `tracking`: `time` (default), `moves` (no timer, no minutes stored) or
+  `quiet` (the record is kept, but nothing AimYear says mentions minutes or percentages).
+- `weekly_target` (1 to 7 days a week, default 4) replaces the daily streak as the number
+  AimYear leads with: `get_now`, `summarize_day`, `summarize_week` and the progress post
+  report the days toward the aim this week and how many weeks in a row met the target.
 
 0.9.0 is what the AimYear v2 app needs:
 - The app's own Firebase sign-in works as the Bearer on `/mcp` and every app route (verified

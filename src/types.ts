@@ -42,9 +42,13 @@ export interface Milestone {
   id: string; title: string; kind?: MilestoneKind; metric: string; target: number; due: string; status: MilestoneStatus; createdAt: string; doneAt?: string;
   /** count milestones: recorded values, one per date, oldest first. */
   progress?: { value: number; date: string }[];
+  /** The track this stage belongs to (docs/path-tracks.md); none on a path without tracks. */
+  trackId?: string;
 }
+/** One way to reach the aim. Every track leads to the same aim; reach says how this one alone would get there. */
+export interface Track { id: string; title: string; reach: string }
 export interface Step { id: string; milestoneId: string; title: string; leverId?: string; estimateMin: number; order: number; status: ItemStatus; doneAt?: string }
-export interface Path { milestones: Milestone[]; steps: Step[] }
+export interface Path { milestones: Milestone[]; steps: Step[]; tracks?: Track[] }
 
 /** A recurring weekly commitment: fixed time that is already spoken for. */
 export type CommitmentKind =
@@ -127,6 +131,40 @@ export interface Profile {
    * every connected network. A network that is not connected is ignored.
    */
   postTo?: Network[];
+  /**
+   * How much time this person records and hears about (docs/moves.md). time: sessions with
+   * minutes, plus moves. moves: no timer, no minutes stored. quiet: the record is kept, but
+   * what AimYear says uses words and days, never minutes or percentages. Unset is time.
+   */
+  tracking?: Tracking;
+  /** Days a week this person wants to move toward the aim, 1 to 7. Unset is 4. */
+  weeklyTarget?: number;
+}
+
+export const TRACKINGS = ['time', 'moves', 'quiet'] as const;
+export type Tracking = (typeof TRACKINGS)[number];
+
+/**
+ * One action toward the aim with no duration ("fixed the signup button text"), at
+ * users/{uid}/moves/{id}. Classified like a session; `date` is the local day it counts for.
+ */
+export interface Move {
+  id: string;
+  date: string;
+  /** When it was recorded, or the time the user gave for a past move. */
+  at: string;
+  /** What changed, in the user's words. */
+  task: string;
+  area: Area;
+  projectId?: string;
+  leverId?: string;
+  stepId?: string;
+  itemId?: string;
+  classification: Classification;
+  unclassified?: boolean;
+  source: Source;
+  agent?: string;
+  createdAt: string;
 }
 
 export type Direction = 'up' | 'down';

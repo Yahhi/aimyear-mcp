@@ -1,6 +1,6 @@
 /**
  * The MCP surface fingerprint: what a client sees before calling anything
- * (initialize without serverInfo.version, tools/list, prompts/list), normalised and
+ * (initialize without serverInfo.version, tools/list, prompts/list, resources/list), normalised and
  * hashed. surface.lock.json holds it with the version; test/surface.test.ts fails when
  * the surface changes and the version does not, so a listing never describes a server
  * that no longer exists.
@@ -26,6 +26,7 @@ export async function surface() {
     initialize: { capabilities: client.getServerCapabilities(), serverInfo: { name: info?.name }, instructions: client.getInstructions() },
     tools: (await client.listTools()).tools.sort((x, y) => x.name.localeCompare(y.name)),
     prompts: (await client.listPrompts()).prompts.sort((x, y) => x.name.localeCompare(y.name)),
+    resources: (await client.listResources()).resources.sort((x, y) => x.uri.localeCompare(y.uri)),
   };
   await client.close();
   const sha256 = createHash('sha256').update(JSON.stringify(sortKeys(doc))).digest('hex');

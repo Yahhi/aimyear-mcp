@@ -50,7 +50,7 @@ test('only describing methods are public; anything else, and any mixed batch, ne
   assert.ok(isPublicBody({ jsonrpc: '2.0', id: 1, method: 'initialize' }));
   assert.ok(isPublicBody([{ method: 'initialize' }, { method: 'tools/list' }]));
   assert.equal(isPublicBody([{ method: 'initialize' }, { method: 'tools/call' }]), false);
-  assert.equal(isPublicBody({ method: 'resources/read' }), false, 'unlisted methods default to auth');
+  assert.equal(isPublicBody({ method: 'logging/setLevel' }), false, 'unlisted methods default to auth');
   assert.equal(isPublicBody([]), false);
   assert.equal(isPublicBody(undefined), false);
   assert.equal(isPublicBody('garbage'), false);

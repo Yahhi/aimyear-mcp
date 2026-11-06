@@ -14,6 +14,12 @@ export interface DayFacts {
   routines: { full: number; minimum: number; missed: number };
   /** The main step is done after this many missed working days. */
   backAfterDays?: number;
+  /** Moves toward the aim that day, and how many were on the hard part (docs/moves.md). */
+  moves?: { aim: number; hard: number };
+  /** Tracking moves or quiet: the post never mentions minutes. */
+  quiet?: boolean;
+  /** Days toward the aim this week so far, against the weekly target. */
+  week?: { days: number; target: number };
 }
 
 export const SIGNATURE = 'Tracked with aimyear.com';
@@ -39,12 +45,19 @@ function render(f: DayFacts, aimTitle: string, stepTitle: string | null): string
   if (f.backAfterDays) lines.push(f.backAfterDays === 1 ? 'Back after a missed day.' : `Back after ${f.backAfterDays} missed days.`);
   if (!f.mainStep.planned) lines.push('No main step planned today.');
   else lines.push(`Main step ${f.mainStep.done ? 'done' : 'not done'}: ${stepTitle}`);
-  lines.push(f.goalMin > 0
-    ? `${minutesText(f.goalMin)} on the aim${f.hardMin > 0 ? `, ${minutesText(f.hardMin)} of it on the hard part` : ', none on the hard part'}.`
-    : 'No time on the aim today.');
+  const mv = f.moves ?? { aim: 0, hard: 0 };
+  const movesLine = mv.aim ? `${mv.aim} ${mv.aim === 1 ? 'move' : 'moves'} toward the aim${mv.hard ? `, ${mv.hard} on the hard part` : ''}.` : '';
+  if (f.quiet) lines.push(movesLine || 'No moves toward the aim today.');
+  else {
+    lines.push(f.goalMin > 0
+      ? `${minutesText(f.goalMin)} on the aim${f.hardMin > 0 ? `, ${minutesText(f.hardMin)} of it on the hard part` : ', none on the hard part'}.`
+      : mv.aim ? 'No focused time on the aim today.' : 'No time on the aim today.');
+    if (movesLine) lines.push(movesLine);
+  }
   const r = f.routines;
   const rParts = [r.full && `${r.full} done`, r.minimum && `${r.minimum} at the minimum`, r.missed && `${r.missed} missed`].filter(Boolean);
   if (rParts.length) lines.push(`Routines: ${rParts.join(', ')}.`);
+  if (f.week) lines.push(`This week: ${f.week.days} of ${f.week.target} days toward the aim.`);
   lines.push(SIGNATURE);
   return lines.join('\n');
 }

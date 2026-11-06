@@ -27,7 +27,8 @@ export interface ProStatus {
   /** ISO; null for a purchase that does not expire. */
   expiresAt: string | null;
   entitlement: string;
-  source: 'revenuecat_api' | 'revenuecat_webhook';
+  /** manual: AIMYEAR_PRO_UIDS, mirrored here so the app can read it (docs/app-data.md). */
+  source: 'revenuecat_api' | 'revenuecat_webhook' | 'manual';
   /** The RevenueCat event time (ms) this status came from, so an older event never overwrites a newer one. */
   eventAt?: number;
   /** The webhook event type that set it, e.g. RENEWAL, EXPIRATION. */
@@ -136,7 +137,25 @@ export function createPro(deps: ProDeps) {
     return updated;
   }
 
-  return { isPro, applyWebhook, entitlement, forget: (uid: string) => cache.delete(uid) };
+  /**
+   * The app reads Pro from users/{uid}/aim/pro (docs/app-data.md), so this writes the
+   * current answer there: AIMYEAR_PRO_UIDS as source manual, else RevenueCat's. Saves only
+   * a change. When RevenueCat cannot answer, the stored status stays as it is.
+   */
+  async function sync(uid: string): Promise<boolean> {
+    if (!usableUid(uid)) return false;
+    const now = deps.now();
+    let next: ProStatus | null = null;
+    if (overrides().includes(uid)) next = { active: true, expiresAt: null, entitlement: entitlement(), source: 'manual', updatedAt: now.toISOString() };
+    else { try { next = await fromApi(uid); } catch { /* keep what is stored */ } }
+    const prior = await deps.getStatus(uid).catch(() => null);
+    if (next && (!prior || prior.active !== next.active || prior.expiresAt !== next.expiresAt || prior.source !== next.source)) await deps.saveStatus(uid, next);
+    const pro = next ? stillActive(next, now) : !!prior && stillActive(prior, now);
+    cache.set(uid, { pro, at: now.getTime() });
+    return pro;
+  }
+
+  return { isPro, sync, applyWebhook, entitlement, forget: (uid: string) => cache.delete(uid) };
 }
 
 const proDoc = (uid: string) => initFirestore().collection('users').doc(uid).collection('aim').doc('pro');

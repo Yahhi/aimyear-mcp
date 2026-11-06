@@ -27,6 +27,9 @@ export const METHODS: Record<string, Entry> = {
   'tools/list': pub('tool names, descriptions and schemas; public in the README'),
   'prompts/list': pub('prompt names and descriptions; public in the README'),
   'prompts/get': pub('fixed prompt text, the same for everyone'),
+  'resources/list': pub('resource names; only the public /aim skill is listed'),
+  'resources/templates/list': pub('resource templates; none are private'),
+  'resources/read': pub('the /aim skill text, the same for everyone and public in the repo'),
   'tools/call': auth('every tool reads or writes one person\'s private aim, plan, timer or history'),
 };
 
@@ -37,11 +40,12 @@ const write = auth('changes the signed-in person\'s data');
 export const TOOLS: Record<string, Entry> = {
   get_goal: read, check_goal_draft: auth('checks a draft against the rubric using the person\'s timezone'),
   set_goal: write, record_progress: write, set_levers: write, set_projects: write,
-  get_path: read, set_milestones: write, edit_milestone: write, add_steps: write, edit_step: write, delete_step: write, next_steps: read,
+  get_path: read, set_milestones: write, set_tracks: write, edit_milestone: write, add_steps: write, edit_step: write, delete_step: write, next_steps: read,
   get_commitments: read, set_commitments: write, get_capacity: read,
   get_planning_context: read, get_plan: read, set_plan: write, get_routines: read, set_routines: write, edit_plan_item: write, delete_plan_item: write, set_day_mode: write,
   get_now: read, start_session: write, add_note: write, split_attention: write, stop_session: write, stop_timer: write,
   add_session: write, edit_session: write, delete_session: write, list_sessions: read, find_gaps: read,
+  add_move: write, list_moves: read, delete_move: write,
   summarize_day: read, summarize_week: read, find_leaks: read,
   get_insights: read,
   get_settings: read, set_settings: write, add_device: write, list_devices: read, delete_device: write,
@@ -69,6 +73,7 @@ export const ROUTES: Record<string, Entry> = {
   'POST /tick/:token': admin('scheduler: delivers due reminders for everyone'),
   'POST /desktop/reminders': auth('a desktop app takes the person\'s due reminders (Bearer token)'),
   'POST /desktop/reminders/action': auth('Break or Snooze on the person\'s stand-up reminder (Bearer token)'),
+  'POST /account/open-day': auth('completes the person\'s today before the app reads it: routines in the plan, Pro status mirrored (Bearer token)'),
   'GET /account/agents': auth('the agents connected to the person\'s account (Bearer token)'),
   'DELETE /account/agents/:clientId': auth('disconnects one of the person\'s agents (Bearer token)'),
   'GET /account/export': auth('everything the server keeps about the person, as JSON (Bearer token)'),

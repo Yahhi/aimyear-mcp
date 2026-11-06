@@ -563,3 +563,63 @@ test('delete_session on the last running session stops the timer; with another o
   assert.equal([...store.pendings.values()].filter(p => p.blockId === blockId).length, 0, 'its reminders are gone');
   assert.match(last.speak, /timer stopped/);
 });
+
+// ---- docs/app-data.md: the app reads Firestore, so the server completes the day first ----
+
+test('openDay: today gets its routines on the first open, and a second open changes nothing', async () => {
+  const store = new FakeStore();
+  const svc = new AimService(store as any, 'conn', 'mobile');
+  await svc.setRoutines([{ title: 'Talk with one person on Reddit', area: 'money' }]);
+  const today = await svc.today();
+  store.days.delete(today);
+  const first = await svc.openDay();
+  assert.equal(first.date, today);
+  assert.deepEqual(store.days.get(today)!.plan.map(p => p.title), ['Talk with one person on Reddit']);
+  const second = await svc.openDay();
+  assert.equal(second.plan_items, 1, 'the routine is not added twice');
+});
+
+test('POST /account/open-day: signed in only; writes the plan and mirrors Pro to aim/pro', async () => {
+  const p = proWith({ overrides: 'u1' });
+  const a = await startTestApp({ pro: p.pro });
+  try {
+    assert.equal((await post(`${a.url}/account/open-day`, {}, {})).status, 401);
+    await new AimService(a.store('u1') as any, 'conn').setRoutines([{ title: 'Post a progress update', area: 'money' }]);
+    const r = await post(`${a.url}/account/open-day`, {}, bearer(JWT_U1));
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.pro, true);
+    assert.equal(p.stored.get('u1')!.source, 'manual', 'AIMYEAR_PRO_UIDS is readable by the app now');
+    assert.equal([...a.store('u1').days.values()][0].plan[0].title, 'Post a progress update');
+  } finally { await a.close(); }
+});
+
+test('pro.sync: saves RevenueCat\'s answer once, and keeps the stored status when RevenueCat is down', async () => {
+  const ok = proWith({ key: true, answer: subscriber('2027-01-01T00:00:00Z') });
+  assert.equal(await ok.pro.sync('u1'), true);
+  const saved = ok.stored.get('u1')!;
+  assert.equal(saved.active, true);
+  assert.equal(await ok.pro.sync('u1'), true);
+  assert.equal(ok.stored.get('u1'), saved, 'no change, no write');
+
+  const down = proWith({ key: true, fail: true });
+  down.stored.set('u2', { active: true, expiresAt: '2027-01-01T00:00:00Z', entitlement: 'AimYear Pro', source: 'revenuecat_webhook', updatedAt: '' });
+  assert.equal(await down.pro.sync('u2'), true);
+  assert.equal(down.stored.get('u2')!.source, 'revenuecat_webhook', 'left alone');
+  assert.equal(await down.pro.sync('nobody'), false);
+  assert.equal(down.stored.has('nobody'), false);
+});
+
+test('streak: reads past the first two weeks only when the streak reaches that far', async () => {
+  const store = new FakeStore();
+  const svc = new AimService(store as any, 'conn');
+  const today = await svc.today();
+  for (let i = 1; i <= 20; i++) {
+    const d = addDays(today, -i);
+    store.days.set(d, { date: d, mode: 'full', plan: [{ id: `m${i}`, title: 'Main', area: 'money', isMainStep: true, estimateMin: 25, done: true }], createdAt: '', updatedAt: '' });
+  }
+  assert.equal((await svc.streak()).streak_days, 20);
+  store.days.delete(addDays(today, -5));
+  assert.equal((await svc.streak()).streak_days, 4);
+});
