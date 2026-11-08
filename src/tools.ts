@@ -23,7 +23,7 @@ type Handler = (args: any) => Promise<unknown>;
 /** What each tool does to the person's data. Clients show these before they approve a call. */
 type Kind = 'read' | 'write' | 'idempotent' | 'destructive';
 const READ = ['get_goal', 'check_goal_draft', 'get_path', 'next_steps', 'get_commitments', 'get_capacity', 'get_planning_context', 'get_plan', 'get_routines',
-  'get_now', 'list_sessions', 'find_gaps', 'summarize_day', 'summarize_week', 'find_leaks', 'get_settings', 'list_devices', 'list_social_accounts', 'get_post_draft',
+  'get_now', 'list_sessions', 'find_gaps', 'summarize_day', 'summarize_week', 'find_leaks', 'get_settings', 'list_devices', 'list_social_accounts', 'get_post_draft', 'list_wip_projects',
   'get_insights', 'list_agents', 'list_moves'];
 // Replaces a whole list or removes something: an earlier value is gone after the call.
 const DESTRUCTIVE = ['set_goal', 'set_levers', 'set_projects', 'set_milestones', 'set_tracks', 'set_commitments', 'set_routines', 'set_plan',
@@ -33,7 +33,7 @@ const IDEMPOTENT = ['record_progress', 'edit_milestone', 'edit_step', 'edit_plan
   // Connecting again replaces the saved login; a day's post goes to each network once, however often it is called.
   'add_social_account', 'add_post'];
 // Reaches a network outside AimYear (WIP, Bluesky).
-const OPEN_WORLD = ['add_social_account', 'get_post_draft', 'add_post'];
+const OPEN_WORLD = ['add_social_account', 'get_post_draft', 'add_post', 'list_wip_projects'];
 export function kindOf(name: string): Kind {
   if (READ.includes(name)) return 'read';
   if (DESTRUCTIVE.includes(name)) return 'destructive';
@@ -106,11 +106,12 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
     kind: goalKind, title: z.string(), why: z.string().optional(), metric: z.string().optional().describe('required for kind count'), baseline: z.number().optional().describe('value today; required for kind count'), target: z.number().optional().describe('required for kind count'), deadline: date, area: area.optional().describe('default money'),
   }, a => svc.setGoal(a));
   t('record_progress', 'Record the current value of the goal metric ("I now have 4 customers"), or of a countable milestone when milestoneId is given ("I have talked to 7 people"). For a done-or-not goal, 1 marks it done. One value per date: calling again for the same date corrects it. Says when the target is reached; a countable milestone that reaches its target is done.', { value: z.number(), date: date.optional(), milestoneId: z.string().optional().describe('a countable milestone instead of the goal') }, a => svc.recordProgress(a.value, a.date, a.milestoneId));
-  t('set_levers', 'Replace the list of levers: the recurring kinds of goal work. At least one must be kind=hard (the work the user avoids). keywords/repos are hints for classifying sessions from their task text. Pass existing ids to keep them.', {
-    levers: z.array(z.object({ id: z.string().optional(), name: z.string(), kind: z.enum(['hard', 'comfortable']), examples: z.array(z.string()).optional(), keywords: z.array(z.string()).optional(), repos: z.array(z.string()).optional() })),
+  const wipHashtag = z.string().max(51).nullable().optional().describe('the user\'s WIP (wip.co) project hashtag for this work, with or without "#"; WIP todos about it carry it. Leave it out to keep the one on record; null or "" removes it');
+  t('set_levers', 'Replace the list of levers: the recurring kinds of goal work. At least one must be kind=hard (the work the user avoids). keywords/repos are hints for classifying sessions from their task text. wip_hashtag only for a lever whose work belongs to one product. Pass existing ids to keep them.', {
+    levers: z.array(z.object({ id: z.string().optional(), name: z.string(), kind: z.enum(['hard', 'comfortable']), examples: z.array(z.string()).optional(), keywords: z.array(z.string()).optional(), repos: z.array(z.string()).optional(), wip_hashtag: wipHashtag })),
   }, a => svc.setLevers(a.levers));
-  t('set_projects', 'Replace the list of other projects (paid work, other products, life routines), so their sessions count as other work or life, not goal work. Pass the whole list: leave one out to remove it, change its name or hints to edit it. Pass existing ids to keep them.', {
-    projects: z.array(z.object({ id: z.string().optional(), name: z.string(), area, keywords: z.array(z.string()).optional(), repos: z.array(z.string()).optional() })),
+  t('set_projects', 'Replace the list of other projects (paid work, other products, life routines), so their sessions count as other work or life, not goal work. Pass the whole list: leave one out to remove it, change its name or hints to edit it. Pass existing ids to keep them. wip_hashtag ties a project to its WIP project (list_wip_projects shows the user\'s).', {
+    projects: z.array(z.object({ id: z.string().optional(), name: z.string(), area, keywords: z.array(z.string()).optional(), repos: z.array(z.string()).optional(), wip_hashtag: wipHashtag })),
   }, a => svc.setProjects(a.projects));
 
   // ---- path ----
@@ -234,10 +235,12 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
   }, a => social.connect(a));
   t('list_social_accounts', 'Connected networks (handle, since when), which of them get progress posts, and whether the user has Pro. Never returns any key or password.', {}, () => social.listAccounts());
   t('delete_social_account', 'Disconnect a network and delete its saved login. Posts already made stay there.', { network }, a => social.disconnect(a.network));
-  t('get_post_draft', 'The day\'s progress post drafted from the record (aim and progress, main step done or not, minutes on the aim and on hard work, routines, comebacks), at most 300 characters, ending with aimyear.com; and per network whether it is ready, already posted, or skipped because the user already posted there that day. Posts nothing. Pro.', { date: date.optional() }, a => social.draft(a.date));
-  t('add_post', 'Post the day\'s progress, only after the user explicitly said to post. text is the draft as the user edited it (default: the draft from get_post_draft). Goes to the networks chosen in settings, or the ones given. A network where the user already posted that day themselves is skipped. Each day goes to each network once: a retry never posts twice. Today or yesterday only. Pro.', {
+  t('get_post_draft', 'The day\'s progress drafted from the record. text is the day\'s post (Bluesky): it leads with what moved toward the aim (the day\'s session summaries and moves, in the user\'s words), then the main step done or not, the aim and its progress, and, if there is room, the week against the target, minutes on the aim and on hard work (never with quiet numbers), routines, comebacks; at most 300 characters, ending with aimyear.com. wip_todos is for WIP: one todo per project worked on that day, about what was done on it, with that project\'s #hashtag (none when it has no hashtag). Per network: ready, already posted, or skipped because the user already posted there that day. nothing_to_post: true means nothing is recorded toward the aim that day: there is no text; ask the user what they did and record it (add_move) before drafting again. Posts nothing. Pro.', { date: date.optional() }, a => social.draft(a.date));
+  t('add_post', 'Post the day\'s progress, only after the user explicitly said to post. text is the day\'s post as the user edited it, for Bluesky (default: the draft from get_post_draft). wip_todos are the WIP todos as the user edited them, each with the key from the draft (default: the draft\'s todos; with text and no wip_todos, WIP gets text as one todo). Goes to the networks chosen in settings, or the ones given. A network where the user already posted that day themselves is skipped. Each day goes to each network (on WIP, each project) once: a retry never posts twice. Today or yesterday only. Pro.', {
     date: date.optional(), text: z.string().max(4000).optional(), networks: z.array(network).optional().describe('default: the networks chosen in settings'),
+    wip_todos: z.array(z.object({ key: z.string().max(80).optional(), text: z.string().max(4000) })).max(20).optional(),
   }, a => social.post(a));
+  t('list_wip_projects', 'The user\'s own WIP (wip.co) projects with their hashtags, read through their saved WIP login, and which AimYear project or lever carries each hashtag; plus the AimYear projects and levers without one. Use it once WIP is connected to attach the hashtags (set_projects / set_levers, wip_hashtag), asking the user only when unsure. Posts nothing. Pro.', {}, () => social.listWipProjects());
 
   // ---- prompts ----
   server.registerPrompt('plan-tomorrow', { description: 'Plan tomorrow: one main step toward the goal, then the rest of life.' }, () => ({

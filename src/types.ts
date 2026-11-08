@@ -3,8 +3,15 @@ export type Area = (typeof AREAS)[number];
 
 export type LeverKind = 'hard' | 'comfortable';
 export interface MatchHints { repos: string[]; keywords: string[] }
-export interface Lever { id: string; name: string; kind: LeverKind; examples: string[]; match: MatchHints }
-export interface Project { id: string; name: string; area: Area; match: MatchHints }
+/**
+ * The user's WIP (wip.co) project hashtag, without '#', on a project or on a lever whose
+ * work belongs to one product (docs/public-posting.md): WIP todos about that work carry
+ * it. wipHashtagBy says who set it: the user or their agent ('user'), or AimYear's
+ * matching at connect time ('auto'), which never replaces one set by the user.
+ */
+export interface WipTag { wipHashtag?: string; wipHashtagBy?: 'user' | 'auto' }
+export interface Lever extends WipTag { id: string; name: string; kind: LeverKind; examples: string[]; match: MatchHints }
+export interface Project extends WipTag { id: string; name: string; area: Area; match: MatchHints }
 
 /**
  * count: a number moves from baseline to target ("15 paying customers").

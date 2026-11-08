@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AimService } from '../src/service.js';
 import { addDays, weekStart } from '../src/dates.js';
-import { buildDraft } from '../src/social/draft.js';
+import { buildDraft, nothingToPost } from '../src/social/draft.js';
 import { FakeStore } from './fake-store.js';
 
 /** Valentina's case on 2026-11-05: small changes described to the agent away from the desk, and people who don't want hours. */
@@ -147,15 +147,20 @@ test('ten minutes of sessions on the aim make a day count; the default target is
   assert.match(now.speak, /This week: 1 of 4 days toward the aim/);
 });
 
-test('the progress post: moves and the week in time mode, no minutes in quiet mode', () => {
-  const base = { aim: { title: '15 paying customers', kind: 'count' as const, current: 2, target: 15 }, mainStep: { planned: true, done: true, title: 'Post one update' }, routines: { full: 0, minimum: 0, missed: 0 }, week: { days: 3, target: 4 } };
+test('the progress post: what moved first, then moves and the week in time mode, no minutes in quiet mode', () => {
+  const base = { aim: { title: '15 paying customers', kind: 'count' as const, current: 2, target: 15 }, mainStep: { planned: true, done: true, title: 'Post one update' }, done: ['Post one update', 'fixed the signup button text'], routines: { full: 0, minimum: 0, missed: 0 }, week: { days: 3, target: 4 } };
   const time = buildDraft({ ...base, goalMin: 50, hardMin: 20, moves: { aim: 2, hard: 1 } });
+  assert.match(time, /^Post one update\.\nFixed the signup button text\.\nMain step done\.\n/, 'the main step already said is not said twice');
   assert.match(time, /50 min on the aim/);
   assert.match(time, /2 moves toward the aim, 1 on the hard part\./);
   assert.match(time, /This week: 3 of 4 days toward the aim\./);
   const quiet = buildDraft({ ...base, goalMin: 50, hardMin: 20, moves: { aim: 1, hard: 0 }, quiet: true });
   assert.doesNotMatch(quiet, /\bmin\b/);
   assert.match(quiet, /1 move toward the aim\./);
-  const none = buildDraft({ ...base, goalMin: 0, hardMin: 0, quiet: true });
-  assert.match(none, /No moves toward the aim today\./);
+  // Past the target the week says so, the way weekProgress does (0.12.1): never "5 of 4 days".
+  const met = buildDraft({ ...base, goalMin: 0, hardMin: 0, week: { days: 5, target: 4 } });
+  assert.match(met, /This week: 5 days toward the aim, target of 4 met\./);
+  assert.doesNotMatch(met, /5 of 4/);
+  assert.match(buildDraft({ ...base, goalMin: 0, hardMin: 0, week: { days: 1, target: 1 } }), /This week: 1 day toward the aim, target of 1 met\./);
+  assert.equal(nothingToPost({ ...base, done: [], mainStep: { planned: true, done: false, title: 'Post one update' }, goalMin: 0, hardMin: 0 }), true);
 });

@@ -242,15 +242,24 @@ to move toward the aim and save it as `weekly_target`.
 AimYear can post the day's progress to WIP (wip.co) and Bluesky, to help the user build in
 public. It is Pro; without Pro the tools say so, then say it once and move on.
 
-1. `get_post_draft` (default today) drafts the post from the record: the aim and its
-   progress, the main step done or not, minutes on the aim and on hard work (moves
-   instead of minutes when the user tracks moves or quiet numbers), routines, the week
-   against the weekly target,
-   a comeback after missed days, ending with aimyear.com. It fits Bluesky's 300.
-   It also says per network: ready, already posted, or "you already posted there today".
+1. `get_post_draft` (default today) drafts the post from the record. It leads with what
+   moved toward the aim, in the user's words: the summaries of the day's sessions toward
+   the aim and the day's moves. Then the main step done or not and the aim with its
+   progress; then, if there is room, the week against the weekly target, minutes on the
+   aim and on hard work (moves instead of minutes when the user tracks moves or quiet
+   numbers), routines and a comeback after missed days, ending with aimyear.com. It fits
+   Bluesky's 300. For WIP it gives `wip_todos`: one todo per project worked on that day,
+   about what was done on it, with that project's #hashtag (none when the project has no
+   hashtag). It also says per network: ready, already posted, or "you already posted
+   there today".
+   With `nothing_to_post: true` nothing is recorded toward the aim that day, so there is
+   no post: ask the user what they did toward the aim, record it (`add_move`, or
+   `add_session` with a real summary), then draft again. Never write a post for them
+   from nothing.
 2. Show the draft as it is. A bad day stays a bad day: never add progress that is not in
    the record, never soften "not done". The user may edit it; keep the facts true.
-3. Post only when the user explicitly says so: `add_post` with their edited `text`.
+3. Post only when the user explicitly says so: `add_post` with their edited `text` (the
+   day's post) and `wip_todos` (each todo with its `key` from the draft).
    Never post on your own initiative, at the end of a review, or "to save them a step".
 4. Read the result: a network where the user already posted that day themselves is
    skipped, and a day is never posted twice to the same network (a retry is safe).
@@ -260,6 +269,14 @@ Connecting: WIP needs the user's API key (wip.co settings); Bluesky needs the ha
 password. The phone app's connect screen is the better place for these; if the user pastes
 one into the chat, pass it to `add_social_account` once and never repeat it back. No tool
 ever returns a saved key or password.
+
+WIP hashtags: once WIP is connected (and whenever a project is added), call
+`list_wip_projects`. Attach each WIP hashtag to the matching AimYear project with
+`set_projects` (`wip_hashtag`), or to a lever with `set_levers` only when that lever's work
+is one product; pass the whole list as usual. Attach the clear matches yourself and ask
+the user only when unsure; never guess. A lever that is a kind of work (outreach, coding)
+gets none. When WIP was connected in the app, AimYear may already have matched them: read
+what `list_wip_projects` says before changing anything, and keep what the user set.
 
 With focus windows that have a start time (`set_commitments`), the phone also gets the
 draft as a notification with a Post button after the day's last window.

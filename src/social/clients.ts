@@ -8,12 +8,16 @@ import type { Network } from '../types.js';
 export type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 export interface FeedPost { id: string; createdAt: string; text: string }
 export interface Posted { id: string; url?: string }
+/** One of the user's own WIP projects: a todo joins it with #hashtag in its body. */
+export interface WipProject { id: string; name: string; hashtag: string | null; pitch?: string; url?: string; websiteUrl?: string; githubUrl?: string; archived?: boolean }
 /** One signed-in connection, used for one call and dropped. */
 export interface Connection {
   handle: string;
   /** The account's latest own posts (no replies, no reposts), newest first. */
   recent(): Promise<FeedPost[]>;
   post(text: string): Promise<Posted>;
+  /** WIP only: the user's own projects. */
+  projects?(): Promise<WipProject[]>;
 }
 export interface NetworkClient { open(secret: Record<string, string>): Promise<Connection> }
 
@@ -59,6 +63,24 @@ export function wipClient(f: Fetch = fetch): NetworkClient {
         async post(text) {
           const r = await call('wip', f, `${WIP_API}/todos`, { method: 'POST', headers: { ...h, 'Content-Type': 'application/json' }, body: JSON.stringify({ body: text, completed: true }) });
           return { id: String(r.id), url: r.url ? String(r.url) : undefined };
+        },
+        // GET /v1/users/me/projects (api.wip.co/v1/openapi.yml), 100 a page, cursor in `after`.
+        async projects() {
+          const out: WipProject[] = [];
+          let after: string | null = null;
+          for (let page = 0; page < 5; page++) {
+            const r = await call('wip', f, `${WIP_API}/users/me/projects?limit=100${after ? `&starting_after=${encodeURIComponent(after)}` : ''}`, { headers: h });
+            for (const p of (r?.data ?? []) as any[]) {
+              out.push({
+                id: String(p.id), name: String(p.name ?? ''), hashtag: p.hashtag ? String(p.hashtag).replace(/^#/, '') : null,
+                pitch: p.pitch ? String(p.pitch) : undefined, url: p.url ? String(p.url) : undefined,
+                websiteUrl: p.website_url ? String(p.website_url) : undefined, githubUrl: p.github_url ? String(p.github_url) : undefined, archived: p.archived === true,
+              });
+            }
+            after = r?.has_more && r?.after ? String(r.after) : null;
+            if (!after) break;
+          }
+          return out;
         },
       };
     },

@@ -80,6 +80,7 @@ export class FakeStore {
   async deleteSocialAccount(n: Network) { this.social.delete(n); }
   async getPostRecord(id: string) { const r = this.posts.get(id); return r ? structuredClone(r) : null; }
   async savePostRecord(r: PostRecord) { this.posts.set(r.id, structuredClone(r)); }
+  async getPostRecordsOn(date: string) { return [...this.posts.values()].filter(r => r.date === date).map(r => structuredClone(r)); }
   async claimPost(r: PostRecord, staleMs: number) {
     const cur = this.posts.get(r.id);
     if (cur && (cur.status === 'posted' || (cur.status === 'posting' && Date.parse(r.attemptAt) - Date.parse(cur.attemptAt) < staleMs))) return { claimed: false as const, existing: structuredClone(cur) };

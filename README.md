@@ -65,7 +65,7 @@ for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change 
 | Reviews | `summarize_day`, `summarize_week`, `find_leaks`, `get_insights` |
 | Settings and devices | `get_settings`, `set_settings`, `add_device`, `list_devices`, `delete_device` |
 | Connected agents | `list_agents`, `delete_agent` |
-| Posting progress (Pro) | `add_social_account`, `list_social_accounts`, `delete_social_account`, `get_post_draft`, `add_post` |
+| Posting progress (Pro) | `add_social_account`, `list_social_accounts`, `delete_social_account`, `get_post_draft`, `add_post`, `list_wip_projects` |
 
 0.13 adds the weekly review email (Pro):
 - Every Sunday at 19:00 in the person's timezone, AimYear emails a review it writes from the
