@@ -78,6 +78,8 @@ export const ROUTES: Record<string, Entry> = {
   'DELETE /account/agents/:clientId': auth('disconnects one of the person\'s agents (Bearer token)'),
   'GET /account/export': auth('everything the server keeps about the person, as JSON (Bearer token)'),
   'POST /account/delete': auth('deletes the person\'s account and data; the app\'s Firebase sign-in only, with {"confirm": true}'),
+  'GET /email/unsubscribe': pub('the weekly review email\'s unsubscribe link: a confirm page; the signed token (HMAC of the uid) is the proof, no sign-in'),
+  'POST /email/unsubscribe': pub('one-click unsubscribe (RFC 8058): turns off the weekly review email of the uid in the signed token, nothing else'),
   'POST /revenuecat/webhook': admin('RevenueCat subscription events; the Authorization header must equal REVENUECAT_WEBHOOK_AUTH'),
   'GET /.well-known/oauth-authorization-server': pub('OAuth discovery (RFC 8414)'),
   'GET /.well-known/oauth-protected-resource': pub('OAuth discovery (RFC 9728)'),

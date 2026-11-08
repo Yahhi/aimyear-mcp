@@ -150,7 +150,12 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
   t('get_plan', 'The plan for a day (default today).', { date: date.optional() }, a => svc.getPlan(a.date));
   t('set_plan', 'Replace the plan for a day. Exactly one item must have isMainStep=true (the step toward the goal), ideally linked by stepId from next_steps and on a hard lever. Warns when no item is on a hard lever. Other items: paid work, family, workout, etc. with their area. Items that stay keep their done state.', {
     date: date.optional(), items: z.array(z.object({ title: z.string(), area, projectId: z.string().optional(), leverId: z.string().optional(), stepId: z.string().optional(), isMainStep: z.boolean().optional(), estimateMin: z.number().int().optional() })),
-  }, a => svc.setPlan(a.date, a.items));
+  }, async a => {
+    const r = await svc.setPlan(a.date, a.items);
+    // Planning is the daily touch of someone who only uses an agent: keep their Sunday review queued.
+    await svc.armWeeklyReview().catch(e => console.error('[set_plan] weekly review arm failed', (e as Error).message));
+    return r;
+  });
   t('edit_plan_item', 'Change one plan item: mark it done or not done, rename it, change its estimate, area or links, or make it the main step. done=true also completes its linked path step. For a weekly routine, count says how many units this tick did (talked to 2 people today). For a routine, level minimum says only its bad-day minimum was done: it counts for the day, reported apart from full.', {
     itemId: z.string(), date: date.optional(), done: z.boolean().optional(), level: z.enum(['full', 'minimum']).optional().describe('routines only; sets done unless done is given'), count: z.number().int().min(0).optional().describe('units done in this tick, for a routine with perWeek; above 0 ticks it, 0 unticks it'), title: z.string().optional(), area: area.optional(), projectId: z.string().optional(), leverId: z.string().optional(), stepId: z.string().optional(), isMainStep: z.boolean().optional(), estimateMin: z.number().int().optional(),
   }, a => svc.editPlanItem(a.itemId, a.date, a));
@@ -205,12 +210,13 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
   t('find_leaks', 'Where time leaks: comfortable goal work while the main step waited, overrides, unplanned work, gaps, switching, missed main steps, days without a plan. Default the last 7 days.', { from: date.optional(), to: date.optional() }, a => svc.leaks(a.from, a.to));
 
   // ---- settings & devices ----
-  t('get_settings', 'Timezone, where reminders go (desktop or mobile), timer settings, which networks get progress posts (post_to), tracking (time, moves or quiet) and the weekly target.', {}, () => svc.getSettings());
-  t('set_settings', 'Change any of: timezone (IANA name, e.g. Europe/Madrid; it sets where each day starts and ends), workplace for reminders, stand-up interval workMin, breakMin, longBreakEvery, longBreakMin, standup on/off, post_to (networks for progress posts), tracking (time, moves or quiet) and weekly_target (days a week toward the aim).', {
+  t('get_settings', 'Timezone, where reminders go (desktop or mobile), timer settings, which networks get progress posts (post_to), tracking (time, moves or quiet), the weekly target and the weekly review email (weekly_review_email).', {}, () => svc.getSettings());
+  t('set_settings', 'Change any of: timezone (IANA name, e.g. Europe/Madrid; it sets where each day starts and ends), workplace for reminders, stand-up interval workMin, breakMin, longBreakEvery, longBreakMin, standup on/off, post_to (networks for progress posts), tracking (time, moves or quiet), weekly_target (days a week toward the aim) and weekly_review_email (on/off).', {
     timezone: z.string().optional(), workplace: z.enum(['desktop', 'mobile']).optional(), workMin: z.number().int().min(5).max(120).optional(), breakMin: z.number().int().min(1).max(60).optional(), longBreakEvery: z.number().int().min(1).max(10).optional(), longBreakMin: z.number().int().min(5).max(60).optional(), standup: z.boolean().optional(),
     post_to: z.array(network).optional().describe('which connected networks get the day\'s progress post (the app sets it); [] for none'),
     tracking: z.enum(TRACKINGS).optional().describe('time (default): sessions with minutes, plus moves. moves: no timer and no minutes stored, only moves. quiet: the record is kept, but reviews and posts speak in words and days, never minutes or percentages'),
     weekly_target: z.number().int().min(1).max(7).optional().describe('days a week the user wants to move toward the aim (default 4)'),
+    weekly_review_email: z.boolean().optional().describe('the weekly review AimYear writes from the record, emailed on Sunday at 19:00 in the user\'s timezone (Pro; default on)'),
   }, a => svc.setSettings(a));
   t('add_device', 'Register a device token so server reminders (stand up, break over) can reach it. The phone app registers itself; use this for testing or a manual token.', {
     token: z.string().min(20), platform: z.enum(['ios', 'android', 'macos', 'windows', 'web']), label: z.string().optional(),

@@ -30,6 +30,8 @@ import type { Workplace } from './types.js';
 import { AccountService, agentFromUserAgent, agentName, firestoreAccountBackend, type AccountBackend } from './account.js';
 import { pro as realPro, type createPro } from './pro.js';
 import { initFirestore } from './store.js';
+import { realReviewDeps, type ReviewDeps } from './review/deliver.js';
+import { unsubscribeKey, unsubscribePage, verifyUnsubscribeToken } from './review/unsubscribe.js';
 
 /** Who is calling, for the record: the agent's name on sessions, and the OAuth client id. */
 export interface Caller { agent?: () => Promise<string | undefined>; clientId?: string; accountBackend?: AccountBackend; storeFor?: (uid: string) => Store }
@@ -83,10 +85,16 @@ export interface AppOptions {
   webhookAuth?: string;
   /** Tests pass an in-memory store; production uses Firestore. */
   storeFor?: (uid: string) => Store;
+  /** The weekly review email: tests pass a fake sender, Pro check and email lookup; production uses SES. */
+  reviews?: () => ReviewDeps;
+  /** The unsubscribe link's HMAC key; tests pass their own, production reads it from the env. */
+  unsubscribeKey?: Buffer | null;
 }
 
-export function createApp({ tokens, baseUrl, provider, extraOrigins = [], socialDeps, verifyIdToken = realVerify, accountBackend, pro, notifications = () => new Notifications(), webhookAuth = process.env.REVENUECAT_WEBHOOK_AUTH, storeFor = (uid: string) => new Store(uid) }: AppOptions) {
+export function createApp({ tokens, baseUrl, provider, extraOrigins = [], socialDeps, verifyIdToken = realVerify, accountBackend, pro, notifications = () => new Notifications(), webhookAuth = process.env.REVENUECAT_WEBHOOK_AUTH, storeFor = (uid: string) => new Store(uid), reviews, unsubscribeKey: unsubKey = unsubscribeKey() }: AppOptions) {
   const accounts = () => accountBackend ?? firestoreAccountBackend();
+  let realReviews: ReviewDeps | null = null;
+  const reviewDeps = reviews ?? (() => (realReviews ??= realReviewDeps(baseUrl)));
   const resourceUrl = new URL('/mcp', baseUrl);
   const oauth = provider ?? new FirestoreOAuthProvider(resourceUrl);
   const resourceMetadata = getOAuthProtectedResourceMetadataUrl(resourceUrl);
@@ -143,10 +151,29 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
   app.post('/tick/:token', async (req, res) => {
     if (!tokens.has(String(req.params.token))) { res.status(401).json({ error: 'unauthorized' }); return; }
     try {
-      const result = await tick(notifications());
+      const result = await tick(notifications(), new Date(), undefined, reviewDeps);
       if (result.processed) console.error('[tick]', JSON.stringify(result));
       res.json(result);
     } catch (e) { console.error('[tick] failed', e); res.status(500).json({ error: (e as Error).message }); }
+  });
+
+  // ---- the weekly review email's unsubscribe link (docs/weekly-review.md, RFC 8058) ----
+  // GET shows a confirm button (a link scanner that opens it changes nothing); POST turns
+  // the email off: the button, and mail clients' one-click (body List-Unsubscribe=One-Click).
+  const unsubToken = (req: express.Request) => String((req.query.t ?? (req.body as { t?: unknown } | undefined)?.t) ?? '');
+  const unsubPage = (res: express.Response, status: number, html: string) => { res.status(status).set({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }).send(html); };
+  app.get('/email/unsubscribe', (req, res) => {
+    const t = unsubToken(req);
+    if (!unsubKey || !verifyUnsubscribeToken(unsubKey, t)) { unsubPage(res, 400, unsubscribePage('invalid')); return; }
+    unsubPage(res, 200, unsubscribePage('confirm', t));
+  });
+  app.post('/email/unsubscribe', express.urlencoded({ extended: false, limit: '4kb' }), async (req, res) => {
+    const uid = unsubKey ? verifyUnsubscribeToken(unsubKey, unsubToken(req)) : null;
+    if (!uid) { unsubPage(res, 400, unsubscribePage('invalid')); return; }
+    try {
+      await new AimService(storeFor(uid), 'unsubscribe', 'mobile').setSettings({ weekly_review_email: false });
+      unsubPage(res, 200, unsubscribePage('done'));
+    } catch (e) { console.error('[unsubscribe] failed', (e as Error).message); unsubPage(res, 500, unsubscribePage('invalid')); }
   });
 
   // ---- MCP ----
@@ -298,6 +325,8 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
     if (!webhookAuth || !got || !sameSecret(got, webhookAuth)) { res.status(401).json({ error: 'unauthorized' }); return; }
     try {
       const updated = await (pro ?? realPro()).applyWebhook(req.body);
+      // Someone who bought Pro on aimyear.com may never open the app: queue their Sunday review here.
+      for (const uid of updated) await new AimService(storeFor(uid), 'revenuecat', 'mobile').armWeeklyReview().catch(e => console.error('[revenuecat] weekly review arm failed', (e as Error).message));
       res.json({ ok: true, updated: updated.length });
     } catch (e) { console.error('[revenuecat] failed', (e as Error).message); res.status(500).json({ error: 'try again' }); }
   });

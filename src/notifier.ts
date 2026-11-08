@@ -4,6 +4,7 @@ import { localDate } from './dates.js';
 import { AimService } from './service.js';
 import { SocialService } from './social/service.js';
 import type { Device, DesktopReminder, Pending, Workplace } from './types.js';
+import { deliverWeeklyReview, type ReviewDeps } from './review/deliver.js';
 
 const DESKTOP: Device['platform'][] = ['macos', 'windows', 'web'];
 const MOBILE: Device['platform'][] = ['ios', 'android'];
@@ -145,13 +146,23 @@ export async function pullDesktop(uid: string, notif: Notifications, now = new D
  * Desktop reminders are not pushed: they go to the desktop inbox that the desktop app
  * pulls (POST /desktop/reminders), and their stand-up cadence is kept here too.
  */
-export async function tick(notif: Notifications, now = new Date(), socialFor: SocialFor = realSocialFor) {
+export async function tick(notif: Notifications, now = new Date(), socialFor: SocialFor = realSocialFor, reviews?: () => ReviewDeps) {
   const due = await notif.due(now.toISOString());
   // Without a desktop app polling, its reminders would pile up: drop the ones too old to say.
   try { await notif.dropStaleDesktopReminders(new Date(now.getTime() - DESKTOP_STALE_MS).toISOString()); } catch (e) { console.error('[tick] desktop sweep failed', (e as Error).message); }
   const results: { id: string; kind: string; sent: number; failed: number; reason?: string; continued?: string }[] = [];
   for (const p of due) {
     if (!(await notif.claim(p.id))) continue;
+    if (p.kind === 'weekly_review') {
+      // The weekly review email (src/review/deliver.ts): Sunday 19:00 local, Pro, once a week.
+      let r: { sent: number; failed: number; reason?: string; continued?: string };
+      try {
+        if (!reviews) throw new Error('weekly review email is not set up on this server');
+        r = await deliverWeeklyReview(p, reviews(), now);
+      } catch (e) { console.error('[tick] weekly review failed', (e as Error).message); r = { sent: 0, failed: 0, reason: (e as Error).message }; }
+      results.push({ id: p.id, kind: p.kind, ...r });
+      continue;
+    }
     if (p.workplace === 'desktop' && p.kind !== 'post_offer') {
       const r = await produceDesktop(p, notif, now).catch(e => { console.error('[tick] desktop reminder failed', (e as Error).message); return { reminder: undefined, continued: undefined }; });
       results.push({ id: p.id, kind: p.kind, sent: 0, failed: 0, reason: r.reminder ? 'desktop inbox' : 'desktop, too old to say', continued: r.continued });
