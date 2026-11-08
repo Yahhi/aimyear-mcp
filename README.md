@@ -11,8 +11,8 @@ moves the goal: selling, talking to users, publishing.
 
 - **Free:** sign-in on any number of devices, aims, plans, routines, time tracking,
   moves without hours, a weekly target and reviews through your own agent. No AI runs on AimYear's side, so there are no AI costs.
-- **Pro** ($49/year or $8/month, with the coming phone app): notifications, reviews
-  written by AimYear, AimYear's own AI coach, Google Calendar sync, and posting your
+- **Pro** ($49.99/year or $7.99/month, with the coming phone app): notifications, reviews
+  written by AimYear, Google Calendar sync, and posting your
   day's progress to WIP and Bluesky.
 
 Website: [aimyear.com](https://aimyear.com) · Setup guide: [aimyear.com/connect.html](https://aimyear.com/connect.html) · Privacy: [aimyear.com/privacy.html](https://aimyear.com/privacy.html)
@@ -231,8 +231,22 @@ When you add a tool: give it an entry in `src/access.ts` (`npm test` fails witho
 ## Hosted (Cloud Run)
 
 ```bash
-gcloud run deploy aimyear-mcp --source . --project aimyear-app --region us-central1 --quiet
+gcloud run deploy aimyear-mcp --source . --project aimyear-app --region us-central1 \
+  --service-account aimyear-mcp@aimyear-app.iam.gserviceaccount.com --quiet
 ```
+
+The service runs as its own Google service account `aimyear-mcp@aimyear-app.iam.gserviceaccount.com`
+(2026-11-07; before, the shared Compute default account with Editor): Firestore
+(`roles/datastore.user`), Firebase Auth (`roles/firebaseauth.admin`), FCM
+(`roles/firebasecloudmessaging.admin`) and read access to its three secrets. A new secret needs
+`roles/secretmanager.secretAccessor` for that account. The same account is federated to the
+Claude API (Workload Identity Federation: issuer `https://accounts.google.com`, audience
+`https://api.anthropic.com`, claims `sub` = `107369159217285539061` and `email`), set by
+`ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID` and
+optionally `ANTHROPIC_WORKSPACE_ID`; never an `ANTHROPIC_API_KEY`. Values (not secret): rule
+`fdrl_0198djrEA7bomAzumR9kS1JZ` (`aimyear-mcp-prod`), organization `56f90d91-0756-4604-8e94-314f3195fd24`,
+service account `svac_01VanbEzt25gH1b31N8oMmWS`, workspace `wrkspc_012JqUtDCHQ6CErwifVXb6RD` (Default).
+Tested 2026-11-07 from a Cloud Run job as the account: exchange 200, token lifetime 600 s.
 
 Env vars on the service: `AIMYEAR_TOKENS`, `AIMYEAR_TZ`, `AIMYEAR_PROJECT`,
 `AIMYEAR_BASE_URL=https://mcp.aimyear.com`, `AIMYEAR_SOCIAL_KEY` (as a Secret Manager secret,
