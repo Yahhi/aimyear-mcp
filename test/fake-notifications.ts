@@ -1,4 +1,4 @@
-import type { DesktopReminder, Pending } from '../src/types.js';
+import type { Device, DesktopReminder, Pending } from '../src/types.js';
 
 /** The cross-user reminder store (src/store.ts Notifications) in memory. */
 export class FakeNotifications {
@@ -12,7 +12,7 @@ export class FakeNotifications {
   async remove(id: string) { this.pending.delete(id); }
   async claim(id: string) { return this.pending.delete(id); }
   async claimDesktop(uid: string, nowIso: string) {
-    const mine = [...this.pending.values()].filter(p => p.uid === uid && p.workplace === 'desktop' && p.dueAt <= nowIso);
+    const mine = [...this.pending.values()].filter(p => p.uid === uid && p.kind !== 'post_offer' && p.dueAt <= nowIso);
     return mine.filter(p => this.pending.delete(p.id));
   }
   async dropStaleDesktopReminders(beforeIso: string) { let n = 0; for (const [k, r] of this.inbox) if (r.dueAt < beforeIso) { this.inbox.delete(k); n++; } return n; }
@@ -22,8 +22,10 @@ export class FakeNotifications {
     for (const r of mine) this.inbox.delete(r.id);
     return mine;
   }
-  async devicesOf() { return []; }
-  async dropDevice() {}
+  devices: Device[] = [];
+  dropped: string[] = [];
+  async devicesOf() { return this.devices.map(d => ({ ...d })); }
+  async dropDevice(_uid: string, token: string) { this.dropped.push(token); this.devices = this.devices.filter(d => d.token !== token); }
   async profileOf() { return null; }
   async mainStepOf() { return this.mainStep; }
   /** Like the real one for a running up-timer: the next stand-up a work interval later, or none after the final one. */

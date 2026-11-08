@@ -256,6 +256,19 @@ export interface Device {
   lastSeen: string;
   foregroundAt?: string;
   label?: string;
+  /**
+   * iPhone, iOS 17.2+: ActivityKit's push-to-start token, so the server can start the
+   * running-timer Live Activity while the app is closed (docs/notifications.md). src/live.ts.
+   */
+  liveStartToken?: string | null;
+  /** The push token of the Live Activity showing on this iPhone now; updates and ends it. */
+  liveToken?: string | null;
+  /**
+   * When the server last started the Live Activity by push. One start per timer run: set
+   * until no session runs, so a phone that never reported the new activity's token does
+   * not get a second activity for the same timer.
+   */
+  liveStartedAt?: string | null;
 }
 
 /** A reminder the server owes a user at a point in time. Polled by /tick. */

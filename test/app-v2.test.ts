@@ -12,7 +12,7 @@ import { createApp, looksLikeJwt } from '../src/http.js';
 import { AimService } from '../src/service.js';
 import { AccountService, agentFromUserAgent, agentName } from '../src/account.js';
 import { createPro, entitlementOf, type ProStatus } from '../src/pro.js';
-import { pickDevices, pullDesktop, tick } from '../src/notifier.js';
+import { pushTargets, pullDesktop, tick } from '../src/notifier.js';
 import { computeComebacks, computeInsights, type InsightRow } from '../src/domain/insights.js';
 import { addDays } from '../src/dates.js';
 import { FakeStore } from './fake-store.js';
@@ -217,8 +217,10 @@ test('tick turns a due desktop stand-up into a desktop reminder with Break and S
   assert.equal(notif.requeued.at(-1)!.blockId, 'b2');
   // A forgotten timer still closes itself without a desktop app open.
   notif.pending.set('b3-standup-9', standup({ id: 'b3-standup-9', blockId: 'b3', final: true, elapsedMin: 250 }));
-  await tick(notif as any);
+  const live: string[] = [];
+  await tick(notif as any, new Date(), undefined, { liveFor: async uid => { live.push(uid); } });
   assert.deepEqual(notif.autoClosed, ['b3']);
+  assert.deepEqual(live, ['u1'], 'the forgotten timer closed itself: the phone\'s Live Activity is synced (ended)');
   assert.deepEqual([...notif.inbox.values()].find(r => r.blockId === 'b3')!.actions, [], 'the final notice has no buttons');
   // Reminders nobody pulls do not pile up.
   notif.inbox.set('old', { ...[...notif.inbox.values()][0], id: 'old', dueAt: minutesAgo(45) });
@@ -488,14 +490,15 @@ test('get_insights reads the record through the service: week and month ranges e
 
 // ---------- 8. Windows devices ----------
 
-test('add_device takes windows and macos; desktop reminders pick them', async () => {
+test('add_device takes windows and macos; timer reminders are pushed to the phones, the desktops pull theirs', async () => {
   const store = new FakeStore();
   const svc = new AimService(store as any, 'c');
   const r = await svc.addDevice('windows-token-0123456789abcdef', 'windows', 'PC');
   assert.equal(r.devices[0].platform, 'windows');
   await svc.addDevice('macos-token-0123456789abcdef', 'macos');
   const dev = (platform: Device['platform']): Device => ({ token: `${platform}-t`, platform, lastSeen: '' });
-  assert.deepEqual(pickDevices([dev('ios'), dev('windows'), dev('macos')], 'desktop').map(d => d.platform), ['windows', 'macos']);
+  assert.deepEqual(pushTargets([dev('ios'), dev('windows'), dev('macos')], 'standup').map(d => d.platform), ['ios']);
+  assert.deepEqual(pushTargets([dev('ios'), dev('windows'), dev('macos')], 'post_offer').map(d => d.platform), ['ios', 'windows', 'macos']);
 });
 
 // ---------- 9. the timer stops with its last session ----------

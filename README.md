@@ -89,6 +89,18 @@ for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change 
 - Desktop apps pull their reminders; stand-ups come with Break and Snooze (routes below).
 - `add_device` takes `windows`. Stopping the last running session also stops the timer.
 
+0.13.0: the running timer on the iPhone, and reminders on every device (docs/notifications.md
+in the AimYear project, 2026-11-07).
+- Stand-up, stop and break-over reminders reach every device whichever device or agent started
+  the timer: a push to the phones, and the desktop inbox for the macOS and Windows apps (the Mac
+  is not pushed those too, or it would show each twice). The evening post offer is pushed to
+  every device. Before, only the devices of the block's workplace got them.
+- The iPhone shows the running session as a Live Activity (`src/live.ts`). The server starts it
+  by push-to-start (iOS 17.2+) and updates and ends it with the activity's push token, through
+  FCM HTTP v1 (`apns.live_activity_token`), after `start_session`, `stop_session`, `stop_timer`,
+  `delete_session`, `edit_session`, Break and a forgotten timer closing itself. The app reports
+  its tokens with `POST /devices/live-activity` (Pro).
+
 0.8.0 adds posting the day's progress in public, to WIP (wip.co) and Bluesky.
 The draft is written
 from the day's record: the aim and its progress, the main step done or not, minutes on the aim
@@ -153,6 +165,7 @@ All take the same Bearer as `/mcp` (the app sends its Firebase ID token); JSON i
 |---|---|
 | `POST /desktop/reminders` | A desktop app (macOS, Windows) polls this about once a minute. Answer: `{ reminders: [{ id, kind, title, body, block_id, due_at, actions }], poll_after_seconds }`. Each reminder comes once. `kind` is `standup`, `block_end` or `break_end`; a stand-up has `actions: ["break", "snooze"]`. The server keeps the stand-up cadence whether or not a desktop app polls, and a forgotten timer still closes itself. |
 | `POST /desktop/reminders/action` | `{ action: "break", minutes? }` stops the timer and every running session (there is no paused state) and queues the "break over" reminder after `minutes` (default the break length); the answer lists the stopped sessions as `paused` so the app can offer to resume. `{ action: "snooze", minutes? }` asks again in `minutes` (default 10); the timer keeps running. |
+| `POST /devices/live-activity` | Pro. The iPhone's Live Activity tokens: `{ token, start_token?, activity_token?, ended? }`. `token` is the device's FCM token (registered with `add_device`, else 404); `start_token` is ActivityKit's push-to-start token, `activity_token` the push token of the activity it shows now (hex; `null` clears either). A new `activity_token` gets the current state at once. `ended: true` with an `activity_token` says that activity is gone; swiped away while the timer runs, it is not started again until the timer stops. |
 | `GET /account/agents` | `{ agents: [{ client_id, name, connected_at, last_active_at, current }], speak }`. |
 | `DELETE /account/agents/:clientId` | Disconnects one agent (deletes its sign-in for this account). 404 when no such agent is connected. |
 | `GET /account/export` | Everything the server keeps about the person, as one JSON download: `{ format: "aimyear-export", version, exported_at, uid, account, data: { "aim/goal": …, "sessions/<id>": … }, server_rows, agents }`. Saved WIP and Bluesky logins are left out. |

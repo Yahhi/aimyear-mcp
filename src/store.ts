@@ -54,15 +54,16 @@ export class Notifications {
   }
 
   /**
-   * Due reminders for one user's desktop, claimed and removed so they fire once.
-   * Filters in memory on purpose: uid + workplace + dueAt would need a composite
-   * index, and a missing index fails the whole endpoint silently.
+   * One user's due timer reminders (any workplace: every device gets them), claimed and
+   * removed so they fire once. Not the evening post offer: /tick sends that one.
+   * Filters in memory on purpose: uid + dueAt would need a composite index, and a
+   * missing index fails the whole endpoint silently.
    */
   async claimDesktop(uid: string, nowIso: string): Promise<Pending[]> {
     const snap = await this.db.collection(PENDING).where('dueAt', '<=', nowIso).limit(100).get();
     const mine = snap.docs.filter(d => {
       const p = d.data() as Pending;
-      return p.uid === uid && p.workplace === 'desktop';
+      return p.uid === uid && p.kind !== 'post_offer';
     });
     const rows: Pending[] = [];
     for (const d of mine) if (await this.claim(d.id)) rows.push(d.data() as Pending);
