@@ -285,6 +285,11 @@ export class Store {
     return snap.exists ? (snap.data() as Session) : null;
   }
   async deleteSession(id: string) { await this.sessions().doc(id).delete(); }
+  /** The session logged from this calendar event, if any (docs/calendar-sync.md). */
+  async findSessionByCalendarEvent(eventId: string): Promise<Session | null> {
+    const snap = await this.sessions().where('calendarEventId', '==', eventId).limit(1).get();
+    return snap.empty ? null : (snap.docs[0].data() as Session);
+  }
   /** Sessions overlapping [fromIso, toIso). Running sessions (no end) count as overlapping if they started before toIso. */
   async getSessionsOverlapping(fromIso: string, toIso: string): Promise<Session[]> {
     // Firestore can only range on one field: take everything started before toIso and filter in memory.

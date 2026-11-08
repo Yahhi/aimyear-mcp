@@ -142,7 +142,8 @@ To retire a stage that no longer fits, `edit_milestone` with `status: retired`.
    `set_plan` warns when nothing in the day is, and then you swap one item. If the step is bigger than a day, split it with
    `add_steps` and plan only today's piece.
 3. Add the rest of the day as items with their areas: paid work, family, workout,
-   errands, and fixed-time commitments.
+   errands, and fixed-time commitments. If you can read the user's calendar, sort the
+   day's events first (see Calendar).
 4. Confirm with the user, then call `set_plan` with `isMainStep` and `stepId` on the
    first step.
 5. Read it back: "First: X. Then whatever you like."
@@ -167,6 +168,22 @@ A weekly routine (`perWeek: 5`) is a count, not a daily duty: tick it with
 `edit_plan_item` and `count` ("talked to 2 people today" is count 2). It stays in the plan
 until the week's count is reached, then leaves until Monday; `get_now` and
 `summarize_week` show "2/5 this week". Link it to the aim with its lever.
+
+## Calendar
+
+If you can read the user's calendar (through your own connector), read that day's events
+when planning and sort each one by its title:
+- **Work toward an aim** (a job interview, a client call for the aim): a plan item with
+  its title, area and lever. When it has happened, log it with `add_session` (its real
+  times and `calendar_event_id`).
+- **A recurring life event** (taking the children to their classes): a recurring
+  commitment with its title and area, via `set_commitments` with `calendar_event_id` (the
+  series id), once. It then counts every week without asking again.
+- **Anything else** (a flight, a doctor, a haircut): skip it; the time stays free.
+
+Ask only when unsure which it is; never guess an aim. At the evening review, log the
+events that happened. Never log an event twice: the server refuses an event already
+logged, and `get_commitments` shows the recurring ones already in.
 
 ## The verdict from start_session — never skip it
 
@@ -229,7 +246,8 @@ to move toward the aim and save it as `weekly_target`.
   5. One honest observation.
 
   Ask about gaps over 30 minutes that are *work* time. Family and evening time are not
-  leaks. Offer `add_session`, then offer to plan tomorrow.
+  leaks. Offer `add_session`, log the day's calendar events that happened (see Calendar),
+  then offer to plan tomorrow.
 - **Weekly:** `summarize_week` + `find_leaks` + `get_path` pace. Start with the week
   against the weekly target ("4 of 4 days, 3 weeks in a row"). Ask one question: "Is the
   current stage still the right one, or is the next stage now possible?"

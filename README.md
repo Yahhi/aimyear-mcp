@@ -10,10 +10,10 @@ Built for indie developers and makers who build all day but keep postponing the 
 moves the goal: selling, talking to users, publishing.
 
 - **Free:** sign-in on any number of devices, aims, plans, routines, time tracking,
-  moves without hours, a weekly target and reviews through your own agent. None of it runs AI on AimYear's side, so there are no AI costs.
+  moves without hours, a weekly target, your calendar, read by your own agent, and reviews
+  through your own agent. None of it runs AI on AimYear's side, so there are no AI costs.
 - **Pro** ($49.99/year or $7.99/month, with the coming phone app): notifications, reviews
-  written by AimYear, Google Calendar sync, and posting your
-  day's progress to WIP and Bluesky.
+  written by AimYear, and posting your day's progress to WIP and Bluesky.
 
 Website: [aimyear.com](https://aimyear.com) · Setup guide: [aimyear.com/connect.html](https://aimyear.com/connect.html) · Privacy: [aimyear.com/privacy.html](https://aimyear.com/privacy.html)
 · Contact: privacy@aimyear.com
@@ -67,9 +67,9 @@ for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change 
 | Connected agents | `list_agents`, `delete_agent` |
 | Posting progress (Pro) | `add_social_account`, `list_social_accounts`, `delete_social_account`, `get_post_draft`, `add_post`, `list_wip_projects` |
 
-0.13.0 adds the weekly review email, posts about what was done, and the running timer on the
-iPhone (docs/weekly-review.md, docs/public-posting.md and docs/notifications.md in the AimYear
-project, 2026-11-07):
+0.13.0 adds the weekly review email, posts about what was done, the running timer on the
+iPhone and calendar events read by your own agent (docs/weekly-review.md, docs/public-posting.md,
+docs/notifications.md and docs/calendar-sync.md in the AimYear project, 2026-11-07):
 - **The weekly review email (Pro).** Every Sunday at 19:00 in the person's timezone, AimYear
   emails a review it writes from the record (no AI model): days toward the aim against the
   weekly target, weeks in a row, what moved (session summaries and moves), main steps done, the
@@ -95,6 +95,11 @@ project, 2026-11-07):
   FCM HTTP v1 (`apns.live_activity_token`), after `start_session`, `stop_session`, `stop_timer`,
   `delete_session`, `edit_session`, Break and a forgotten timer closing itself. The app reports
   its tokens with `POST /devices/live-activity`.
+- **Your calendar, read by your own agent (Free)** (docs/calendar-sync.md). AimYear does not
+  connect to Google. `add_session` and `set_commitments` entries take `calendar_event_id`, the
+  event's id from the agent's own calendar connector: an event that was work toward the aim is
+  logged with it, a recurring life event becomes one commitment with it, and the server refuses
+  to log the same event twice (or two commitments for one event). The /aim skill says how.
 
 0.12 adds moves and the weekly target:
 - `add_move` records one action toward the aim with no duration ("fixed the signup button

@@ -83,6 +83,11 @@ export interface Commitment {
   insideWindowId?: string;
   projectId?: string;
   note?: string;
+  /**
+   * The calendar event this commitment was taken from, as the user's own agent read it
+   * (docs/calendar-sync.md): for a recurring event, the series id. One event is one entry.
+   */
+  calendarEventId?: string;
 }
 
 export type Mode = 'full' | 'focus' | 'off';
@@ -231,6 +236,11 @@ export interface Session {
    * end wins, done wins over any other outcome, the first summary stays.
    */
   stops?: Stop[];
+  /**
+   * The calendar event this session was logged from, as the user's own agent read it
+   * (docs/calendar-sync.md). The same event is never logged twice for one user.
+   */
+  calendarEventId?: string;
 }
 
 /** One stop request as it arrived: what the device said and when the server heard it. */

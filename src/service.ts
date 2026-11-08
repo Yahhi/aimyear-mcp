@@ -53,6 +53,11 @@ function tagOf(given: string | null | undefined, prev: WipTag | undefined, what:
   try { return nextTag(given, prev, what); } catch (e) { throw new AimError((e as Error).message); }
 }
 
+/** A commitment as the tools show it: the calendar event id under the name set_commitments takes. */
+function commitmentView({ calendarEventId, ...c }: Commitment) {
+  return calendarEventId ? { ...c, calendar_event_id: calendarEventId } : c;
+}
+
 export class AimService {
   private profileCache: Profile | null = null;
   private agentCache: Promise<string | undefined> | null = null;
@@ -506,11 +511,13 @@ export class AimService {
   // ---------- commitments & capacity ----------
   async getCommitments() {
     const items = await this.store.getCommitments();
-    return { commitments: items, speak: items.length ? items.map(c => `${c.title} [${c.kind}${c.area ? ' ' + c.area : ''}]: ${describeWhen(c)}, ${c.minutes} min${c.assumed ? ' (assumed)' : ''}`).join('; ') : 'No recurring commitments recorded.' };
+    return { commitments: items.map(commitmentView), speak: items.length ? items.map(c => `${c.title} [${c.kind}${c.area ? ' ' + c.area : ''}]: ${describeWhen(c)}, ${c.minutes} min${c.assumed ? ' (assumed)' : ''}`).join('; ') : 'No recurring commitments recorded.' };
   }
 
-  async setCommitments(items: (Omit<Commitment, 'id' | 'days' | 'kind'> & { id?: string; days?: number[]; kind?: CommitmentKind })[]) {
+  async setCommitments(items: (Omit<Commitment, 'id' | 'days' | 'kind' | 'calendarEventId'> & { id?: string; days?: number[]; kind?: CommitmentKind; calendarEventId?: string | null })[]) {
     const problems: string[] = [];
+    // A calendar event id left out stays on the entry it was on (same id); null or "" removes it.
+    const before = new Map((await this.store.getCommitments()).map(c => [c.id, c.calendarEventId]));
     const out: Commitment[] = items.map(c => {
       if (!c.title?.trim()) problems.push('a commitment has no title');
       if (!c.minutes || c.minutes < 1) problems.push(`"${c.title}" needs minutes per occurrence`);
@@ -518,12 +525,18 @@ export class AimService {
       if (!days.length && !c.timesPerWeek) problems.push(`"${c.title}" needs days (1=Mon..7=Sun) or timesPerWeek`);
       const kind: CommitmentKind = c.kind ?? 'commitment';
       if (kind === 'commitment' && !c.area) problems.push(`"${c.title}" needs an area (or kind overhead/window)`);
-      return { id: c.id ?? slug(c.title), title: c.title.trim(), kind, area: kind === 'commitment' ? c.area : undefined, days, timesPerWeek: c.timesPerWeek, start: c.start, minutes: c.minutes, usableForWork: c.usableForWork, assumed: c.assumed, insideWindowId: c.insideWindowId, projectId: c.projectId, note: c.note };
+      const id = c.id ?? slug(c.title);
+      const calendarEventId = c.calendarEventId === undefined ? before.get(id) : c.calendarEventId?.trim() || undefined;
+      return { id, title: c.title.trim(), kind, area: kind === 'commitment' ? c.area : undefined, days, timesPerWeek: c.timesPerWeek, start: c.start, minutes: c.minutes, usableForWork: c.usableForWork, assumed: c.assumed, insideWindowId: c.insideWindowId, projectId: c.projectId, note: c.note, ...(calendarEventId ? { calendarEventId } : {}) };
     });
+    // One calendar event is one commitment (docs/calendar-sync.md).
+    const byEvent = new Map<string, string[]>();
+    for (const c of out) if (c.calendarEventId) byEvent.set(c.calendarEventId, [...(byEvent.get(c.calendarEventId) ?? []), c.title]);
+    for (const [eventId, titles] of byEvent) if (titles.length > 1) problems.push(`${titles.map(t => `"${t}"`).join(' and ')} have the same calendar_event_id "${eventId}": one calendar event is one commitment`);
     if (problems.length) return { ok: false, problems, speak: problems.join('; ') };
     await this.store.saveCommitments(out);
     const cap = await this.capacity();
-    return { ok: true, commitments: out, capacity: cap, speak: `${out.length} commitments saved. ${cap.speak}` };
+    return { ok: true, commitments: out.map(commitmentView), capacity: cap, speak: `${out.length} commitments saved. ${cap.speak}` };
   }
 
   /** Weekly time budget. Nothing is assumed: only what has been recorded is counted. */
@@ -947,7 +960,7 @@ export class AimService {
     // The stored copy may be behind `s` (inside a transaction it always is): `s` is the truth.
     const others = (await this.store.getSessionsOverlapping(s.start, end.toISOString())).filter(o => o.id !== s.id);
     const att = computeAttention([...others, s], start, end);
-    return { id: s.id, task: s.task, area: s.area, classification: s.classification, lever_id: s.leverId, project_id: s.projectId, start: s.start, end: s.end, wall_min: round(att.wall.get(s.id) ?? 0), attention_min: round(s.attentionShareOverride !== undefined ? (att.wall.get(s.id) ?? 0) * s.attentionShareOverride : att.attention.get(s.id) ?? 0), weight: s.weight, notes: s.notes, override: s.override ?? false, summary: s.summary, outcome: s.outcome, agent: s.agent ?? null };
+    return { id: s.id, task: s.task, area: s.area, classification: s.classification, lever_id: s.leverId, project_id: s.projectId, start: s.start, end: s.end, wall_min: round(att.wall.get(s.id) ?? 0), attention_min: round(s.attentionShareOverride !== undefined ? (att.wall.get(s.id) ?? 0) * s.attentionShareOverride : att.attention.get(s.id) ?? 0), weight: s.weight, notes: s.notes, override: s.override ?? false, summary: s.summary, outcome: s.outcome, agent: s.agent ?? null, ...(s.calendarEventId ? { calendar_event_id: s.calendarEventId } : {}) };
   }
 
   /** The running sessions; `extra` is one just started whose write has not landed yet. */
@@ -1195,8 +1208,9 @@ export class AimService {
     return { ok: true, session: view, changed, speak: `Fixed [${s.id}] "${s.task}": ${localDate(new Date(s.start), tz)} ${localTime(new Date(s.start), tz)}–${s.end ? localTime(new Date(s.end), tz) : 'running'}, ${view.wall_min} min wall, ${view.attention_min} min attention → ${s.classification}. Changed: ${changed.join(', ')}.` };
   }
 
-  async addSession(input: SessionInput & { minutes?: number; start?: string; end?: string; date?: string; opId?: string }) {
+  async addSession(input: SessionInput & { minutes?: number; start?: string; end?: string; date?: string; opId?: string; calendarEventId?: string }) {
     const op = this.opRef('add_session', input.opId);
+    const calendarEventId = input.calendarEventId?.trim() || undefined;
     const tz = await this.tz();
     const prof = await this.profile();
     if (prof.tracking === 'moves') throw new AimError(MOVES_ONLY);
@@ -1220,8 +1234,14 @@ export class AimService {
       area, projectId: cls.projectId ?? link.projectId, leverId: cls.leverId ?? link.leverId,
       stepId: link.stepId ?? (cls.classification === 'main_step' ? day.plan.find(p => p.isMainStep)?.stepId : undefined), itemId: input.itemId ?? (cls.classification === 'main_step' ? day.plan.find(p => p.isMainStep)?.id : undefined),
       task: input.task.trim(), notes: [], classification: cls.classification, unclassified: cls.unclassified, verdictAtStart: v.verdict, outcome: 'done',
-      agent: await this.agent(),
+      agent: await this.agent(), ...(calendarEventId ? { calendarEventId } : {}),
     };
+    // docs/calendar-sync.md: one calendar event is logged once. A replayed op_id still gets its first answer.
+    const logged = calendarEventId && !(op && await this.store.getOp(op.id)) ? await this.store.findSessionByCalendarEvent(calendarEventId) : null;
+    if (logged) {
+      const on = localDate(new Date(logged.start), tz);
+      return { ok: false, already_logged: { session_id: logged.id, task: logged.task, date: on }, speak: `This calendar event is already logged: ${logged.task} on ${on}. Use edit_session to change it.` };
+    }
     return this.applyOnce(op, async tx => {
       tx.saveSession(session);
       const view = await this.sessionView(session);

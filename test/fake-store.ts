@@ -59,6 +59,7 @@ export class FakeStore {
   async getDaysInRange(from: string, to: string) { return [...this.days.values()].filter(d => d.date >= from && d.date <= to).map(d => structuredClone(d)); }
   async saveSession(s: Session) { this.sessions.set(s.id, structuredClone(s)); this.writes++; }
   async getSession(id: string) { const s = this.sessions.get(id); return s ? structuredClone(s) : null; }
+  async findSessionByCalendarEvent(eventId: string) { const s = [...this.sessions.values()].find(x => x.calendarEventId === eventId); return s ? structuredClone(s) : null; }
   async deleteSession(id: string) { this.sessions.delete(id); this.writes++; }
   async getSessionsOverlapping(fromIso: string, toIso: string) {
     return [...this.sessions.values()].filter(s => s.start < toIso && (s.end ?? '9999') > fromIso).map(s => structuredClone(s));
