@@ -10,7 +10,7 @@ Built for indie developers and makers who build all day but keep postponing the 
 moves the goal: selling, talking to users, publishing.
 
 - **Free:** sign-in on any number of devices, aims, plans, routines, time tracking,
-  moves without hours, a weekly target and reviews through your own agent. No AI runs on AimYear's side, so there are no AI costs.
+  moves without hours, a weekly target and reviews through your own agent. None of it runs AI on AimYear's side, so there are no AI costs.
 - **Pro** ($49.99/year or $7.99/month, with the coming phone app): notifications, reviews
   written by AimYear, Google Calendar sync, and posting your
   day's progress to WIP and Bluesky.
@@ -67,13 +67,34 @@ for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change 
 | Connected agents | `list_agents`, `delete_agent` |
 | Posting progress (Pro) | `add_social_account`, `list_social_accounts`, `delete_social_account`, `get_post_draft`, `add_post`, `list_wip_projects` |
 
-0.13 adds the weekly review email (Pro):
-- Every Sunday at 19:00 in the person's timezone, AimYear emails a review it writes from the
-  record (no AI model): days toward the aim against the weekly target, weeks in a row, what
-  moved (session summaries and moves), main steps done, the hard share, the path stage and its
-  pace, and last week. With `tracking` `moves` or `quiet` it has no minutes or percentages.
-- `set_settings` `weekly_review_email` (default on) turns it off and on; every email has a
-  one-click unsubscribe link (`/email/unsubscribe`, RFC 8058).
+0.13.0 adds the weekly review email, posts about what was done, and the running timer on the
+iPhone (docs/weekly-review.md, docs/public-posting.md and docs/notifications.md in the AimYear
+project, 2026-11-07):
+- **The weekly review email (Pro).** Every Sunday at 19:00 in the person's timezone, AimYear
+  emails a review it writes from the record (no AI model): days toward the aim against the
+  weekly target, weeks in a row, what moved (session summaries and moves), main steps done, the
+  hard share, the path stage and its pace, and last week. With `tracking` `moves` or `quiet` it
+  has no minutes or percentages. `set_settings` `weekly_review_email` (default on) turns it off
+  and on; every email has a one-click unsubscribe link (`/email/unsubscribe`, RFC 8058).
+- **The progress post is about what was done (Pro).** `get_post_draft` leads with the day's
+  session summaries and moves toward the aim, in the user's words; the numbers follow if there
+  is room. A day with nothing recorded toward the aim has no draft (`nothing_to_post: true`):
+  the agent asks the user to record what they did first.
+- **WIP todos per project (Pro).** `set_projects` and `set_levers` take `wip_hashtag`; the WIP
+  draft (`wip_todos`, posted with `add_post`) is one todo per project worked on that day, with
+  that project's #hashtag. `list_wip_projects` reads the user's WIP projects. When WIP is
+  connected from the app, AimYear matches the hashtags once by name, then with one Claude call
+  for what is left (Workload Identity Federation, no API key).
+- **Reminders on every device (Pro).** Stand-up, stop and break-over reminders reach every
+  device whichever device or agent started the timer: a push to the phones, and the desktop
+  inbox for the macOS and Windows apps (the Mac is not pushed those too, or it would show each
+  twice). The evening post offer is pushed to every device. Before, only the devices of the
+  block's workplace got them.
+- **The running timer as an iPhone Live Activity (Pro)** (`src/live.ts`). The server starts it
+  by push-to-start (iOS 17.2+) and updates and ends it with the activity's push token, through
+  FCM HTTP v1 (`apns.live_activity_token`), after `start_session`, `stop_session`, `stop_timer`,
+  `delete_session`, `edit_session`, Break and a forgotten timer closing itself. The app reports
+  its tokens with `POST /devices/live-activity`.
 
 0.12 adds moves and the weekly target:
 - `add_move` records one action toward the aim with no duration ("fixed the signup button
@@ -161,6 +182,7 @@ All take the same Bearer as `/mcp` (the app sends its Firebase ID token); JSON i
 |---|---|
 | `POST /desktop/reminders` | A desktop app (macOS, Windows) polls this about once a minute. Answer: `{ reminders: [{ id, kind, title, body, block_id, due_at, actions }], poll_after_seconds }`. Each reminder comes once. `kind` is `standup`, `block_end` or `break_end`; a stand-up has `actions: ["break", "snooze"]`. The server keeps the stand-up cadence whether or not a desktop app polls, and a forgotten timer still closes itself. |
 | `POST /desktop/reminders/action` | `{ action: "break", minutes? }` stops the timer and every running session (there is no paused state) and queues the "break over" reminder after `minutes` (default the break length); the answer lists the stopped sessions as `paused` so the app can offer to resume. `{ action: "snooze", minutes? }` asks again in `minutes` (default 10); the timer keeps running. |
+| `POST /devices/live-activity` | Pro. The iPhone's Live Activity tokens: `{ token, start_token?, activity_token?, ended? }`. `token` is the device's FCM token (registered with `add_device`, else 404); `start_token` is ActivityKit's push-to-start token, `activity_token` the push token of the activity it shows now (hex; `null` clears either). A new `activity_token` gets the current state at once. `ended: true` with an `activity_token` says that activity is gone; swiped away while the timer runs, it is not started again until the timer stops. |
 | `GET /account/agents` | `{ agents: [{ client_id, name, connected_at, last_active_at, current }], speak }`. |
 | `DELETE /account/agents/:clientId` | Disconnects one agent (deletes its sign-in for this account). 404 when no such agent is connected. |
 | `GET /account/export` | Everything the server keeps about the person, as one JSON download: `{ format: "aimyear-export", version, exported_at, uid, account, data: { "aim/goal": …, "sessions/<id>": … }, server_rows, agents }`. Saved WIP and Bluesky logins are left out. |

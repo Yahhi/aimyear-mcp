@@ -435,7 +435,7 @@ export class AimService {
       timezone: prof.timezone, workplace: prof.defaultWorkplace, ...p, post_to: prof.postTo ?? null,
       tracking: prof.tracking ?? 'time', weekly_target: prof.weeklyTarget ?? DEFAULT_WEEKLY_TARGET,
       weekly_review_email: prof.weeklyReviewEmail ?? true,
-      speak: `Timezone ${prof.timezone}. Reminders go to ${prof.defaultWorkplace}. Stand-up every ${p.workMin} min${p.standup ? '' : ' (stand-up reminders off)'}, ${p.breakMin} min break, a ${p.longBreakMin} min break every ${p.longBreakEvery} blocks.${prof.postTo ? ` Progress posts go to: ${prof.postTo.join(', ') || 'no network'}.` : ''} ${TRACKING_TEXT[prof.tracking ?? 'time']} Weekly target: ${prof.weeklyTarget ?? DEFAULT_WEEKLY_TARGET} day(s) toward the aim. Weekly review email on Sunday evening (Pro): ${prof.weeklyReviewEmail === false ? 'off' : 'on'}.`,
+      speak: `Timezone ${prof.timezone}. Reminders go to every registered device (default workplace ${prof.defaultWorkplace}). Stand-up every ${p.workMin} min${p.standup ? '' : ' (stand-up reminders off)'}, ${p.breakMin} min break, a ${p.longBreakMin} min break every ${p.longBreakEvery} blocks.${prof.postTo ? ` Progress posts go to: ${prof.postTo.join(', ') || 'no network'}.` : ''} ${TRACKING_TEXT[prof.tracking ?? 'time']} Weekly target: ${prof.weeklyTarget ?? DEFAULT_WEEKLY_TARGET} day(s) toward the aim. Weekly review email on Sunday evening (Pro): ${prof.weeklyReviewEmail === false ? 'off' : 'on'}.`,
     };
   }
   async getSettings() { return this.settingsView(await this.profile()); }
@@ -1007,9 +1007,10 @@ export class AimService {
     };
     const started = async () => {
       const running = await this.runningView(session);
+      // Reminders go to every device (docs/notifications.md): pushes to the phones, the desktop inbox for the desktop apps.
       const devices = await this.store.getDevices();
-      const reachable = devices.filter(d => (workplace === 'desktop' ? ['macos', 'windows', 'web'] : ['ios', 'android']).includes(d.platform));
-      const notifyVia = joined ? 'the reminder already set for this block' : devices.length ? `push to ${(reachable.length ? reachable : devices).map(d => d.platform).join(', ')}` : 'no registered device: local hook only';
+      const phones = [...new Set(devices.filter(d => d.platform === 'ios' || d.platform === 'android').map(d => d.platform))];
+      const notifyVia = joined ? 'the reminder already set for this block' : devices.length ? [phones.length ? `push to ${phones.join(', ')}` : '', 'the desktop apps'].filter(Boolean).join(' and ') : 'no registered device: local hook only';
       return {
         verdict: verdict.verdict, message: verdict.message, note: verdict.note, classification: cls.classification, matched_by: cls.matchedBy, unclassified: cls.unclassified,
         session: { id: session.id, task: session.task, area, lever_id: session.leverId, project_id: session.projectId, step_id: session.stepId, item_id: session.itemId, weight: session.weight, agent: session.agent ?? null },

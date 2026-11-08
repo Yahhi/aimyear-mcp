@@ -268,6 +268,19 @@ export interface Device {
   lastSeen: string;
   foregroundAt?: string;
   label?: string;
+  /**
+   * iPhone, iOS 17.2+: ActivityKit's push-to-start token, so the server can start the
+   * running-timer Live Activity while the app is closed (docs/notifications.md). src/live.ts.
+   */
+  liveStartToken?: string | null;
+  /** The push token of the Live Activity showing on this iPhone now; updates and ends it. */
+  liveToken?: string | null;
+  /**
+   * When the server last started the Live Activity by push. One start per timer run: set
+   * until no session runs, so a phone that never reported the new activity's token does
+   * not get a second activity for the same timer.
+   */
+  liveStartedAt?: string | null;
 }
 
 /** A reminder the server owes a user at a point in time. Polled by /tick. */
@@ -291,6 +304,13 @@ export interface Pending {
   /** post_offer: the local day the post is about. weekly_review: the Monday of the week it reviews. */
   date?: string;
 }
+
+/**
+ * The timer's own reminders (stand-up, stop, break over): what every device gets, and the
+ * only kinds a desktop app's poll may claim. The evening post offer and the weekly review
+ * email are sent by /tick alone.
+ */
+export const TIMER_REMINDERS: readonly Pending['kind'][] = ['block_end', 'break_end', 'standup'];
 
 /**
  * One week's review email, at users/{uid}/weekly_reviews/{monday}. Claimed in a

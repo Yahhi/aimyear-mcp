@@ -74,6 +74,7 @@ export const ROUTES: Record<string, Entry> = {
   'POST /tick/:token': admin('scheduler: delivers due reminders for everyone'),
   'POST /desktop/reminders': auth('a desktop app takes the person\'s due reminders (Bearer token)'),
   'POST /desktop/reminders/action': auth('Break or Snooze on the person\'s stand-up reminder (Bearer token)'),
+  'POST /devices/live-activity': auth('the person\'s iPhone reports its Live Activity tokens for the running timer (Bearer token, Pro)'),
   'POST /account/open-day': auth('completes the person\'s today before the app reads it: routines in the plan, Pro status mirrored (Bearer token)'),
   'GET /account/agents': auth('the agents connected to the person\'s account (Bearer token)'),
   'DELETE /account/agents/:clientId': auth('disconnects one of the person\'s agents (Bearer token)'),

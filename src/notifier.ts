@@ -1,20 +1,37 @@
-import { getMessaging, type BaseMessage } from 'firebase-admin/messaging';
+import { getMessaging, type BaseMessage, type MulticastMessage, type BatchResponse } from 'firebase-admin/messaging';
 import { Notifications, Store } from './store.js';
+import { syncLive } from './live.js';
 import { localDate } from './dates.js';
 import { AimService } from './service.js';
 import { SocialService } from './social/service.js';
-import type { Device, DesktopReminder, Pending, Workplace } from './types.js';
+import type { Device, DesktopReminder, Pending } from './types.js';
 import { deliverWeeklyReview, type ReviewDeps } from './review/deliver.js';
 
-const DESKTOP: Device['platform'][] = ['macos', 'windows', 'web'];
-const MOBILE: Device['platform'][] = ['ios', 'android'];
+const PHONES: Device['platform'][] = ['ios', 'android'];
 
-/** Devices that match the workplace the block belongs to; falls back to every device. */
-export function pickDevices(devices: Device[], workplace: Workplace): Device[] {
-  const want = workplace === 'desktop' ? DESKTOP : MOBILE;
-  const matched = devices.filter(d => want.includes(d.platform));
-  return matched.length ? matched : devices;
+/**
+ * Every device gets every reminder, whichever device or agent started the timer
+ * (docs/notifications.md, 2026-11-07; before, only the block's workplace did).
+ * The phones get a push. The desktop apps (macOS, Windows) get the stand-ups from the
+ * desktop inbox they pull, with Break and Snooze, so the Mac is not pushed those too
+ * (it would show each one twice). The evening post offer is not in the inbox, so it is
+ * pushed to every device, the Mac included.
+ */
+export function pushTargets(devices: Device[], kind: Pending['kind']): Device[] {
+  if (kind === 'post_offer') return devices;
+  return devices.filter(d => PHONES.includes(d.platform));
 }
+
+/** FCM's multicast send; tests pass a fake. */
+export type Multicast = (m: MulticastMessage) => Promise<BatchResponse>;
+const realMulticast: Multicast = m => getMessaging().sendEachForMulticast(m);
+
+/**
+ * What a delivery reaches outside the reminder store: FCM, the Live Activity of a user's
+ * phones, and the weekly review email (SES; without it a due review is not sent).
+ */
+export interface Deps { multicast?: Multicast; liveFor?: (uid: string) => Promise<unknown>; reviews?: () => ReviewDeps }
+const realLiveFor = (uid: string) => syncLive(new Store(uid));
 
 export function textFor(p: Pending, mainStep: { title: string; done: boolean } | null): { title: string; body: string } {
   if (p.kind === 'standup') {
@@ -41,8 +58,9 @@ export type SocialFor = (uid: string) => Pick<SocialService, 'eveningOffer' | 'a
 const realSocialFor: SocialFor = uid => { const store = new Store(uid); return new SocialService(store, new AimService(store, 'tick', 'mobile')); };
 
 /** Pushes one message to the given devices and drops tokens that are gone. */
-async function push(uid: string, targets: Device[], message: BaseMessage, notif: Notifications) {
-  const res = await getMessaging().sendEachForMulticast({ tokens: targets.map(d => d.token), ...message });
+async function push(uid: string, targets: Device[], message: BaseMessage, notif: Notifications, multicast: Multicast = realMulticast) {
+  if (!targets.length) return { sent: 0, failed: 0, reason: 'no device to push to' };
+  const res = await multicast({ tokens: targets.map(d => d.token), ...message });
   await Promise.all(res.responses.map(async (r, i) => {
     const code = (r.error as { code?: string } | undefined)?.code ?? '';
     if (!r.success && /registration-token-not-registered|invalid-argument/.test(code)) await notif.dropDevice(uid, targets[i].token);
@@ -55,24 +73,25 @@ async function push(uid: string, targets: Device[], message: BaseMessage, notif:
  * The tap calls POST /social/post with data.date and data.text; nothing is posted here.
  * Pro, and only for networks where the user has not posted that day.
  */
-export async function deliverPostOffer(p: Pending, notif: Notifications, socialFor: SocialFor = realSocialFor): Promise<{ sent: number; failed: number; reason?: string }> {
+export async function deliverPostOffer(p: Pending, notif: Notifications, socialFor: SocialFor = realSocialFor, multicast?: Multicast): Promise<{ sent: number; failed: number; reason?: string }> {
   const offer = await socialFor(p.uid).eveningOffer(p.date ?? '');
   if (!offer.send) return { sent: 0, failed: 0, reason: offer.reason };
   const devices = await notif.devicesOf(p.uid);
   if (!devices.length) return { sent: 0, failed: 0, reason: 'no registered devices' };
-  return push(p.uid, pickDevices(devices, 'mobile'), {
+  return push(p.uid, pushTargets(devices, p.kind), {
     notification: { title: offer.title, body: offer.body },
     data: offer.data,
     apns: { payload: { aps: { sound: 'default', category: 'AIMYEAR_POST_OFFER', 'interruption-level': 'active' } } },
     android: { priority: 'normal', notification: { channelId: 'aimyear_posts', clickAction: 'AIMYEAR_POST_OFFER' } },
-  }, notif);
+  }, notif, multicast);
 }
 
-/** Sends one reminder. Returns how many devices accepted it. */
-export async function deliver(p: Pending, notif: Notifications): Promise<{ sent: number; failed: number; reason?: string }> {
+/** Pushes one reminder to the phones. Returns how many devices accepted it. */
+export async function deliver(p: Pending, notif: Notifications, multicast?: Multicast): Promise<{ sent: number; failed: number; reason?: string }> {
   const devices = await notif.devicesOf(p.uid);
   if (!devices.length) return { sent: 0, failed: 0, reason: 'no registered devices' };
-  const targets = pickDevices(devices, p.workplace);
+  const targets = pushTargets(devices, p.kind);
+  if (!targets.length) return { sent: 0, failed: 0, reason: 'no phone registered' };
   const profile = await notif.profileOf(p.uid);
   const tz = profile?.timezone ?? 'UTC';
   const mainStep = await notif.mainStepOf(p.uid, localDate(new Date(p.dueAt), tz));
@@ -84,7 +103,7 @@ export async function deliver(p: Pending, notif: Notifications): Promise<{ sent:
     data: { kind: p.kind, blockId: p.blockId },
     apns: { payload: { aps: { sound: 'default', 'interruption-level': p.kind === 'block_end' ? 'time-sensitive' : 'active' } } },
     android: { priority: 'high', notification: { channelId: 'aimyear_timer', sound: 'default' } },
-  }, notif);
+  }, notif, multicast);
 }
 
 /**
@@ -109,30 +128,39 @@ export function desktopReminder(p: Pending, mainStep: { title: string; done: boo
 }
 
 /**
- * A claimed desktop reminder: put it where the desktop app pulls from (unless it is too
- * old to say), then keep the stand-up cadence going on the same block. The cadence never
- * depends on a desktop app polling: with no app open, the timer still gets its stand-ups
- * and a forgotten one still closes itself.
+ * A claimed stand-up, stop or break-over reminder, to every device: pushed to the phones,
+ * and put where the desktop apps pull from (unless it is too old to say). Then the
+ * stand-up cadence goes on on the same block. The cadence never depends on a desktop app
+ * polling: with no app open, the timer still gets its stand-ups and a forgotten one still
+ * closes itself (and its Live Activity ends).
  */
-export async function produceDesktop(p: Pending, notif: Notifications, now = new Date()): Promise<{ reminder?: DesktopReminder; continued?: string }> {
+export async function fanOut(p: Pending, notif: Notifications, now = new Date(), deps: Deps = {}): Promise<{ sent: number; failed: number; reason?: string; reminder?: DesktopReminder; continued?: string }> {
+  let r: { sent: number; failed: number; reason?: string };
+  try { r = await deliver(p, notif, deps.multicast); } catch (e) { r = { sent: 0, failed: 0, reason: (e as Error).message }; }
   let reminder: DesktopReminder | undefined;
-  if (Date.parse(p.dueAt) >= now.getTime() - DESKTOP_STALE_MS) {
-    const tz = (await notif.profileOf(p.uid))?.timezone ?? 'UTC';
-    reminder = desktopReminder(p, await notif.mainStepOf(p.uid, localDate(new Date(p.dueAt), tz)), now);
-    await notif.saveDesktopReminder(reminder);
-  }
+  try {
+    if (Date.parse(p.dueAt) >= now.getTime() - DESKTOP_STALE_MS) {
+      const tz = (await notif.profileOf(p.uid))?.timezone ?? 'UTC';
+      reminder = desktopReminder(p, await notif.mainStepOf(p.uid, localDate(new Date(p.dueAt), tz)), now);
+      await notif.saveDesktopReminder(reminder);
+    }
+  } catch (e) { console.error('[remind] desktop inbox failed', (e as Error).message); }
   let continued: string | undefined;
-  try { continued = await queueNextStandup(p, notif); } catch (e) { console.error('[desktop] standup re-arm failed', e); }
-  return { reminder, continued };
+  try { continued = await queueNextStandup(p, notif); } catch (e) { console.error('[remind] standup re-arm failed', e); }
+  // The last stand-up closed a forgotten timer: the phone's Live Activity ends with it.
+  if (p.kind === 'standup' && p.final) await (deps.liveFor ?? realLiveFor)(p.uid).catch(e => console.error('[remind] live end failed', (e as Error).message));
+  const reason = [r.reason, reminder ? 'desktop inbox' : 'desktop, too old to say'].filter(Boolean).join('; ');
+  return { sent: r.sent, failed: r.failed, reason, reminder, continued };
 }
 
 /**
  * What a desktop app gets when it polls: its due reminders (claimed here if /tick has not
- * reached them yet) and everything /tick already produced for it, each handed out once.
+ * reached them yet, and then pushed to the phones too) and everything /tick already
+ * produced for it, each handed out once.
  */
-export async function pullDesktop(uid: string, notif: Notifications, now = new Date()) {
+export async function pullDesktop(uid: string, notif: Notifications, now = new Date(), deps: Deps = {}) {
   let continued: string | undefined;
-  for (const p of await notif.claimDesktop(uid, now.toISOString())) continued = (await produceDesktop(p, notif, now)).continued ?? continued;
+  for (const p of await notif.claimDesktop(uid, now.toISOString())) continued = (await fanOut(p, notif, now, deps)).continued ?? continued;
   const reminders = (await notif.takeDesktopReminders(uid))
     .filter(r => Date.parse(r.dueAt) >= now.getTime() - DESKTOP_STALE_MS)
     .sort((a, b) => a.dueAt.localeCompare(b.dueAt));
@@ -140,13 +168,13 @@ export async function pullDesktop(uid: string, notif: Notifications, now = new D
 }
 
 /**
- * One poll: claim each due reminder, deliver it, and re-arm the next stand-up. The
- * claim (a transactional delete) comes before the push: two overlapping ticks both see
- * a reminder due, but only the one that claims it pushes and re-arms; the other skips.
- * Desktop reminders are not pushed: they go to the desktop inbox that the desktop app
- * pulls (POST /desktop/reminders), and their stand-up cadence is kept here too.
+ * One poll: claim each due reminder, deliver it to every device, and re-arm the next
+ * stand-up. The claim (a transactional delete) comes before the push: two overlapping
+ * ticks both see a reminder due, but only the one that claims it pushes and re-arms; the
+ * other skips. Whatever the block's workplace, the phones get a push and the desktop
+ * apps find it in the desktop inbox they pull (POST /desktop/reminders).
  */
-export async function tick(notif: Notifications, now = new Date(), socialFor: SocialFor = realSocialFor, reviews?: () => ReviewDeps) {
+export async function tick(notif: Notifications, now = new Date(), socialFor: SocialFor = realSocialFor, deps: Deps = {}) {
   const due = await notif.due(now.toISOString());
   // Without a desktop app polling, its reminders would pile up: drop the ones too old to say.
   try { await notif.dropStaleDesktopReminders(new Date(now.getTime() - DESKTOP_STALE_MS).toISOString()); } catch (e) { console.error('[tick] desktop sweep failed', (e as Error).message); }
@@ -157,31 +185,23 @@ export async function tick(notif: Notifications, now = new Date(), socialFor: So
       // The weekly review email (src/review/deliver.ts): Sunday 19:00 local, Pro, once a week.
       let r: { sent: number; failed: number; reason?: string; continued?: string };
       try {
-        if (!reviews) throw new Error('weekly review email is not set up on this server');
-        r = await deliverWeeklyReview(p, reviews(), now);
+        if (!deps.reviews) throw new Error('weekly review email is not set up on this server');
+        r = await deliverWeeklyReview(p, deps.reviews(), now);
       } catch (e) { console.error('[tick] weekly review failed', (e as Error).message); r = { sent: 0, failed: 0, reason: (e as Error).message }; }
       results.push({ id: p.id, kind: p.kind, ...r });
       continue;
     }
-    if (p.workplace === 'desktop' && p.kind !== 'post_offer') {
-      const r = await produceDesktop(p, notif, now).catch(e => { console.error('[tick] desktop reminder failed', (e as Error).message); return { reminder: undefined, continued: undefined }; });
-      results.push({ id: p.id, kind: p.kind, sent: 0, failed: 0, reason: r.reminder ? 'desktop inbox' : 'desktop, too old to say', continued: r.continued });
-      continue;
-    }
     if (p.kind === 'post_offer') {
       let r: { sent: number; failed: number; reason?: string };
-      try { r = await deliverPostOffer(p, notif, socialFor); } catch (e) { r = { sent: 0, failed: 0, reason: (e as Error).message }; }
+      try { r = await deliverPostOffer(p, notif, socialFor, deps.multicast); } catch (e) { r = { sent: 0, failed: 0, reason: (e as Error).message }; }
       // One offer a day: queue the next evening's, whatever happened to this one.
       let continued: string | undefined;
       try { continued = (await socialFor(p.uid).armOffer())?.due_at; } catch (e) { console.error('[tick] post offer re-arm failed', (e as Error).message); }
       results.push({ id: p.id, kind: p.kind, ...r, continued });
       continue;
     }
-    let r: { sent: number; failed: number; reason?: string };
-    try { r = await deliver(p, notif); } catch (e) { r = { sent: 0, failed: 0, reason: (e as Error).message }; }
-    let continued: string | undefined;
-    try { continued = await queueNextStandup(p, notif); } catch (e) { console.error('[tick] standup re-arm failed', e); }
-    results.push({ id: p.id, kind: p.kind, ...r, continued });
+    const r = await fanOut(p, notif, now, deps);
+    results.push({ id: p.id, kind: p.kind, sent: r.sent, failed: r.failed, reason: r.reason, continued: r.continued });
   }
   return { processed: results.length, results };
 }

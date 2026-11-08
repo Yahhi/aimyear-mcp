@@ -14,7 +14,7 @@ import { gatherReview, renderReview, MOVED_CAP } from '../src/review/build.js';
 import { composeReview, deliverWeeklyReview, type EmailMessage, type ReviewDeps } from '../src/review/deliver.js';
 import { nextReviewDue, reviewPendingId, reviewWindow } from '../src/review/schedule.js';
 import { unsubscribeKey, unsubscribeToken, unsubscribeUrl, verifyUnsubscribeToken } from '../src/review/unsubscribe.js';
-import { tick } from '../src/notifier.js';
+import { pullDesktop, tick } from '../src/notifier.js';
 import { createApp } from '../src/http.js';
 import { FirestoreOAuthProvider } from '../src/oauth.js';
 import { AIM, freshStore, seedGoodWeek, seedQuietWeek } from './review-fixtures.js';
@@ -169,7 +169,7 @@ test('Sunday 19:00 local: a Pro user gets one email with one-click unsubscribe h
   const { store, deps, sent, pending } = deliverySetup();
   const notif = new FakeNotifications();
   notif.pending.set(pending('2026-11-08T18:00:00.000Z').id, pending('2026-11-08T18:00:00.000Z'));
-  const r1 = await tick(notif as any, SUNDAY_19, undefined, () => deps);
+  const r1 = await tick(notif as any, SUNDAY_19, undefined, { reviews: () => deps });
   assert.equal(r1.processed, 1);
   assert.equal(r1.results[0].sent, 1);
   assert.equal(sent.length, 1);
@@ -186,12 +186,23 @@ test('Sunday 19:00 local: a Pro user gets one email with one-click unsubscribe h
 
   // A retry of the same tick, or the pending put back by an overlapping arm: nothing is sent again.
   notif.pending.set(pending('2026-11-08T18:00:00.000Z').id, pending('2026-11-08T18:00:00.000Z'));
-  const r2 = await tick(notif as any, new Date('2026-11-08T18:05:00Z'), undefined, () => deps);
+  const r2 = await tick(notif as any, new Date('2026-11-08T18:05:00Z'), undefined, { reviews: () => deps });
   assert.equal(r2.results[0].sent, 0);
   assert.match(r2.results[0].reason!, /already sent/);
   assert.equal(sent.length, 1);
   // A tick with nothing due does nothing at all.
-  assert.equal((await tick(notif as any, new Date('2026-11-08T18:06:00Z'), undefined, () => deps)).processed, 0);
+  assert.equal((await tick(notif as any, new Date('2026-11-08T18:06:00Z'), undefined, { reviews: () => deps })).processed, 0);
+});
+
+test('a desktop app polling its reminders never takes the weekly review: /tick sends it', async () => {
+  const { deps, sent, pending } = deliverySetup();
+  const notif = new FakeNotifications();
+  notif.pending.set(pending('2026-11-08T18:00:00.000Z').id, pending('2026-11-08T18:00:00.000Z'));
+  const pulled = await pullDesktop('fake', notif as any, SUNDAY_19, { multicast: async () => { throw new Error('nothing is pushed'); } });
+  assert.equal(pulled.reminders.length, 0);
+  assert.ok(notif.pending.has(reviewPendingId('fake')), 'still queued for /tick');
+  assert.equal((await tick(notif as any, SUNDAY_19, undefined, { reviews: () => deps })).results[0].sent, 1);
+  assert.equal(sent.length, 1);
 });
 
 test('only Sunday from 19:00 local: earlier is re-queued for 19:00, a Monday tick sends nothing and waits for the next Sunday', async () => {

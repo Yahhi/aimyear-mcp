@@ -78,13 +78,24 @@ function wrap(name: string, fn: Handler, signedIn: boolean) {
   };
 }
 
-/** svc is null for an anonymous caller: the tools are listed, and every call is refused. */
-export function registerTools(server: McpServer, maybeSvc: AimService | null, maybeSocial: SocialService | null = null, maybeAccount: AccountService | null = null) {
+/** Tools that start, stop or change a running session: the phone's Live Activity follows them (src/live.ts). */
+export const TIMER_TOOLS = ['start_session', 'stop_session', 'stop_timer', 'delete_session', 'edit_session'];
+
+/**
+ * svc is null for an anonymous caller: the tools are listed, and every call is refused.
+ * onTimer runs after each timer tool that succeeded (the Live Activity sync); it never fails the call.
+ */
+export function registerTools(server: McpServer, maybeSvc: AimService | null, maybeSocial: SocialService | null = null, maybeAccount: AccountService | null = null, onTimer?: () => Promise<unknown>) {
   const svc = maybeSvc as AimService;
   const social = maybeSocial as SocialService;
   const account = maybeAccount as AccountService;
+  const after = (name: string, fn: Handler): Handler => !onTimer || !TIMER_TOOLS.includes(name) ? fn : async args => {
+    const result = await fn(args);
+    await onTimer().catch(e => console.error(`[live] after ${name}`, (e as Error).message));
+    return result;
+  };
   const t = (name: string, description: string, shape: Record<string, z.ZodTypeAny>, fn: Handler) =>
-    server.registerTool(name, { title: title(name), description, inputSchema: shape, annotations: annotationsFor(name) }, wrap(name, fn, maybeSvc !== null));
+    server.registerTool(name, { title: title(name), description, inputSchema: shape, annotations: annotationsFor(name) }, wrap(name, after(name, fn), maybeSvc !== null));
 
   const outcome = z.enum(['done', 'partial', 'abandoned']);
   const network = z.enum(NETWORKS);
@@ -211,8 +222,8 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
   t('find_leaks', 'Where time leaks: comfortable goal work while the main step waited, overrides, unplanned work, gaps, switching, missed main steps, days without a plan. Default the last 7 days.', { from: date.optional(), to: date.optional() }, a => svc.leaks(a.from, a.to));
 
   // ---- settings & devices ----
-  t('get_settings', 'Timezone, where reminders go (desktop or mobile), timer settings, which networks get progress posts (post_to), tracking (time, moves or quiet), the weekly target and the weekly review email (weekly_review_email).', {}, () => svc.getSettings());
-  t('set_settings', 'Change any of: timezone (IANA name, e.g. Europe/Madrid; it sets where each day starts and ends), workplace for reminders, stand-up interval workMin, breakMin, longBreakEvery, longBreakMin, standup on/off, post_to (networks for progress posts), tracking (time, moves or quiet), weekly_target (days a week toward the aim) and weekly_review_email (on/off).', {
+  t('get_settings', 'Timezone, the default workplace (desktop or mobile; reminders go to every registered device either way), timer settings, which networks get progress posts (post_to), tracking (time, moves or quiet), the weekly target and the weekly review email (weekly_review_email).', {}, () => svc.getSettings());
+  t('set_settings', 'Change any of: timezone (IANA name, e.g. Europe/Madrid; it sets where each day starts and ends), workplace (the default for sessions; reminders go to every device), stand-up interval workMin, breakMin, longBreakEvery, longBreakMin, standup on/off, post_to (networks for progress posts), tracking (time, moves or quiet), weekly_target (days a week toward the aim) and weekly_review_email (on/off).', {
     timezone: z.string().optional(), workplace: z.enum(['desktop', 'mobile']).optional(), workMin: z.number().int().min(5).max(120).optional(), breakMin: z.number().int().min(1).max(60).optional(), longBreakEvery: z.number().int().min(1).max(10).optional(), longBreakMin: z.number().int().min(5).max(60).optional(), standup: z.boolean().optional(),
     post_to: z.array(network).optional().describe('which connected networks get the day\'s progress post (the app sets it); [] for none'),
     tracking: z.enum(TRACKINGS).optional().describe('time (default): sessions with minutes, plus moves. moves: no timer and no minutes stored, only moves. quiet: the record is kept, but reviews and posts speak in words and days, never minutes or percentages'),

@@ -20,6 +20,7 @@ import { registerTools, INSTRUCTIONS } from './tools.js';
 import { getAuth } from 'firebase-admin/auth';
 import { timingSafeEqual, createHash } from 'node:crypto';
 import { tick, pullDesktop } from './notifier.js';
+import { reportLive, syncLive, type SendLive } from './live.js';
 import { isPublicBody } from './access.js';
 import { FirestoreOAuthProvider, SCOPE } from './oauth.js';
 import { instrument, logRefused, type CallContext } from './calllog.js';
@@ -34,14 +35,14 @@ import { realReviewDeps, type ReviewDeps } from './review/deliver.js';
 import { unsubscribeKey, unsubscribePage, verifyUnsubscribeToken } from './review/unsubscribe.js';
 
 /** Who is calling, for the record: the agent's name on sessions, and the OAuth client id. */
-export interface Caller { agent?: () => Promise<string | undefined>; clientId?: string; accountBackend?: AccountBackend; storeFor?: (uid: string) => Store }
+export interface Caller { agent?: () => Promise<string | undefined>; clientId?: string; accountBackend?: AccountBackend; storeFor?: (uid: string) => Store; sendLive?: SendLive }
 
 export function buildServer(uid: string | null, clientSessionId: string, workplace: Workplace, socialDeps?: SocialDeps, caller: Caller = {}) {
   const server = new McpServer({ name: 'aimyear', version: VERSION }, { instructions: INSTRUCTIONS });
   if (!uid) { registerTools(server, null, null, null); return server; }
   const store = caller.storeFor ? caller.storeFor(uid) : new Store(uid);
   const svc = new AimService(store, clientSessionId, workplace, caller.agent);
-  registerTools(server, svc, new SocialService(store, svc, socialDeps), new AccountService(caller.accountBackend ?? firestoreAccountBackend(), uid, caller.clientId));
+  registerTools(server, svc, new SocialService(store, svc, socialDeps), new AccountService(caller.accountBackend ?? firestoreAccountBackend(), uid, caller.clientId), () => syncLive(store, { send: caller.sendLive }));
   return server;
 }
 
@@ -89,9 +90,11 @@ export interface AppOptions {
   reviews?: () => ReviewDeps;
   /** The unsubscribe link's HMAC key; tests pass their own, production reads it from the env. */
   unsubscribeKey?: Buffer | null;
+  /** Tests capture the Live Activity pushes; production sends them through FCM. */
+  sendLive?: SendLive;
 }
 
-export function createApp({ tokens, baseUrl, provider, extraOrigins = [], socialDeps, verifyIdToken = realVerify, accountBackend, pro, notifications = () => new Notifications(), webhookAuth = process.env.REVENUECAT_WEBHOOK_AUTH, storeFor = (uid: string) => new Store(uid), reviews, unsubscribeKey: unsubKey = unsubscribeKey() }: AppOptions) {
+export function createApp({ tokens, baseUrl, provider, extraOrigins = [], socialDeps, verifyIdToken = realVerify, accountBackend, pro, notifications = () => new Notifications(), webhookAuth = process.env.REVENUECAT_WEBHOOK_AUTH, storeFor = (uid: string) => new Store(uid), reviews, unsubscribeKey: unsubKey = unsubscribeKey(), sendLive }: AppOptions) {
   const accounts = () => accountBackend ?? firestoreAccountBackend();
   let realReviews: ReviewDeps | null = null;
   const reviewDeps = reviews ?? (() => (realReviews ??= realReviewDeps(baseUrl)));
@@ -151,7 +154,7 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
   app.post('/tick/:token', async (req, res) => {
     if (!tokens.has(String(req.params.token))) { res.status(401).json({ error: 'unauthorized' }); return; }
     try {
-      const result = await tick(notifications(), new Date(), undefined, reviewDeps);
+      const result = await tick(notifications(), new Date(), undefined, { reviews: reviewDeps });
       if (result.processed) console.error('[tick]', JSON.stringify(result));
       res.json(result);
     } catch (e) { console.error('[tick] failed', e); res.status(500).json({ error: (e as Error).message }); }
@@ -220,7 +223,7 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
     }
     const workplace = (req.header('x-aimyear-workplace') as Workplace) ?? 'mobile';
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    const server = buildServer(signedIn?.uid ?? null, signedIn ? `remote:${signedIn.client}` : 'anonymous', workplace, socialDeps, signedIn ? { agent: signedIn.agent, clientId: signedIn.clientId, accountBackend: accounts(), storeFor } : {});
+    const server = buildServer(signedIn?.uid ?? null, signedIn ? `remote:${signedIn.client}` : 'anonymous', workplace, socialDeps, signedIn ? { agent: signedIn.agent, clientId: signedIn.clientId, accountBackend: accounts(), storeFor, sendLive } : {});
     instrument(transport, req.body, ctx);
     res.on('close', () => { transport.close().catch(() => {}); server.close().catch(() => {}); });
     await server.connect(transport);
@@ -277,7 +280,8 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
   // A desktop app (macOS, Windows) polls this about every minute. Each reminder comes once.
   // pricing.md: reminders are Pro. A Free desktop app gets a refusal it can show as the paywall.
   const REMINDERS_PRO = 'Stand-up reminders are part of AimYear Pro. Get Pro on aimyear.com or in the app.';
-  const requirePro = async (uid: string) => { if (!(await (pro ?? realPro()).isPro(uid))) throw new ProRequiredError(REMINDERS_PRO); };
+  const LIVE_PRO = 'The running timer on the Lock Screen is part of AimYear Pro. Get Pro on aimyear.com or in the app.';
+  const requirePro = async (uid: string, why = REMINDERS_PRO) => { if (!(await (pro ?? realPro()).isPro(uid))) throw new ProRequiredError(why); };
   app.post('/desktop/reminders', signed(async (_req, res, who) => {
     await requirePro(who.uid);
     const { reminders } = await pullDesktop(who.uid, notifications());
@@ -292,9 +296,27 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
     const b = (req.body ?? {}) as { action?: unknown; minutes?: unknown };
     const minutes = typeof b.minutes === 'number' && Number.isFinite(b.minutes) ? b.minutes : undefined;
     const svc = svcFor(who, req, 'reminder');
-    if (b.action === 'break') { res.json(await svc.takeBreak(minutes)); return; }
+    if (b.action === 'break') { const r = await svc.takeBreak(minutes); await syncLive(storeFor(who.uid), { send: sendLive }); res.json(r); return; }
     if (b.action === 'snooze') { res.json(await svc.snoozeStandup(minutes)); return; }
     throw new AimError('action must be "break" or "snooze"');
+  }));
+
+  // ---- the running timer on the iPhone: a Live Activity (src/live.ts, docs/notifications.md) ----
+  // The app reports its tokens here, Pro only like the rest of notifications. Body:
+  // { token: the device's FCM token (registered with add_device), start_token?: ActivityKit's
+  //   push-to-start token (iOS 17.2+), activity_token?: the push token of the activity it
+  //   shows now, ended?: true when that activity is gone }. null clears a token.
+  app.post('/devices/live-activity', signed(async (req, res, who) => {
+    await requirePro(who.uid, LIVE_PRO);
+    const b = (req.body ?? {}) as { token?: unknown; start_token?: unknown; activity_token?: unknown; ended?: unknown };
+    const tok = (v: unknown, name: string) => {
+      if (v === undefined || v === null) return v as undefined | null;
+      if (typeof v !== 'string' || !/^[0-9a-fA-F]{16,512}$/.test(v)) throw new AimError(`${name} must be the hex token ActivityKit gave the app`);
+      return v;
+    };
+    if (typeof b.token !== 'string' || b.token.length < 20) throw new AimError('token: the device\'s FCM token, as registered with add_device');
+    const r = await reportLive(storeFor(who.uid), b.token, { startToken: tok(b.start_token, 'start_token'), activityToken: tok(b.activity_token, 'activity_token'), ended: b.ended === true }, sendLive);
+    res.status(r.ok ? 200 : 404).json(r.ok ? r : { ...r, error: 'Register this device first (add_device), then send its Live Activity tokens.' });
   }));
 
   // ---- the app's day: docs/app-data.md ----
