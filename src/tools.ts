@@ -24,16 +24,16 @@ type Handler = (args: any) => Promise<unknown>;
 type Kind = 'read' | 'write' | 'idempotent' | 'destructive';
 const READ = ['get_goal', 'check_goal_draft', 'get_path', 'next_steps', 'get_commitments', 'get_capacity', 'get_planning_context', 'get_plan', 'get_routines',
   'get_now', 'list_sessions', 'find_gaps', 'summarize_day', 'summarize_week', 'find_leaks', 'get_settings', 'list_devices', 'list_social_accounts', 'get_post_draft', 'list_wip_projects',
-  'get_insights', 'list_agents', 'list_moves'];
+  'get_insights', 'list_agents', 'list_moves', 'list_auto_posts'];
 // Replaces a whole list or removes something: an earlier value is gone after the call.
 const DESTRUCTIVE = ['set_goal', 'set_levers', 'set_projects', 'set_milestones', 'set_tracks', 'set_commitments', 'set_routines', 'set_plan',
-  'delete_step', 'delete_plan_item', 'delete_session', 'delete_move', 'delete_device', 'stop_timer', 'delete_social_account', 'delete_agent'];
+  'delete_step', 'delete_plan_item', 'delete_session', 'delete_move', 'delete_device', 'stop_timer', 'delete_social_account', 'delete_agent', 'delete_auto_post'];
 // Calling twice with the same arguments leaves the same result.
 const IDEMPOTENT = ['record_progress', 'edit_milestone', 'edit_step', 'edit_plan_item', 'set_day_mode', 'split_attention', 'edit_session', 'set_settings', 'add_device',
   // Connecting again replaces the saved login; a day's post goes to each network once, however often it is called.
-  'add_social_account', 'add_post'];
+  'add_social_account', 'add_post', 'edit_auto_post'];
 // Reaches a network outside AimYear (WIP, Bluesky).
-const OPEN_WORLD = ['add_social_account', 'get_post_draft', 'add_post', 'list_wip_projects'];
+const OPEN_WORLD = ['add_social_account', 'get_post_draft', 'add_post', 'list_wip_projects', 'edit_auto_post'];
 export function kindOf(name: string): Kind {
   if (READ.includes(name)) return 'read';
   if (DESTRUCTIVE.includes(name)) return 'destructive';
@@ -56,7 +56,7 @@ export const INSTRUCTIONS = `AimYear keeps one person's big aim for the year, th
 
 Names: get_ reads one thing, list_ reads several, find_ looks for problems, set_ replaces a whole list, add_ / edit_ / delete_ change one entry. A session is one piece of work; the timer runs while sessions run. A move (add_move) is one action toward the aim with no duration, for work that had no timer. The weekly target (days a week toward the aim, set_settings weekly_target) is what AimYear leads with, not a daily streak. When a result has quiet_numbers: true, the user chose not to hear minutes or percentages: speak in words, moves and days only.
 
-Typical flow: get_goal (or check_goal_draft → set_goal), get_path (a path can have up to 3 tracks, set_tracks: different ways to the same aim, each with its own current milestone; the main step can come from any of them), get_planning_context → set_plan with one main step (routines from set_routines are added to each day's plan by the server), start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Hard first: the first step of each stage and each day's main step should be on a hard lever (the work the user puts off: outreach, applications, selling, publishing). Preparation (CV, profile, research, polishing) comes only when it blocks the hard step, and only as much as it blocks; do the hard step with what exists now and improve after the replies. set_plan, add_steps and set_levers warn when this is broken: fix it before moving on. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine. Posting progress in public (WIP, Bluesky; Pro): get_post_draft shows the day's draft from the record; add_post publishes it only when the user explicitly asks, with their edits. get_insights gives the week or month at a glance (aim/other/life minutes, hard share, when hard work happens, comebacks). list_agents shows the agents connected to the account; delete_agent disconnects one, only when the user asks.
+Typical flow: get_goal (or check_goal_draft → set_goal), get_path (a path can have up to 3 tracks, set_tracks: different ways to the same aim, each with its own current milestone; the main step can come from any of them), get_planning_context → set_plan with one main step (routines from set_routines are added to each day's plan by the server), start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Hard first: the first step of each stage and each day's main step should be on a hard lever (the work the user puts off: outreach, applications, selling, publishing). Preparation (CV, profile, research, polishing) comes only when it blocks the hard step, and only as much as it blocks; do the hard step with what exists now and improve after the replies. set_plan, add_steps and set_levers warn when this is broken: fix it before moving on. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine. Posting progress in public (WIP, Bluesky; Pro): get_post_draft shows the day's draft from the record; add_post publishes it only when the user explicitly asks, with their edits. The one automatic post: on a project the user marked public (set_projects public), stop_session with a real summary (or add_move) queues a WIP todo that posts 10 minutes later unless cancelled; list_auto_posts, delete_auto_post (cancel) and edit_auto_post (the user's words, posted at once) handle it. get_insights gives the week or month at a glance (aim/other/life minutes, hard share, when hard work happens, comebacks). list_agents shows the agents connected to the account; delete_agent disconnects one, only when the user asks.
 
 The method behind these tools (setting a countable aim, stages by readiness, hard first, an honest record, a weekly target) is the prompt "aim", also the resource aimyear://skill/aim. If the client has no /aim skill installed, read it before setting an aim or planning.`;
 
@@ -97,6 +97,15 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
   const t = (name: string, description: string, shape: Record<string, z.ZodTypeAny>, fn: Handler) =>
     server.registerTool(name, { title: title(name), description, inputSchema: shape, annotations: annotationsFor(name) }, wrap(name, after(name, fn), maybeSvc !== null));
 
+  /** Work on a project marked public may become an automatic WIP todo: the answer says what happened (docs/public-posting.md). */
+  const withAuto = async <R extends { speak?: string }>(r: R, work: { sessions?: string[]; moves?: string[]; wipText?: string }) => {
+    if (!social || (!work.sessions?.length && !work.moves?.length)) return r;
+    const auto = await social.afterWork(work);
+    if (!auto.length) return r;
+    const said = auto.map(x => x.speak).filter(Boolean).join(' ');
+    return { ...r, auto_posts: auto, speak: said ? `${r.speak ?? ''} ${said}`.trim() : r.speak };
+  };
+  const wipText = z.string().trim().min(1).max(1000).optional().describe('your own WIP todo text for this work, when the summary would not read well on WIP. Used only on a project marked public; still posted 10 minutes later unless the user cancels');
   const outcome = z.enum(['done', 'partial', 'abandoned']);
   const network = z.enum(NETWORKS);
   const opId = z.string().min(8).max(128).optional().describe('for apps replaying queued requests: an id the app minted before its first attempt and reuses on retries, so the write is applied once and a retry gets the first answer back. Do not invent one; an agent calling interactively leaves it out');
@@ -121,8 +130,9 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
   t('set_levers', 'Replace the list of levers: the recurring kinds of goal work. At least one must be kind=hard (the work the user avoids). keywords/repos are hints for classifying sessions from their task text. wip_hashtag only for a lever whose work belongs to one product. Pass existing ids to keep them.', {
     levers: z.array(z.object({ id: z.string().optional(), name: z.string(), kind: z.enum(['hard', 'comfortable']), examples: z.array(z.string()).optional(), keywords: z.array(z.string()).optional(), repos: z.array(z.string()).optional(), wip_hashtag: wipHashtag })),
   }, a => svc.setLevers(a.levers));
-  t('set_projects', 'Replace the list of other projects (paid work, other products, life routines), so their sessions count as other work or life, not goal work. Pass the whole list: leave one out to remove it, change its name or hints to edit it. Pass existing ids to keep them. wip_hashtag ties a project to its WIP project (list_wip_projects shows the user\'s).', {
-    projects: z.array(z.object({ id: z.string().optional(), name: z.string(), area, keywords: z.array(z.string()).optional(), repos: z.array(z.string()).optional(), wip_hashtag: wipHashtag })),
+  t('set_projects', 'Replace the list of other projects (paid work, other products, life routines), so their sessions count as other work or life, not goal work. Pass the whole list: leave one out to remove it, change its name or hints to edit it. Pass existing ids to keep them. wip_hashtag ties a project to its WIP project (list_wip_projects shows the user\'s). public: true only when the user says they build this project in public: its sessions with a real summary, and its moves, then go to WIP automatically 10 minutes later unless cancelled (Pro, WIP connected).', {
+    projects: z.array(z.object({ id: z.string().optional(), name: z.string(), area, keywords: z.array(z.string()).optional(), repos: z.array(z.string()).optional(), wip_hashtag: wipHashtag,
+      public: z.boolean().optional().describe('the user builds it in public: its work posts to WIP automatically, with 10 minutes to cancel. Only when the user says so. Leave it out to keep the one on record; default false') })),
   }, a => svc.setProjects(a.projects));
 
   // ---- path ----
@@ -190,11 +200,17 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
   t('split_attention', 'Set attention weights of the running sessions at once, e.g. {"abc": 0.7, "def": 0.3}. Applies to the whole session. For a finished session use edit_session.', { shares: z.record(z.string(), z.number().min(0)) }, a => svc.splitAttention(a.shares));
   t('stop_session', 'Stop a running session with a summary and outcome. Pass session_id from get_now; without it, only this connection\'s single running session is stopped, never another one. The timer keeps running for other sessions. outcome=done completes the linked plan item or path step. Without end_at or op_id it refuses a session that already ended: use edit_session for that. With end_at (apps delivering a stop queued offline) a second stop on the same session is merged, whatever order they arrive in: the earliest end wins, done wins over any other outcome, the first summary stays and a different later one goes to the notes; the answer says applied: ended | shortened | recorded.', {
     summary: z.string(), outcome, session_id: z.string().optional().describe('from get_now; required with op_id or end_at'), attention_share: z.number().min(0).max(1).optional().describe('corrects the share in hindsight'),
-    end_at: iso('when the work ended'), op_id: opId,
-  }, a => svc.stopSession(a.summary, a.outcome, a.session_id, a.attention_share, { opId: a.op_id, endAt: a.end_at }));
+    end_at: iso('when the work ended'), op_id: opId, wip_text: wipText,
+  }, async a => {
+    const r = await svc.stopSession(a.summary, a.outcome, a.session_id, a.attention_share, { opId: a.op_id, endAt: a.end_at });
+    return withAuto(r, { sessions: [r.session.id], wipText: a.wip_text });
+  });
   t('stop_timer', 'Stop the timer ("pause", "stop", "stand up") and every running session with it. There is no paused state: resuming starts a new session. Pass summary and outcome to save them on the sessions it closes, or call stop_session first. Returns the break length.', {
     summary: z.string().optional(), outcome: outcome.optional().describe('default partial'),
-  }, a => svc.stopTimer(a.summary, a.outcome));
+  }, async a => {
+    const r = await svc.stopTimer(a.summary, a.outcome);
+    return withAuto(r, { sessions: r.closed_sessions });
+  });
   t('add_session', 'Add past time that was not timed: minutes (ending now, or at end), or start+end as HH:MM on date. For calls, children, workout, paid work, or work done away from the agent, or a calendar event that happened (pass its calendar_event_id: the same event is never logged twice). Apps replaying a queued entry pass op_id, so a retry does not count the time twice.', {
     task: z.string(), minutes: z.number().int().min(1).optional(), start: hhmm.optional(), end: hhmm.optional(), date: date.optional(), ...sessionLinks, op_id: opId,
     calendar_event_id: z.string().trim().min(1).max(1024).optional().describe('the id of the calendar event this time comes from, as your calendar connector gives it (for one occurrence of a recurring event, that occurrence\'s id); an event already logged is refused'),
@@ -209,7 +225,11 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
     task: z.string().describe('what changed, e.g. "fixed the signup button text on the landing page"'), date: date.optional().describe('default today; a past day for a move done then'), time: hhmm.optional().describe('when it happened, if known'),
     area: area.optional().describe('default work'), projectId: z.string().optional(), leverId: z.string().optional(), stepId: z.string().optional().describe('path step id'), itemId: z.string().optional().describe('plan item id'),
     completes_item: z.boolean().optional().describe('true: this move finishes the plan item item_id (and its path step)'),
-  }, a => svc.addMove({ ...a, completesItem: a.completes_item }));
+    wip_text: wipText,
+  }, async a => {
+    const r = await svc.addMove({ ...a, completesItem: a.completes_item });
+    return r.ok && r.move ? withAuto(r, { moves: [r.move.id], wipText: a.wip_text }) : r;
+  });
   t('list_moves', 'Moves in a date range (default the last 7 days), with ids, whether each was toward the aim and on the hard part.', { from: date.optional(), to: date.optional() }, a => svc.listMoves(a.from, a.to));
   t('delete_move', 'Delete a move recorded by mistake. Pass move_id from list_moves. A plan item it ticked stays ticked.', { move_id: z.string() }, a => svc.deleteMove(a.move_id));
   t('list_sessions', 'Sessions in a date range (default the last 7 days), with ids, optionally filtered by area or project.', { from: date.optional(), to: date.optional(), area: area.optional(), projectId: z.string().optional() }, a => svc.history(a.from, a.to, a.area, a.projectId));
@@ -253,6 +273,11 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
     date: date.optional(), text: z.string().max(4000).optional(), networks: z.array(network).optional().describe('default: the networks chosen in settings'),
     wip_todos: z.array(z.object({ key: z.string().max(80).optional(), text: z.string().max(4000) })).max(20).optional(),
   }, a => social.post(a));
+  t('list_auto_posts', 'The automatic WIP todos of a day (default today), each from a session or move on a project marked public: queued (post_at, still cancellable), posted (url), cancelled, offered (the summary was short, so the phone offered it with a Post button and nothing went out) or failed. Posts nothing.', { date: date.optional() }, a => social.listAutoPosts(a.date));
+  t('edit_auto_post', 'Change the text of an automatic WIP todo and post it now. Only when the user asked, with their words as they want them on WIP. Also posts an offered, failed or cancelled one when the user says to post it. One todo posts once: a retry never posts twice. Pro.', {
+    id: z.string().min(1).max(64).describe('from list_auto_posts or the stop_session answer'), text: z.string().trim().min(1).max(4000).describe('the todo as it goes to WIP, hashtag included'),
+  }, a => social.editAutoPost(a.id, a.text));
+  t('delete_auto_post', 'Cancel an automatic WIP todo before it posts (the user said not to post it). A todo already on WIP stays there: the answer says so, with its link.', { id: z.string().min(1).max(64).describe('from list_auto_posts or the stop_session answer') }, a => social.cancelAutoPost(a.id));
   t('list_wip_projects', 'The user\'s own WIP (wip.co) projects with their hashtags, read through their saved WIP login, and which AimYear project or lever carries each hashtag; plus the AimYear projects and levers without one. Use it once WIP is connected to attach the hashtags (set_projects / set_levers, wip_hashtag), asking the user only when unsure. Posts nothing. Pro.', {}, () => social.listWipProjects());
 
   // ---- prompts ----

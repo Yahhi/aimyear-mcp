@@ -80,6 +80,9 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `get_post_draft` | auth | drafts a post from the person's private record and reads their own feed |
 | `add_post` | auth | posts on the person's own WIP or Bluesky account, at their explicit request |
 | `list_wip_projects` | auth | reads the person's own WIP projects with their saved WIP login |
+| `list_auto_posts` | auth | reads the person's automatic WIP todos (queued, posted, cancelled) |
+| `edit_auto_post` | auth | changes the person's automatic WIP todo and posts it on their own WIP account, at their request |
+| `delete_auto_post` | auth | cancels the person's automatic WIP todo before it posts |
 
 ## HTTP routes
 
@@ -95,7 +98,10 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `GET /now/:token` | auth | the person's running timer, for the menu bar app |
 | `POST /pull/:token` | auth | claims the person's desktop reminders |
 | `POST /social/post` | auth | the Post action of the evening offer: posts the person's day at their explicit request (Bearer token) |
-| `POST /tick/:token` | admin | scheduler: delivers due reminders for everyone |
+| `GET /social/auto-posts` | auth | the person's automatic WIP todos of a day, for the app (Bearer token) |
+| `POST /social/auto-posts/:id/cancel` | auth | Cancel on the person's automatic WIP todo: it does not post (Bearer token) |
+| `POST /social/auto-posts/:id/edit` | auth | Edit on the person's automatic WIP todo: their text, posted at once on their WIP (Bearer token, Pro) |
+| `POST /tick/:token` | admin | scheduler: delivers due reminders and automatic WIP todos for everyone |
 | `POST /desktop/reminders` | auth | a desktop app takes the person's due reminders (Bearer token) |
 | `POST /desktop/reminders/action` | auth | Break or Snooze on the person's stand-up reminder (Bearer token) |
 | `POST /devices/live-activity` | auth | the person's iPhone reports its Live Activity tokens for the running timer (Bearer token, Pro) |

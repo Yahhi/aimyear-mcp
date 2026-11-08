@@ -1,5 +1,5 @@
 import { DEFAULT_PROFILE, plainOp, type Tx } from '../src/store.js';
-import type { AppliedOp, Block, Commitment, Day, Device, Goal, Mode, Move, Path, Network, Pending, PostRecord, Profile, Routine, Session, SocialAccount, WeeklyReviewRecord } from '../src/types.js';
+import type { AppliedOp, Block, Commitment, Day, Device, Goal, Mode, Move, Path, Network, Pending, PostRecord, Profile, Routine, Session, SocialAccount, WeeklyReviewRecord, AutoPost } from '../src/types.js';
 
 /** The Store's interface kept in memory, so service logic can be tested without Firestore. */
 export class FakeStore {
@@ -19,6 +19,7 @@ export class FakeStore {
   social = new Map<Network, SocialAccount>();
   posts = new Map<string, PostRecord>();
   weeklyReviews = new Map<string, WeeklyReviewRecord>();
+  autoPosts = new Map<string, AutoPost>();
   /** Every write that reached the store (sessions, ops, path), so a test can assert "nothing written". */
   writes = 0;
 
@@ -95,6 +96,18 @@ export class FakeStore {
     return { claimed: true as const };
   }
   async saveWeeklyReview(r: WeeklyReviewRecord) { this.weeklyReviews.set(r.week, structuredClone(r)); }
+  async getAutoPost(id: string) { const a = this.autoPosts.get(id); return a ? structuredClone(a) : null; }
+  async saveAutoPost(a: AutoPost) { this.autoPosts.set(a.id, structuredClone(a)); }
+  async getAutoPostsOn(date: string) { return [...this.autoPosts.values()].filter(a => a.date === date).map(a => structuredClone(a)); }
+  async findAutoPostFor(kind: 'session' | 'move', id: string) { const a = [...this.autoPosts.values()].find(x => (kind === 'session' ? x.sessionIds : x.moveIds).includes(id)); return a ? structuredClone(a) : null; }
+  async updateAutoPost(id: string, fn: (cur: AutoPost) => AutoPost | null) {
+    const cur = this.autoPosts.get(id);
+    if (!cur) return { applied: false, current: null };
+    const next = fn(structuredClone(cur));
+    if (!next) return { applied: false, current: structuredClone(cur) };
+    this.autoPosts.set(id, structuredClone(next));
+    return { applied: true, current: structuredClone(next) };
+  }
   async clearPendings(blockId: string) { for (const [k, p] of this.pendings) if (p.blockId === blockId) this.pendings.delete(k); }
   async saveBlock(b: Block) { this.blocks.set(b.id, structuredClone(b)); }
   async getRunningBlock() { return [...this.blocks.values()].find(b => !b.ended && !b.cancelled) ?? null; }

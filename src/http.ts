@@ -25,7 +25,7 @@ import { isPublicBody } from './access.js';
 import { FirestoreOAuthProvider, SCOPE } from './oauth.js';
 import { instrument, logRefused, type CallContext } from './calllog.js';
 import { VERSION } from './version.js';
-import { SocialService, type SocialDeps } from './social/service.js';
+import { ConflictError, NotFoundError, SocialService, type SocialDeps } from './social/service.js';
 import { NETWORKS, type Network } from './types.js';
 import type { Workplace } from './types.js';
 import { AccountService, agentFromUserAgent, agentName, firestoreAccountBackend, type AccountBackend } from './account.js';
@@ -271,6 +271,7 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
       const msg = e instanceof AimError ? e.message : 'Something went wrong. Try again.';
       if (!(e instanceof AimError)) console.error(`[${req.path}] failed`, (e as Error).message);
       if (e instanceof ProRequiredError) { if (!res.headersSent) res.status(402).json({ error: msg, code: e.code, speak: msg }); return; }
+      if (e instanceof NotFoundError || e instanceof ConflictError) { if (!res.headersSent) res.status(e instanceof NotFoundError ? 404 : 409).json({ error: msg, code: e.code, speak: msg }); return; }
       if (!res.headersSent) res.status(e instanceof AimError ? 400 : 500).json({ error: msg, speak: msg });
     }
   };
@@ -299,6 +300,24 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
     if (b.action === 'break') { const r = await svc.takeBreak(minutes); await syncLive(storeFor(who.uid), { send: sendLive }); res.json(r); return; }
     if (b.action === 'snooze') { res.json(await svc.snoozeStandup(minutes)); return; }
     throw new AimError('action must be "break" or "snooze"');
+  }));
+
+  // ---- automatic WIP todos (docs/public-posting.md, "Work posts to WIP, automatic with undo") ----
+  // The push (data.kind auto_post) carries Cancel and Edit. Cancel: POST .../cancel, no body.
+  // Edit: the app shows data.text; saving POSTs { text } to .../edit, which posts at once.
+  // Both answer { ok, auto_post, speak }; 404 for an unknown id, 409 when it is too late
+  // (already posted or posting). GET lists a day's (?date=YYYY-MM-DD, default today).
+  const socialFor = (who: Signed, req: express.Request, label: string) => { const store = storeFor(who.uid); return new SocialService(store, new AimService(store, `remote:${who.client}:${label}`, workplaceOf(req), who.agent), socialDeps); };
+  app.get('/social/auto-posts', signed(async (req, res, who) => {
+    res.set('Cache-Control', 'no-store').json(await socialFor(who, req, 'auto-post').listAutoPosts(typeof req.query.date === 'string' ? req.query.date : undefined));
+  }));
+  app.post('/social/auto-posts/:id/cancel', signed(async (req, res, who) => {
+    res.json(await socialFor(who, req, 'auto-post').cancelAutoPost(String(req.params.id)));
+  }));
+  app.post('/social/auto-posts/:id/edit', signed(async (req, res, who) => {
+    const text = (req.body ?? {}).text;
+    if (typeof text !== 'string') throw new AimError('Send the todo as { "text": "…" }.');
+    res.json(await socialFor(who, req, 'auto-post').editAutoPost(String(req.params.id), text));
   }));
 
   // ---- the running timer on the iPhone: a Live Activity (src/live.ts, docs/notifications.md) ----

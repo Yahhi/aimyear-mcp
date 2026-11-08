@@ -11,7 +11,12 @@ export interface MatchHints { repos: string[]; keywords: string[] }
  */
 export interface WipTag { wipHashtag?: string; wipHashtagBy?: 'user' | 'auto' }
 export interface Lever extends WipTag { id: string; name: string; kind: LeverKind; examples: string[]; match: MatchHints }
-export interface Project extends WipTag { id: string; name: string; area: Area; match: MatchHints }
+/**
+ * public: the user marked this project as built in public (docs/public-posting.md, "Work
+ * posts to WIP, automatic with undo"): a session on it that ends with a real summary, or a
+ * move on it, becomes a WIP todo 10 minutes later unless cancelled. Off unless set.
+ */
+export interface Project extends WipTag { id: string; name: string; area: Area; match: MatchHints; public?: boolean }
 
 /**
  * count: a number moves from baseline to target ("15 paying customers").
@@ -301,9 +306,10 @@ export interface Pending {
   dueAt: string;
   /**
    * post_offer: the evening draft of the day's progress post, with a Post action (Pro).
-   * weekly_review: the weekly review email, Sunday 19:00 local (Pro). blockId is '' for both.
+   * weekly_review: the weekly review email, Sunday 19:00 local (Pro). auto_post: an
+   * automatic WIP todo whose 10 minutes of undo are over (autoPostId). blockId is '' for these.
    */
-  kind: 'block_end' | 'break_end' | 'standup' | 'post_offer' | 'weekly_review';
+  kind: 'block_end' | 'break_end' | 'standup' | 'post_offer' | 'weekly_review' | 'auto_post';
   workplace: Workplace;
   minutes: number;
   breakMin: number;
@@ -313,6 +319,8 @@ export interface Pending {
   final?: boolean;
   /** post_offer: the local day the post is about. weekly_review: the Monday of the week it reviews. */
   date?: string;
+  /** auto_post: the AutoPost to send. */
+  autoPostId?: string;
 }
 
 /**
@@ -395,5 +403,60 @@ export interface PostRecord {
   postId?: string;
   url?: string;
   postedAt?: string;
+  error?: string;
+  /**
+   * An automatic WIP todo about one project's work (AutoPost), not the day's post. The
+   * "already posted today" check never takes it for the user's own, and the evening
+   * draft leaves its project out of WIP.
+   */
+  auto?: boolean;
+  projectId?: string;
+}
+
+/**
+ * One automatic WIP todo about work on a public project (docs/public-posting.md, "Work posts
+ * to WIP, automatic with undo"), at users/{uid}/auto_posts/{id}.
+ *
+ *  - queued: waits for postAt (10 minutes after the work ended); the push to every device
+ *    has Cancel and Edit. A pending doc (kind auto_post) brings it to /tick.
+ *  - posting: claimed by one sender (a tick, or an Edit that posts at once). A sender that
+ *    died here leaves it so: never posted twice, at worst not at all.
+ *  - posted / cancelled / failed: done. A failed one can still be posted with Edit.
+ *  - skipped: the user already posted on WIP that day themselves (docs/public-posting.md,
+ *    "No double posts"), so AimYear did not.
+ *  - offered: the summary was too short for an automatic post; the push offered it with a
+ *    Post button instead (the evening offer's mechanism), and nothing goes out without it.
+ */
+export interface AutoPost {
+  id: string;
+  /** The local day of the work it is about. */
+  date: string;
+  projectId: string;
+  /** The project's name and WIP hashtag (without '#') when it was queued. */
+  project: string;
+  hashtag: string | null;
+  /** What goes to WIP, hashtag included. */
+  text: string;
+  /** The task the work was on, for joining: the same plan item, path step or task title. */
+  task: string;
+  itemId?: string;
+  stepId?: string;
+  /** The sessions and moves it is about. One session or move is in at most one AutoPost. */
+  sessionIds: string[];
+  moveIds: string[];
+  /** When the latest of that work ended. */
+  endedAt: string;
+  postAt: string;
+  state: 'queued' | 'posting' | 'posted' | 'cancelled' | 'failed' | 'offered' | 'skipped';
+  /** Where the text came from: the session summary or move, the agent's wip_text, or the user's Edit. */
+  textBy: 'summary' | 'agent' | 'user';
+  /** Send attempts so far; a tick retries a failed send a few times. */
+  attempts?: number;
+  createdAt: string;
+  updatedAt: string;
+  postId?: string;
+  url?: string;
+  postedAt?: string;
+  cancelledAt?: string;
   error?: string;
 }

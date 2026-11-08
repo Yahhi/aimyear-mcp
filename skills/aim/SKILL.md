@@ -61,7 +61,7 @@ on their AimYear account, on every device.
 | `/aim routines` | `get_routines` / `set_routines`: small daily checks ("talk with one person on Reddit") the server adds to every matching day, or weekly counts (`perWeek`: "talk to 5 people a week"). |
 | `/aim focus <task>` | `start_session`. Honor the verdict (below). |
 | `/aim pause` | `stop_timer` with a real `summary` and `outcome`. It stops the timer and closes every running session; there is no paused session. Resume = `start_session`. |
-| `/aim done [summary]` | `stop_session` with an outcome and a real summary (what changed, not the task name). Pass the `session_id` from `get_now`; without it the server stops only this connection's single running session and otherwise lists the candidates. `op_id`, `end_at` and `start_at` are for apps replaying queued requests: never invent them. The timer keeps running for other sessions; stopping the last one stops the timer too. |
+| `/aim done [summary]` | `stop_session` with an outcome and a real summary (what changed, not the task name). Pass the `session_id` from `get_now`; without it the server stops only this connection's single running session and otherwise lists the candidates. `op_id`, `end_at` and `start_at` are for apps replaying queued requests: never invent them. The timer keeps running for other sessions; stopping the last one stops the timer too. On a public project the summary becomes a WIP todo (see "Automatic WIP todos" below). |
 | `/aim log <minutes> <what>` | `add_session` with the right area. Use it for past work, calls, kids, workout. |
 | `/aim move <what>` | `add_move`: one action toward the aim with no duration ("fixed the signup button text"). Use it when the user describes a small change from the phone, after you finish work that had no timer, or for past days (`date`). Say what changed, not the task name. Pass `item_id` with `completes_item: true` when the move finishes a plan item, e.g. the main step. `list_moves` / `delete_move` to check or fix. |
 | `/aim fix` | `list_sessions` to find the id, then `edit_session` (times, task, area, lever, project, summary, attention) or `delete_session`. Use it when a timer was forgotten or a session was labelled wrong. Never use `stop_session` on a session that already ended. |
@@ -298,6 +298,19 @@ what `list_wip_projects` says before changing anything, and keep what the user s
 
 With focus windows that have a start time (`set_commitments`), the phone also gets the
 draft as a notification with a Post button after the day's last window.
+
+### Automatic WIP todos (public projects, Pro)
+
+- Mark a project public (`set_projects` `public: true`) only when the user says they build
+  it in public. Never on your own guess; paid work and family stay private.
+- Stopping a session on a public project: write a real summary of what changed, one or two
+  sentences a stranger would understand. It becomes the WIP todo, posted 10 minutes later
+  unless cancelled. If the summary would read badly on WIP, pass `wip_text` with the todo
+  as you would post it. `add_move` on a public project works the same.
+- The first time in a conversation, tell the user it will post and how to cancel: Cancel on
+  the notification, or ask you (`delete_auto_post`). After that, don't repeat it.
+- `list_auto_posts` shows the day's; `edit_auto_post` posts the user's own words at once,
+  only when they ask.
 
 ## Tone
 

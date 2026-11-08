@@ -1,4 +1,4 @@
-import { getMessaging, type BaseMessage, type MulticastMessage, type BatchResponse } from 'firebase-admin/messaging';
+import type { BaseMessage } from 'firebase-admin/messaging';
 import { Notifications, Store } from './store.js';
 import { syncLive } from './live.js';
 import { localDate } from './dates.js';
@@ -6,6 +6,9 @@ import { AimService } from './service.js';
 import { SocialService } from './social/service.js';
 import type { Device, DesktopReminder, Pending } from './types.js';
 import { deliverWeeklyReview, type ReviewDeps } from './review/deliver.js';
+import { pushTo, type Multicast } from './push.js';
+
+export type { Multicast };
 
 const PHONES: Device['platform'][] = ['ios', 'android'];
 
@@ -21,10 +24,6 @@ export function pushTargets(devices: Device[], kind: Pending['kind']): Device[] 
   if (kind === 'post_offer') return devices;
   return devices.filter(d => PHONES.includes(d.platform));
 }
-
-/** FCM's multicast send; tests pass a fake. */
-export type Multicast = (m: MulticastMessage) => Promise<BatchResponse>;
-const realMulticast: Multicast = m => getMessaging().sendEachForMulticast(m);
 
 /**
  * What a delivery reaches outside the reminder store: FCM, the Live Activity of a user's
@@ -54,19 +53,12 @@ export function textFor(p: Pending, mainStep: { title: string; done: boolean } |
 }
 
 /** Builds the posting service for one user; tests pass a fake. */
-export type SocialFor = (uid: string) => Pick<SocialService, 'eveningOffer' | 'armOffer'>;
+export type SocialFor = (uid: string) => Pick<SocialService, 'eveningOffer' | 'armOffer' | 'sendAutoPost'>;
 const realSocialFor: SocialFor = uid => { const store = new Store(uid); return new SocialService(store, new AimService(store, 'tick', 'mobile')); };
 
 /** Pushes one message to the given devices and drops tokens that are gone. */
-async function push(uid: string, targets: Device[], message: BaseMessage, notif: Notifications, multicast: Multicast = realMulticast) {
-  if (!targets.length) return { sent: 0, failed: 0, reason: 'no device to push to' };
-  const res = await multicast({ tokens: targets.map(d => d.token), ...message });
-  await Promise.all(res.responses.map(async (r, i) => {
-    const code = (r.error as { code?: string } | undefined)?.code ?? '';
-    if (!r.success && /registration-token-not-registered|invalid-argument/.test(code)) await notif.dropDevice(uid, targets[i].token);
-  }));
-  return { sent: res.successCount, failed: res.failureCount };
-}
+const push = (uid: string, targets: Device[], message: BaseMessage, notif: Notifications, multicast?: Multicast) =>
+  pushTo(targets, message, token => notif.dropDevice(uid, token), multicast);
 
 /**
  * The evening offer: the day's draft with a Post action (category AIMYEAR_POST_OFFER).
@@ -169,8 +161,9 @@ export async function pullDesktop(uid: string, notif: Notifications, now = new D
 
 /**
  * One poll: claim each due reminder, deliver it to every device, and re-arm the next
- * stand-up. The claim (a transactional delete) comes before the push: two overlapping
- * ticks both see a reminder due, but only the one that claims it pushes and re-arms; the
+ * stand-up; send the automatic WIP todos whose undo is over. The claim (a transactional
+ * delete) comes before the push: two overlapping ticks both see a reminder due, but only
+ * the one that claims it pushes and re-arms; the
  * other skips. Whatever the block's workplace, the phones get a push and the desktop
  * apps find it in the desktop inbox they pull (POST /desktop/reminders).
  */
@@ -188,6 +181,14 @@ export async function tick(notif: Notifications, now = new Date(), socialFor: So
         if (!deps.reviews) throw new Error('weekly review email is not set up on this server');
         r = await deliverWeeklyReview(p, deps.reviews(), now);
       } catch (e) { console.error('[tick] weekly review failed', (e as Error).message); r = { sent: 0, failed: 0, reason: (e as Error).message }; }
+      results.push({ id: p.id, kind: p.kind, ...r });
+      continue;
+    }
+    if (p.kind === 'auto_post') {
+      // An automatic WIP todo whose 10 minutes of undo are over (docs/public-posting.md): sent once.
+      let r: { sent: number; failed: number; reason?: string };
+      try { r = p.autoPostId ? await socialFor(p.uid).sendAutoPost(p.autoPostId, now) : { sent: 0, failed: 0, reason: 'no auto post id' }; }
+      catch (e) { console.error('[tick] auto post failed', (e as Error).message); r = { sent: 0, failed: 0, reason: (e as Error).message }; }
       results.push({ id: p.id, kind: p.kind, ...r });
       continue;
     }

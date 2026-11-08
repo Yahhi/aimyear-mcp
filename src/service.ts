@@ -170,8 +170,10 @@ export class AimService {
     } else state = `${goal.metric}: ${latest.value} of ${goal.target} (started at ${goal.baseline})`;
     const totalDays = daysBetween(goal.createdAt.slice(0, 10), goal.deadline) || 1;
     const elapsed = Math.min(1, Math.max(0, daysBetween(goal.createdAt.slice(0, 10), today) / totalDays));
+    // A project saved before 0.13 has no public flag: it is not public.
+    const view = { ...goal, projects: goal.projects.map(p => ({ ...p, public: p.public ?? false })) };
     return {
-      goal, kind, current_value: latest.value, ...(stages ? { stages } : {}), days_left: daysLeft, progress_fraction: Math.round(progress * 100) / 100, time_elapsed_fraction: Math.round(elapsed * 100) / 100,
+      goal: view, kind, current_value: latest.value, ...(stages ? { stages } : {}), days_left: daysLeft, progress_fraction: Math.round(progress * 100) / 100, time_elapsed_fraction: Math.round(elapsed * 100) / 100,
       speak: `Goal [${goal.area ?? 'money'}]: "${goal.title}". ${state}, ${daysLeft} days left. Levers: ${goal.levers.map(l => `${l.name} (${l.kind})`).join(', ') || 'none yet'}.`,
     };
   }
@@ -204,13 +206,22 @@ export class AimService {
     return { ok: true, levers: goal.levers, warnings: warning ? [warning] : [], speak: `Levers saved: ${goal.levers.map(l => `${l.name} [${l.kind}]${l.wipHashtag ? ` #${l.wipHashtag}` : ''}`).join(', ')}.${warning ? ` ${warning}` : ''}` };
   }
 
-  async setProjects(projects: { id?: string; name: string; area: Area; keywords?: string[]; repos?: string[]; wip_hashtag?: string | null }[]) {
+  /**
+   * public (docs/public-posting.md): the user built this project in public, so its work goes
+   * to WIP automatically with undo. Like wip_hashtag, a call that leaves it out keeps the
+   * one on record for that id; a new project is not public.
+   */
+  async setProjects(projects: { id?: string; name: string; area: Area; keywords?: string[]; repos?: string[]; wip_hashtag?: string | null; public?: boolean }[]) {
     const goal = await this.requireGoal();
     const prev = new Map(goal.projects.map(p => [p.id, p]));
-    goal.projects = projects.map(p => { const id = p.id ?? slug(p.name); return { id, name: p.name.trim(), area: p.area, match: { keywords: p.keywords ?? [], repos: p.repos ?? [] }, ...tagOf(p.wip_hashtag, prev.get(id), p.name) }; });
+    goal.projects = projects.map(p => { const id = p.id ?? slug(p.name); return { id, name: p.name.trim(), area: p.area, match: { keywords: p.keywords ?? [], repos: p.repos ?? [] }, ...tagOf(p.wip_hashtag, prev.get(id), p.name), public: p.public ?? prev.get(id)?.public ?? false }; });
     goal.updatedAt = new Date().toISOString();
     await this.store.saveGoal(goal);
-    return { ok: true, projects: goal.projects, speak: `Projects saved: ${goal.projects.map(p => `${p.name} [${p.area}]${p.wipHashtag ? ` #${p.wipHashtag}` : ''}`).join(', ') || 'none'}. Their sessions count as other work or life, not goal work.` };
+    const open = goal.projects.filter(p => p.public);
+    return {
+      ok: true, projects: goal.projects,
+      speak: `Projects saved: ${goal.projects.map(p => `${p.name} [${p.area}]${p.wipHashtag ? ` #${p.wipHashtag}` : ''}${p.public ? ', public' : ''}`).join(', ') || 'none'}. Their sessions count as other work or life, not goal work.${open.length ? ` Public: work on ${open.map(p => p.name).join(', ')} that ends with a real summary goes to WIP as a todo 10 minutes later, unless cancelled (Pro, WIP connected).` : ''}`,
+    };
   }
 
   // ---------- path ----------

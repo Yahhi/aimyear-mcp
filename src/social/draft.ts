@@ -28,6 +28,8 @@ export interface DayFacts {
   week?: { days: number; target: number };
   /** The day's work for WIP, one group per project (see WipGroup). */
   wip?: WipGroup[];
+  /** Projects left out of the WIP part: they already got their automatic todo that day. */
+  wipLeftOut?: string[];
 }
 
 /**

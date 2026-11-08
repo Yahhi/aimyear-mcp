@@ -3,7 +3,7 @@ import { getFirestore, Firestore, FieldValue } from 'firebase-admin/firestore';
 import { readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { TIMER_REMINDERS } from './types.js';
-import type { Goal, Path, Profile, Day, Block, Session, Move, Mode, Workplace, Commitment, Device, Pending, Direction, Routine, AppliedOp, Network, SocialAccount, PostRecord, DesktopReminder, WeeklyReviewRecord } from './types.js';
+import type { Goal, Path, Profile, Day, Block, Session, Move, Mode, Workplace, Commitment, Device, Pending, Direction, Routine, AppliedOp, Network, SocialAccount, PostRecord, DesktopReminder, WeeklyReviewRecord, AutoPost } from './types.js';
 
 let dbSingleton: Firestore | null = null;
 export function initFirestore(): Firestore {
@@ -372,6 +372,40 @@ export class Store {
       if (cur && (cur.status === 'posted' || (cur.status === 'posting' && Date.parse(r.attemptAt) - Date.parse(cur.attemptAt) < staleMs))) return { claimed: false as const, existing: cur };
       tx.set(ref, r);
       return { claimed: true as const };
+    });
+  }
+
+  // --- automatic WIP todos (docs/public-posting.md, "Work posts to WIP, automatic with undo") ---
+  private autoPosts() { return this.user().collection('auto_posts'); }
+  async getAutoPost(id: string): Promise<AutoPost | null> {
+    const snap = await this.autoPosts().doc(id).get();
+    return snap.exists ? (snap.data() as AutoPost) : null;
+  }
+  async saveAutoPost(a: AutoPost) { await this.autoPosts().doc(a.id).set(a); }
+  /** Every automatic todo about work on one local day. */
+  async getAutoPostsOn(date: string): Promise<AutoPost[]> {
+    return (await this.autoPosts().where('date', '==', date).get()).docs.map(d => d.data() as AutoPost);
+  }
+  /** The automatic todo a session or move is already in, if any: one piece of work, at most one todo. */
+  async findAutoPostFor(kind: 'session' | 'move', id: string): Promise<AutoPost | null> {
+    const snap = await this.autoPosts().where(kind === 'session' ? 'sessionIds' : 'moveIds', 'array-contains', id).limit(1).get();
+    return snap.empty ? null : (snap.docs[0].data() as AutoPost);
+  }
+  /**
+   * Changes one automatic todo in a transaction: `fn` gets it as stored and returns the new
+   * version, or null to leave it. The claim before a send, a cancel and a join all go
+   * through here, so a tick, a tap on Cancel and an Edit never both win.
+   */
+  async updateAutoPost(id: string, fn: (cur: AutoPost) => AutoPost | null): Promise<{ applied: boolean; current: AutoPost | null }> {
+    const ref = this.autoPosts().doc(id);
+    return this.db.runTransaction(async tx => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) return { applied: false, current: null };
+      const cur = snap.data() as AutoPost;
+      const next = fn(structuredClone(cur));
+      if (!next) return { applied: false, current: cur };
+      tx.set(ref, next);
+      return { applied: true, current: next };
     });
   }
 

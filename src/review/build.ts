@@ -46,8 +46,26 @@ export interface ReviewFacts extends WeekNumbers {
 type DaySummary = Awaited<ReturnType<AimService['daySummary']>>;
 
 /** Summaries the server wrote itself, not the person: fall back to the task. */
-const PLACEHOLDER = /^(auto-closed:|stood up for a break\.?$)/i;
+const PLACEHOLDER = /^(auto-closed:|stood up for a break\.?$|closed when the timer stopped\.?$)/i;
 const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/**
+ * Too thin to mean anything to someone reading the email ("ready", "posted some replies"):
+ * fewer than 4 words or fewer than 20 characters.
+ */
+export const isThin = (s: string) => s.trim().split(/\s+/).filter(w => /[\p{L}\p{N}]/u.test(w)).length < 4 || s.trim().length < 20;
+
+/**
+ * What a session says in "What moved": its summary, unless that is a placeholder or thin;
+ * then its task title. When both are thin, the longer of the two.
+ */
+export function sessionText(summary: string | undefined, task: string): string {
+  const s = summary?.trim() ?? '', t = task.trim();
+  if (!s || PLACEHOLDER.test(s)) return t;
+  if (!isThin(s) || !t) return s;
+  if (!isThin(t)) return t;
+  return t.length > s.length ? t : s;
+}
 
 /** What moved toward the aim over the given days: deduplicated, the most meaningful first. */
 export function movedFrom(days: DaySummary[], hardLevers: Set<string>, exclude: string[] = []): { items: MovedItem[]; more: number } {
@@ -56,8 +74,7 @@ export function movedFrom(days: DaySummary[], hardLevers: Set<string>, exclude: 
   for (const d of days) {
     for (const s of d.sessions) {
       if (!['main_step', 'goal_hard', 'goal_comfortable'].includes(s.classification)) continue;
-      const summary = s.summary?.trim();
-      const text = (summary && !PLACEHOLDER.test(summary) ? summary : s.task).trim();
+      const text = sessionText(s.summary, s.task);
       if (!text) continue;
       const main = s.classification === 'main_step';
       const hard = s.classification === 'goal_hard' || (main && !!s.lever_id && hardLevers.has(s.lever_id));

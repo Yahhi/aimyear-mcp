@@ -13,7 +13,8 @@ moves the goal: selling, talking to users, publishing.
   moves without hours, a weekly target, your calendar, read by your own agent, and reviews
   through your own agent. None of it runs AI on AimYear's side, so there are no AI costs.
 - **Pro** ($49.99/year or $7.99/month, with the coming phone app): notifications, reviews
-  written by AimYear, and posting your day's progress to WIP and Bluesky.
+  written by AimYear, posting your day's progress to WIP and Bluesky, and automatic WIP posts
+  about work on the projects you build in public, with 10 minutes to cancel.
 
 Website: [aimyear.com](https://aimyear.com) · Setup guide: [aimyear.com/connect.html](https://aimyear.com/connect.html) · Privacy: [aimyear.com/privacy.html](https://aimyear.com/privacy.html)
 · Contact: privacy@aimyear.com
@@ -49,7 +50,7 @@ never argument values. To delete your account and data, use Delete account in th
 (or email privacy@aimyear.com); Export in the app downloads everything as JSON. Details:
 [privacy policy](https://aimyear.com/privacy.html).
 
-## Tools (51)
+## Tools (59)
 
 Names say what a tool does: `get_` reads one thing, `list_` reads several, `find_` looks
 for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change one entry.
@@ -65,7 +66,7 @@ for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change 
 | Reviews | `summarize_day`, `summarize_week`, `find_leaks`, `get_insights` |
 | Settings and devices | `get_settings`, `set_settings`, `add_device`, `list_devices`, `delete_device` |
 | Connected agents | `list_agents`, `delete_agent` |
-| Posting progress (Pro) | `add_social_account`, `list_social_accounts`, `delete_social_account`, `get_post_draft`, `add_post`, `list_wip_projects` |
+| Posting progress (Pro) | `add_social_account`, `list_social_accounts`, `delete_social_account`, `get_post_draft`, `add_post`, `list_wip_projects`, `list_auto_posts`, `edit_auto_post`, `delete_auto_post` |
 
 0.13.0 adds the weekly review email, posts about what was done, the running timer on the
 iPhone and calendar events read by your own agent (docs/weekly-review.md, docs/public-posting.md,
@@ -85,6 +86,25 @@ docs/notifications.md and docs/calendar-sync.md in the AimYear project, 2026-11-
   that project's #hashtag. `list_wip_projects` reads the user's WIP projects. When WIP is
   connected from the app, AimYear matches the hashtags once by name, then with one Claude call
   for what is left (Workload Identity Federation, no API key).
+- **Work posts to WIP, automatic with undo (Pro, WIP connected).** `set_projects` takes
+  `public` (default false, kept when a call leaves it out). A session on a public project that
+  ends with a real summary (60 characters or more, and more than the task title again), from
+  `stop_session`, `stop_timer` or the app, or a move on one (`add_move`), is queued as a WIP
+  todo: the summary trimmed, with the project's #hashtag, no AI model; `wip_text` on
+  `stop_session` and `add_move` gives the agent's own text. It posts 10 minutes after the work
+  ended (never sooner than 10 minutes after it was queued), sent by `/tick`; a push to every
+  device (`kind: auto_post`) carries Cancel and Edit (`POST /social/auto-posts/:id/cancel`,
+  `POST /social/auto-posts/:id/edit` with `{ text }`, which posts at once; `GET
+  /social/auto-posts` lists a day's). A shorter summary gets the evening offer's push with a
+  Post button for that one todo instead. Work on the same project and task within 2 hours of
+  a todo joins it: a queued one takes the new text and its post time moves to the new end + 10
+  minutes (with a new push), a posted one posts nothing new. One session is in at most one
+  todo. The evening WIP draft leaves out projects that already got their automatic todo, and
+  the "already posted today" check never takes AimYear's own todos for the user's. Agents use
+  `list_auto_posts`, `delete_auto_post` (cancel) and `edit_auto_post`.
+- **The weekly review email's "what moved" says something.** A session summary too thin to
+  mean anything to a reader (under 4 words or under 20 characters: "ready", "posted some
+  replies") gives way to the session's task title; when both are thin, the longer one.
 - **Reminders on every device (Pro).** Stand-up, stop and break-over reminders reach every
   device whichever device or agent started the timer: a push to the phones, and the desktop
   inbox for the macOS and Windows apps (the Mac is not pushed those too, or it would show each
