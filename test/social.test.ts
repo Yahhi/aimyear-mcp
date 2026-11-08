@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { AimService } from '../src/service.js';
 import { SocialService, PRO_ONLY, offerId, type SocialDeps } from '../src/social/service.js';
-import { buildDraft, SIGNATURE } from '../src/social/draft.js';
+import { buildDraft, nothingToPost, SIGNATURE } from '../src/social/draft.js';
 import { NetworkError, blueskyClient, graphemes, linkFacets, wipClient, type FeedPost, type NetworkClient } from '../src/social/clients.js';
 import { isPro, createPro } from '../src/pro.js';
 import { addDays, startOfDay } from '../src/dates.js';
@@ -73,6 +73,9 @@ async function withAim(ctx: ReturnType<typeof setup>) {
   return { today, at: (date: string, h: number) => new Date(startOfDay(date, store.profile.timezone).getTime() + h * 3600000) };
 }
 
+/** Something toward the aim on record today, so the day has a post. */
+const moved = (ctx: ReturnType<typeof setup>) => ctx.svc.addMove({ task: 'Emailed 5 people from the waitlist', leverId: 'out' });
+
 async function connectBoth(social: SocialService) {
   await social.connect({ network: 'wip', api_key: WIP_KEY });
   await social.connect({ network: 'bluesky', handle: '@valentina.bsky.social', app_password: BSKY_PW });
@@ -95,19 +98,24 @@ test('the draft tells the day from the record: aim, main step, minutes, routines
       { id: 'r3', title: 'Read one thread', area: 'work', routineId: 'rt3', isMainStep: false, estimateMin: 10, done: false },
     ],
   });
-  session(store, at(today, 9), 50, { classification: 'main_step', leverId: 'out', itemId: 'm' });
-  session(store, at(today, 11), 40, { classification: 'goal_comfortable', leverId: 'code' });
+  session(store, at(today, 9), 50, { classification: 'main_step', leverId: 'out', itemId: 'm', task: 'Email 10 people from the waitlist', summary: '3 replied, one wants a demo' });
+  session(store, at(today, 11), 40, { classification: 'goal_comfortable', leverId: 'code', task: 'fix the paywall' });
 
   const d = await social.draft();
   assert.ok(d.text);
+  assert.equal(d.nothing_to_post, false);
   const t = d.text!;
-  assert.match(t, /^Aim: 15 paying customers \(4 of 15\)\./);
+  assert.deepEqual(t.split('\n').slice(0, 3), ['3 replied, one wants a demo.', 'Fix the paywall.', 'Main step done: Email 10 people from the waitlist'], 'what moved comes first, in the user\'s words');
+  assert.match(t, /Aim: 15 paying customers \(4 of 15\)\./);
   assert.match(t, /Back after 2 missed days\./);
-  assert.match(t, /Main step done: Email 10 people from the waitlist/);
-  assert.match(t, /1 h 30 min on the aim, 50 min of it on the hard part\./);
-  assert.match(t, /Routines: 1 done, 1 at the minimum, 1 missed\./);
   assert.ok(t.endsWith(SIGNATURE) && SIGNATURE.includes('aimyear.com'));
   assert.ok(graphemes(t) <= 300);
+  // The numbers come after, as room allows: on a shorter day the minutes and routines fit too.
+  const f = await social.facts(today);
+  assert.ok(!('reason' in f));
+  const short = buildDraft({ ...f, week: undefined });
+  assert.match(short, /1 h 30 min on the aim, 50 min of it on the hard part\./);
+  assert.match(short, /Routines: 1 done, 1 at the minimum, 1 missed\./);
 });
 
 test('a bad day reads as a bad day: nothing invented', async () => {
@@ -115,14 +123,70 @@ test('a bad day reads as a bad day: nothing invented', async () => {
   const { store, social } = ctx;
   const { today } = await withAim(ctx);
   store.days.set(today, { date: today, mode: 'full', createdAt: '', updatedAt: '', plan: [{ id: 'm', title: 'Call 3 leads', area: 'work', leverId: 'out', isMainStep: true, estimateMin: 50, done: false }] });
+  // Comfortable work only: the main step is said to be not done, the hard part zero.
+  session(store, new Date(startOfDay(today, store.profile.timezone).getTime() + 10 * 3600000), 30, { classification: 'goal_comfortable', leverId: 'code', task: 'Polished the landing page' });
   const t = (await social.draft()).text!;
-  assert.match(t, /Main step not done: Call 3 leads/);
-  assert.match(t, /No time on the aim today\./);
+  assert.match(t, /^Polished the landing page\.\nMain step not done: Call 3 leads/);
+  assert.match(t, /30 min on the aim, none on the hard part\./);
   assert.doesNotMatch(t, /Back after|Routines|Main step done/);
+});
 
-  // Comfortable work only: the hard part is said to be zero.
-  session(store, new Date(startOfDay(today, store.profile.timezone).getTime() + 10 * 3600000), 30, { classification: 'goal_comfortable', leverId: 'code' });
-  assert.match((await social.draft()).text!, /30 min on the aim, none on the hard part\./);
+test('a day with nothing recorded toward the aim has no post: the user is asked to record what they did first', async () => {
+  const ctx = setup();
+  const { store, social, svc } = ctx;
+  const { today, at } = await withAim(ctx);
+  await connectBoth(social);
+  store.days.set(today, { date: today, mode: 'full', createdAt: '', updatedAt: '', plan: [{ id: 'm', title: 'Call 3 leads', area: 'work', leverId: 'out', isMainStep: true, estimateMin: 50, done: false }] });
+  // Work and life that are not toward the aim don't make a post.
+  session(store, at(today, 9), 120, { classification: 'other_project', area: 'work', task: 'Client app release' });
+  await svc.addMove({ task: 'called mum', area: 'relations' });
+  const d = await social.draft();
+  assert.equal(d.nothing_to_post, true);
+  assert.equal(d.text, null);
+  assert.deepEqual(d.networks, [], 'no network is checked for a post that does not exist');
+  assert.match(d.speak!, /Nothing recorded toward the aim today yet, so there is no post to offer\..*add_move/);
+  // No default text to post, and no evening offer. The user's own words still go out on their Post.
+  await assert.rejects(social.post({}), /Nothing recorded toward the aim/);
+  assert.deepEqual(await social.eveningOffer(today), { send: false, reason: 'nothing recorded toward the aim' });
+  assert.equal((await social.post({ text: 'Thinking about pricing today. aimyear.com', networks: ['wip'] })).results[0].status, 'posted');
+
+  // The main step done is enough, even without a timer or a move.
+  store.days.get(today)!.plan[0].done = true;
+  const done = await social.draft();
+  assert.equal(done.nothing_to_post, false);
+  assert.match(done.text!, /^Main step done: Call 3 leads/);
+});
+
+test('the draft leads with the day\'s sessions and moves toward the aim, said once, in the order they happened', async () => {
+  const ctx = setup();
+  const { store, social, svc } = ctx;
+  const { today, at } = await withAim(ctx);
+  await svc.setSettings({ weekly_target: 1 });
+  session(store, at(today, 9), 40, { classification: 'goal_hard', leverId: 'out', task: 'outreach', summary: 'Wrote to 4 salon owners on Instagram' });
+  session(store, at(today, 12), 30, { classification: 'goal_comfortable', leverId: 'code', task: 'Fixed the signup button text' });
+  session(store, at(today, 14), 60, { classification: 'other_project', task: 'Client app release' });
+  await svc.addMove({ task: 'fixed the signup button text', time: '13:00', leverId: 'code' });
+  await svc.addMove({ task: 'Posted the update on WIP', time: '16:00', leverId: 'out' });
+  await svc.addMove({ task: 'called mum', area: 'relations', time: '18:00' });
+  await svc.addMove({ task: 'iOS build 1.4 sent to review!', time: '17:00', leverId: 'code' });
+  const t = (await social.draft()).text!;
+  assert.deepEqual(t.split('\n').slice(0, 4), ['Wrote to 4 salon owners on Instagram.', 'Fixed the signup button text.', 'Posted the update on WIP.', 'iOS build 1.4 sent to review!']);
+  assert.doesNotMatch(t, /Client app|mum|outreach\./i);
+  assert.match(t, /This week: 1 day toward the aim, target of 1 met\./, 'never "5 of 4 days"');
+  assert.ok(t.endsWith(SIGNATURE));
+});
+
+test('quiet numbers: the draft says what moved and the moves, never minutes', async () => {
+  const ctx = setup();
+  const { store, social, svc } = ctx;
+  const { today, at } = await withAim(ctx);
+  await svc.setSettings({ tracking: 'quiet' });
+  session(store, at(today, 9), 50, { classification: 'goal_hard', leverId: 'out', task: 'outreach', summary: 'Booked 2 demos' });
+  await svc.addMove({ task: 'Sent the pricing page to 3 testers', time: '10:00', leverId: 'out' });
+  const t = (await social.draft()).text!;
+  assert.match(t, /^Booked 2 demos\.\nSent the pricing page to 3 testers\./);
+  assert.match(t, /1 move toward the aim, 1 on the hard part\./);
+  assert.doesNotMatch(t, /\bmin\b|\bh\b|%/);
 });
 
 test('no aim or tracking off: there is nothing honest to post', async () => {
@@ -138,16 +202,28 @@ test('no aim or tracking off: there is nothing honest to post', async () => {
 test('long titles are shortened to fit Bluesky; the facts stay', () => {
   const t = buildDraft({
     aim: { title: 'A'.repeat(200), kind: 'count', current: 3, target: 10 },
-    mainStep: { planned: true, done: true, title: 'B'.repeat(250) },
+    mainStep: { planned: true, done: true, title: 'B'.repeat(250) }, done: ['C'.repeat(120)],
     goalMin: 125, hardMin: 60, routines: { full: 2, minimum: 0, missed: 1 }, backAfterDays: 1,
   });
   assert.ok(graphemes(t) <= 300, `got ${graphemes(t)}`);
-  for (const must of ['(3 of 10)', 'Back after a missed day.', 'Main step done:', '2 h 5 min on the aim', 'Routines: 2 done, 1 missed.', SIGNATURE]) assert.ok(t.includes(must), must);
+  for (const must of ['CCCC', '(3 of 10)', 'Main step done:', SIGNATURE]) assert.ok(t.includes(must), must);
+});
+
+test('many moves: what moved keeps the lead, the rest is counted, the signature stays', () => {
+  const done = Array.from({ length: 9 }, (_, i) => `Shipped paywall change number ${i + 1}, so that the yearly plan is preselected and highlighted on every screen`);
+  const t = buildDraft({ aim: { title: '15 paying customers', kind: 'count', current: 4, target: 15 }, mainStep: { planned: true, done: false, title: 'Call 3 salons' }, done, goalMin: 300, hardMin: 0, routines: { full: 0, minimum: 0, missed: 0 }, week: { days: 2, target: 4 } });
+  assert.ok(graphemes(t) <= 300, `got ${graphemes(t)}`);
+  assert.match(t, /^Shipped paywall change number 1, /);
+  assert.match(t, /\nAnd \d more\.\n/);
+  assert.match(t, /Main step not done: Call 3 salons/, 'a main step not done is never left out');
+  assert.ok(t.endsWith(SIGNATURE));
+  for (const l of t.split('\n').filter(x => x.endsWith('…'))) assert.equal(done[0].replace(/\d+/, '1').charAt(l.length - 1), ' ', `shortened at a word, not mid-word: ${l}`);
 });
 
 test('a done-or-not aim shows its stages', () => {
-  const t = buildDraft({ aim: { title: 'Launch v2', kind: 'done', stagesDone: 1, stagesTotal: 4 }, mainStep: { planned: false, done: false, title: null }, goalMin: 0, hardMin: 0, routines: { full: 0, minimum: 0, missed: 0 } });
-  assert.match(t, /Aim: Launch v2 \(1 of 4 stages done\)\.\nNo main step planned today\./);
+  const f = { aim: { title: 'Launch v2', kind: 'done' as const, stagesDone: 1, stagesTotal: 4 }, mainStep: { planned: false, done: false, title: null }, done: ['Wrote the release notes'], goalMin: 0, hardMin: 0, routines: { full: 0, minimum: 0, missed: 0 } };
+  assert.equal(buildDraft(f), `Wrote the release notes.\nNo main step planned today.\nAim: Launch v2 (1 of 4 stages done).\n${SIGNATURE}`);
+  assert.equal(nothingToPost({ ...f, done: [] }), true);
 });
 
 // ---------- Pro ----------
@@ -182,6 +258,7 @@ test('the Pro check point reads AIMYEAR_PRO_UIDS and fails closed', async () => 
 test('credentials are stored sealed and never come back from any tool', async () => {
   const ctx = setup();
   const { today } = await withAim(ctx);
+  await moved(ctx);
   const outs: unknown[] = [];
   outs.push(await ctx.social.connect({ network: 'wip', api_key: WIP_KEY }));
   outs.push(await ctx.social.connect({ network: 'bluesky', handle: 'valentina.bsky.social', app_password: BSKY_PW }));
@@ -234,6 +311,7 @@ test('posts go only where chosen in settings, and connecting adds a network to t
 test('a network where the user already posted today themselves is skipped, and the draft says so', async () => {
   const ctx = setup();
   await withAim(ctx);
+  await moved(ctx);
   await connectBoth(ctx.social);
   ctx.wip.feed.push({ id: 'mine-1', createdAt: new Date().toISOString(), text: 'wrote this on wip.co myself' });
   // A post from two days ago does not count as today.
@@ -251,6 +329,7 @@ test('a network where the user already posted today themselves is skipped, and t
 test('a retry never posts twice, and AimYear\'s own post is not taken for the user\'s', async () => {
   const ctx = setup();
   await withAim(ctx);
+  await moved(ctx);
   await connectBoth(ctx.social);
   const first = await ctx.social.post({ text: 'Day 1. aimyear.com' });
   assert.deepEqual(first.results.map(x => x.status), ['posted', 'posted']);
@@ -336,12 +415,18 @@ test('the offer is queued at the end of the last focus window, and only for netw
   now = at(today, 18);
   assert.equal((await ctx.social.armOffer())?.date, addDays(today, 1));
 
+  // Nothing recorded toward the aim: no offer. Once something is, the offer goes out.
+  assert.deepEqual(await ctx.social.eveningOffer(today), { send: false, reason: 'nothing recorded toward the aim' });
+  await moved(ctx);
   const offer = await ctx.social.eveningOffer(today);
   assert.equal(offer.send, true);
   if (offer.send) {
     assert.equal(offer.data.networks, 'wip');
     assert.equal(offer.data.date, today);
-    assert.ok(offer.body.endsWith(SIGNATURE));
+    // WIP only: the body is the WIP todo (no hashtag on this work), the day's post rides along.
+    assert.equal(offer.body, 'Emailed 5 people from the waitlist.');
+    assert.deepEqual(JSON.parse(offer.data.wip_todos), [{ key: 'aim', text: 'Emailed 5 people from the waitlist.' }]);
+    assert.ok(offer.data.text.endsWith(SIGNATURE));
     assert.ok(!JSON.stringify(offer).includes(WIP_KEY));
   }
   // The user posted on WIP themselves: no offer at all.

@@ -4,7 +4,8 @@ import { computeAttention, findGaps } from './domain/attention.js';
 import { computeComebacks, computeInsights, COMEBACK_HISTORY_DAYS, type InsightRow } from './domain/insights.js';
 import { checkGoal, checkStepTitle, type GoalDraft } from './domain/goal.js';
 import { classify, decideVerdict, isGoalWork, leverFor, linkedPlanItem, withPlanItem } from './domain/classify.js';
-import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, Track, PlanItem, Profile, Project, Routine, Session, Step, Stop, Workplace, Network, Move, Tracking } from './types.js';
+import { nextTag } from './domain/wip-tags.js';
+import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, Track, PlanItem, Profile, Project, Routine, Session, Step, Stop, Workplace, Network, Move, Tracking, WipTag } from './types.js';
 import { NETWORKS, TRACKINGS } from './types.js';
 
 export class AimError extends Error {}
@@ -39,6 +40,11 @@ const CLOCK_SLACK_MS = 2 * 60000;
 const OP_ID = /^[A-Za-z0-9_.:-]{8,128}$/;
 const CLIENT_SESSION_ID = /^[A-Za-z0-9_.:-]{6,64}$/;
 
+/** A project's or lever's WIP hashtag after a list call (domain/wip-tags.ts); a bad one is the caller's error. */
+function tagOf(given: string | null | undefined, prev: WipTag | undefined, what: string): WipTag {
+  try { return nextTag(given, prev, what); } catch (e) { throw new AimError((e as Error).message); }
+}
+
 export class AimService {
   private profileCache: Profile | null = null;
   private agentCache: Promise<string | undefined> | null = null;
@@ -48,6 +54,8 @@ export class AimService {
    */
   constructor(private store: Store, private clientSessionId: string, private clientWorkplace: Workplace = 'desktop', private agentOf: () => Promise<string | undefined> = async () => undefined) {}
   private agent() { return (this.agentCache ??= this.agentOf().catch(() => undefined)); }
+  /** Who is calling ("app" for the AimYear app, else the agent's name), for what only the app gets. */
+  callerAgent() { return this.agent(); }
 
   // ---------- helpers ----------
   private async profile(): Promise<Profile> {
@@ -170,24 +178,26 @@ export class AimService {
     return { ok: true, history: goal.baselineHistory, goal_reached: reached, speak: `${recorded} ${reached ? `Target ${goal.target} reached: the goal is done. Set the next aim with set_goal when ready.` : `Target ${goal.target} by ${goal.deadline}.`}` };
   }
 
-  async setLevers(levers: { id?: string; name: string; kind: 'hard' | 'comfortable'; examples?: string[]; keywords?: string[]; repos?: string[] }[]) {
+  async setLevers(levers: { id?: string; name: string; kind: 'hard' | 'comfortable'; examples?: string[]; keywords?: string[]; repos?: string[]; wip_hashtag?: string | null }[]) {
     const goal = await this.requireGoal();
-    goal.levers = levers.map(l => ({ id: l.id ?? slug(l.name), name: l.name.trim(), kind: l.kind, examples: l.examples ?? [], match: { keywords: l.keywords ?? [], repos: l.repos ?? [] } }));
+    const prev = new Map(goal.levers.map(l => [l.id, l]));
+    goal.levers = levers.map(l => { const id = l.id ?? slug(l.name); return { id, name: l.name.trim(), kind: l.kind, examples: l.examples ?? [], match: { keywords: l.keywords ?? [], repos: l.repos ?? [] }, ...tagOf(l.wip_hashtag, prev.get(id), l.name) }; });
     if (!goal.levers.some(l => l.kind === 'hard')) return { ok: false, speak: 'At least one lever must be marked hard: the kind of work you admit to avoiding. Which one is it?' };
     goal.updatedAt = new Date().toISOString();
     await this.store.saveGoal(goal);
     const path = await this.store.getPath();
     const current = path.milestones.find(m => m.status !== 'done' && m.status !== 'retired');
     const warning = current ? this.prepFirstWarning(goal, path, current.id) : null;
-    return { ok: true, levers: goal.levers, warnings: warning ? [warning] : [], speak: `Levers saved: ${goal.levers.map(l => `${l.name} [${l.kind}]`).join(', ')}.${warning ? ` ${warning}` : ''}` };
+    return { ok: true, levers: goal.levers, warnings: warning ? [warning] : [], speak: `Levers saved: ${goal.levers.map(l => `${l.name} [${l.kind}]${l.wipHashtag ? ` #${l.wipHashtag}` : ''}`).join(', ')}.${warning ? ` ${warning}` : ''}` };
   }
 
-  async setProjects(projects: { id?: string; name: string; area: Area; keywords?: string[]; repos?: string[] }[]) {
+  async setProjects(projects: { id?: string; name: string; area: Area; keywords?: string[]; repos?: string[]; wip_hashtag?: string | null }[]) {
     const goal = await this.requireGoal();
-    goal.projects = projects.map(p => ({ id: p.id ?? slug(p.name), name: p.name.trim(), area: p.area, match: { keywords: p.keywords ?? [], repos: p.repos ?? [] } }));
+    const prev = new Map(goal.projects.map(p => [p.id, p]));
+    goal.projects = projects.map(p => { const id = p.id ?? slug(p.name); return { id, name: p.name.trim(), area: p.area, match: { keywords: p.keywords ?? [], repos: p.repos ?? [] }, ...tagOf(p.wip_hashtag, prev.get(id), p.name) }; });
     goal.updatedAt = new Date().toISOString();
     await this.store.saveGoal(goal);
-    return { ok: true, projects: goal.projects, speak: `Projects saved: ${goal.projects.map(p => `${p.name} [${p.area}]`).join(', ') || 'none'}. Their sessions count as other work or life, not goal work.` };
+    return { ok: true, projects: goal.projects, speak: `Projects saved: ${goal.projects.map(p => `${p.name} [${p.area}]${p.wipHashtag ? ` #${p.wipHashtag}` : ''}`).join(', ') || 'none'}. Their sessions count as other work or life, not goal work.` };
   }
 
   // ---------- path ----------
@@ -1360,7 +1370,7 @@ export class AimService {
     const hardTouched = hardMoves > 0 || sessions.some(s => (s.classification === 'goal_hard' || (s.classification === 'main_step' && goal?.levers.find(l => l.id === s.leverId)?.kind === 'hard')) && (att.attention.get(s.id) ?? 0) >= 10);
     const quiet = await this.quietNumbers();
     const overrides = sessions.filter(s => s.override).length;
-    const list = sessions.sort((a, b) => a.start.localeCompare(b.start)).map(s => ({ id: s.id, from: localTime(new Date(s.start), tz), to: s.end ? localTime(new Date(s.end), tz) : 'running', task: s.task, area: s.area, classification: s.classification, lever_id: s.leverId, wall_min: round(att.wall.get(s.id) ?? 0), attention_min: round(s.attentionShareOverride !== undefined ? (att.wall.get(s.id) ?? 0) * s.attentionShareOverride : att.attention.get(s.id) ?? 0), override: s.override ?? false, outcome: s.outcome, summary: s.summary }));
+    const list = sessions.sort((a, b) => a.start.localeCompare(b.start)).map(s => ({ id: s.id, from: localTime(new Date(s.start), tz), to: s.end ? localTime(new Date(s.end), tz) : 'running', task: s.task, area: s.area, classification: s.classification, lever_id: s.leverId, project_id: s.projectId, wall_min: round(att.wall.get(s.id) ?? 0), attention_min: round(s.attentionShareOverride !== undefined ? (att.wall.get(s.id) ?? 0) * s.attentionShareOverride : att.attention.get(s.id) ?? 0), override: s.override ?? false, outcome: s.outcome, summary: s.summary }));
     const gaps = findGaps(sessions, start, end).map(g => ({ from: localTime(new Date(g.start), tz), to: localTime(new Date(g.end), tz), minutes: g.minutes }));
     return {
       date: d, mode: day?.mode ?? 'full', main_step: { title: main?.title ?? null, done: !!main?.done, planned: !!main }, routines,

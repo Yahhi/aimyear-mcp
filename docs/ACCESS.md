@@ -79,6 +79,7 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `delete_social_account` | auth | deletes the person's saved network login |
 | `get_post_draft` | auth | drafts a post from the person's private record and reads their own feed |
 | `add_post` | auth | posts on the person's own WIP or Bluesky account, at their explicit request |
+| `list_wip_projects` | auth | reads the person's own WIP projects with their saved WIP login |
 
 ## HTTP routes
 

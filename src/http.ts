@@ -202,19 +202,25 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
   const bearer = (req: express.Request) => (req.header('authorization') ?? '').replace(/^Bearer\s+/i, '').trim();
   // The Post action of the evening offer (the phone app, a notification button). Same
   // sign-in as /mcp: an OAuth access token or a static token, as a Bearer header.
-  // Body: { date, text?, networks? }. Safe to retry: a day goes to each network once.
+  // Body: { date, text?, networks?, wip_todos? }. Safe to retry: a day goes to each network
+  // (on WIP, each project) once.
   app.post('/social/post', async (req, res) => {
     try {
       if (!originAllowed(req.header('origin'), baseUrl, extraOrigins)) { res.status(403).json({ error: 'origin not allowed' }); return; }
       const who = await identify(bearer(req), req.header('user-agent'));
       if (!who || who === 'invalid') { res.status(401).set('WWW-Authenticate', `Bearer resource_metadata="${resourceMetadata}"`).json({ error: 'sign in required' }); return; }
-      const b = (req.body ?? {}) as { date?: unknown; text?: unknown; networks?: unknown };
+      const b = (req.body ?? {}) as { date?: unknown; text?: unknown; networks?: unknown; wip_todos?: unknown };
       const date = typeof b.date === 'string' ? b.date : undefined;
       const text = typeof b.text === 'string' ? b.text : undefined;
       const networks = Array.isArray(b.networks) ? b.networks.filter((n): n is Network => (NETWORKS as readonly string[]).includes(n as string)) : undefined;
+      // The WIP todos as shown (one per project): [{key, text}], at most 20.
+      const wip_todos = Array.isArray(b.wip_todos)
+        ? b.wip_todos.slice(0, 20).flatMap(t => t && typeof t === 'object' && typeof (t as { text?: unknown }).text === 'string'
+          ? [{ key: typeof (t as { key?: unknown }).key === 'string' ? (t as { key: string }).key : undefined, text: (t as { text: string }).text }] : [])
+        : undefined;
       const store = storeFor(who.uid);
       const social = new SocialService(store, new AimService(store, 'social-post', 'mobile', who.agent), socialDeps);
-      res.json(await social.post({ date, text, networks }));
+      res.json(await social.post({ date, text, networks, wip_todos }));
     } catch (e) {
       const msg = e instanceof AimError ? e.message : 'Something went wrong. Try again: a retry never posts the same day twice.';
       if (!(e instanceof AimError)) console.error('[social/post] failed', (e as Error).name);

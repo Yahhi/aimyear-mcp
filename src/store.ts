@@ -343,6 +343,10 @@ export class Store {
     return snap.exists ? (snap.data() as PostRecord) : null;
   }
   async savePostRecord(r: PostRecord) { await this.posts().doc(r.id).set(r); }
+  /** Every post record of one local day, on any network (a WIP day has one per project). */
+  async getPostRecordsOn(date: string): Promise<PostRecord[]> {
+    return (await this.posts().where('date', '==', date).get()).docs.map(d => d.data() as PostRecord);
+  }
   /**
    * Takes the right to post for one day and network, in a transaction. It is refused when
    * the post is already made, or when another attempt claimed it less than staleMs ago;

@@ -1,6 +1,6 @@
 {
   "name": "aimyear-mcp",
-  "version": "0.12.2",
+  "version": "0.13.0",
   "description": "AimYear MCP server: one measurable yearly goal, a path of steps, focus sessions with attention shares, and a stop rule for comfortable work.",
   "type": "module",
   "bin": {
@@ -21,6 +21,7 @@
   "license": "SEE LICENSE IN LICENSE.md",
   "private": true,
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.6.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "express": "^5.2.1",
     "firebase-admin": "^14.4.0",
