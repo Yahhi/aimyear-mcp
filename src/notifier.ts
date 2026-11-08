@@ -3,6 +3,7 @@ import { Notifications, Store } from './store.js';
 import { localDate } from './dates.js';
 import { AimService } from './service.js';
 import { SocialService } from './social/service.js';
+import { CalendarService } from './calendar/service.js';
 import type { Device, DesktopReminder, Pending, Workplace } from './types.js';
 
 const DESKTOP: Device['platform'][] = ['macos', 'windows', 'web'];
@@ -38,6 +39,10 @@ export function textFor(p: Pending, mainStep: { title: string; done: boolean } |
 /** Builds the posting service for one user; tests pass a fake. */
 export type SocialFor = (uid: string) => Pick<SocialService, 'eveningOffer' | 'armOffer'>;
 const realSocialFor: SocialFor = uid => { const store = new Store(uid); return new SocialService(store, new AimService(store, 'tick', 'mobile')); };
+
+/** Builds the calendar retry for one user; tests pass a fake. */
+export type CalendarFor = (uid: string) => Pick<CalendarService, 'flush'>;
+const realCalendarFor: CalendarFor = uid => new CalendarService(new Store(uid));
 
 /** Pushes one message to the given devices and drops tokens that are gone. */
 async function push(uid: string, targets: Device[], message: BaseMessage, notif: Notifications) {
@@ -145,13 +150,20 @@ export async function pullDesktop(uid: string, notif: Notifications, now = new D
  * Desktop reminders are not pushed: they go to the desktop inbox that the desktop app
  * pulls (POST /desktop/reminders), and their stand-up cadence is kept here too.
  */
-export async function tick(notif: Notifications, now = new Date(), socialFor: SocialFor = realSocialFor) {
+export async function tick(notif: Notifications, now = new Date(), socialFor: SocialFor = realSocialFor, calendarFor: CalendarFor = realCalendarFor) {
   const due = await notif.due(now.toISOString());
   // Without a desktop app polling, its reminders would pile up: drop the ones too old to say.
   try { await notif.dropStaleDesktopReminders(new Date(now.getTime() - DESKTOP_STALE_MS).toISOString()); } catch (e) { console.error('[tick] desktop sweep failed', (e as Error).message); }
   const results: { id: string; kind: string; sent: number; failed: number; reason?: string; continued?: string }[] = [];
   for (const p of due) {
     if (!(await notif.claim(p.id))) continue;
+    if (p.kind === 'calendar_retry') {
+      // Writes to the AimYear calendar that failed earlier; flush re-arms itself while some still wait.
+      let r: { written: number; waiting: number; dropped: number } | undefined, reason: string | undefined;
+      try { r = await calendarFor(p.uid).flush(); } catch (e) { reason = (e as Error).message; }
+      results.push({ id: p.id, kind: p.kind, sent: r?.written ?? 0, failed: r?.waiting ?? 0, reason: reason ?? (r ? `calendar: ${r.written} written, ${r.waiting} waiting, ${r.dropped} dropped` : undefined) });
+      continue;
+    }
     if (p.workplace === 'desktop' && p.kind !== 'post_offer') {
       const r = await produceDesktop(p, notif, now).catch(e => { console.error('[tick] desktop reminder failed', (e as Error).message); return { reminder: undefined, continued: undefined }; });
       results.push({ id: p.id, kind: p.kind, sent: 0, failed: 0, reason: r.reminder ? 'desktop inbox' : 'desktop, too old to say', continued: r.continued });

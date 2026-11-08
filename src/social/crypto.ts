@@ -18,9 +18,13 @@ function key(): Buffer {
   return k;
 }
 
-const aad = (uid: string, network: Network) => Buffer.from(`aimyear-social:v1:${uid}:${network}`);
+/** What a sealed secret belongs to: a posting network, or the Google Calendar connection. */
+export type Sealable = Network | 'google_calendar';
+const LABEL: Partial<Record<Sealable, string>> = { google_calendar: 'Google Calendar' };
 
-export function seal(plain: Record<string, string>, uid: string, network: Network): SealedSecret {
+const aad = (uid: string, network: Sealable) => Buffer.from(`aimyear-social:v1:${uid}:${network}`);
+
+export function seal(plain: Record<string, string>, uid: string, network: Sealable): SealedSecret {
   const iv = randomBytes(12);
   const c = createCipheriv('aes-256-gcm', key(), iv);
   c.setAAD(aad(uid, network));
@@ -28,7 +32,7 @@ export function seal(plain: Record<string, string>, uid: string, network: Networ
   return { v: 1, iv: iv.toString('base64'), tag: c.getAuthTag().toString('base64'), data: data.toString('base64') };
 }
 
-export function open(s: SealedSecret, uid: string, network: Network): Record<string, string> {
+export function open(s: SealedSecret, uid: string, network: Sealable): Record<string, string> {
   try {
     const d = createDecipheriv('aes-256-gcm', key(), Buffer.from(s.iv, 'base64'));
     d.setAAD(aad(uid, network));
@@ -37,6 +41,7 @@ export function open(s: SealedSecret, uid: string, network: Network): Record<str
   } catch (e) {
     if (e instanceof SealError) throw e;
     // Never say more: the message must not carry any part of the secret.
-    throw new SealError(`The saved ${network} connection can't be read. Connect ${network} again.`);
+    const name = LABEL[network] ?? network;
+    throw new SealError(`The saved ${name} connection can't be read. Connect ${name} again.`);
   }
 }

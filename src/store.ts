@@ -2,7 +2,7 @@ import { initializeApp, cert, getApps, applicationDefault } from 'firebase-admin
 import { getFirestore, Firestore, FieldValue } from 'firebase-admin/firestore';
 import { readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import type { Goal, Path, Profile, Day, Block, Session, Move, Mode, Workplace, Commitment, Device, Pending, Direction, Routine, AppliedOp, Network, SocialAccount, PostRecord, DesktopReminder } from './types.js';
+import type { Goal, Path, Profile, Day, Block, Session, Move, Mode, Workplace, Commitment, Device, Pending, Direction, Routine, AppliedOp, Network, SocialAccount, PostRecord, DesktopReminder, CalendarLink, BusyDay, CalendarOutboxItem } from './types.js';
 
 let dbSingleton: Firestore | null = null;
 export function initFirestore(): Firestore {
@@ -358,6 +358,35 @@ export class Store {
       return { claimed: true as const };
     });
   }
+
+  // --- Google Calendar (docs/calendar-sync.md) ---
+  private calendarDoc() { return this.user().collection('calendar').doc('google'); }
+  private busy() { return this.user().collection('calendar_busy'); }
+  private outbox() { return this.user().collection('calendar_outbox'); }
+  async getCalendarLink(): Promise<CalendarLink | null> {
+    const snap = await this.calendarDoc().get();
+    return snap.exists ? (snap.data() as CalendarLink) : null;
+  }
+  async saveCalendarLink(l: CalendarLink) { await this.calendarDoc().set(l); }
+  /** Disconnect: the link, the cached busy times and the retry queue. */
+  async deleteCalendarData() {
+    await this.calendarDoc().delete();
+    for (const col of [this.busy(), this.outbox()]) {
+      const snap = await col.get();
+      await Promise.all(snap.docs.map(d => d.ref.delete()));
+    }
+  }
+  async getBusyDays(from: string, to: string): Promise<BusyDay[]> {
+    const snap = await this.busy().where('date', '>=', from).where('date', '<=', to).get();
+    return snap.docs.map(d => d.data() as BusyDay);
+  }
+  async saveBusyDay(b: BusyDay) { await this.busy().doc(b.date).set(b); }
+  async getCalendarOutbox(): Promise<CalendarOutboxItem[]> {
+    const snap = await this.outbox().get();
+    return snap.docs.map(d => d.data() as CalendarOutboxItem);
+  }
+  async saveCalendarOutbox(i: CalendarOutboxItem) { await this.outbox().doc(i.key).set(i); }
+  async removeCalendarOutbox(key: string) { await this.outbox().doc(key).delete(); }
 
   // --- blocks ---
   async saveBlock(b: Block) { await this.blocks().doc(b.id).set(b); }

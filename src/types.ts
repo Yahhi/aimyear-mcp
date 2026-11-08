@@ -264,8 +264,9 @@ export interface Pending {
   uid: string;
   blockId: string;
   dueAt: string;
-  /** post_offer: the evening draft of the day's progress post, with a Post action (Pro). blockId is '' then. */
-  kind: 'block_end' | 'break_end' | 'standup' | 'post_offer';
+  /** post_offer: the evening draft of the day's progress post, with a Post action (Pro). blockId is '' then.
+   * calendar_retry: writes to the AimYear calendar that failed wait in calendar_outbox; this tries them again. */
+  kind: 'block_end' | 'break_end' | 'standup' | 'post_offer' | 'calendar_retry';
   workplace: Workplace;
   minutes: number;
   breakMin: number;
@@ -332,4 +333,51 @@ export interface PostRecord {
   url?: string;
   postedAt?: string;
   error?: string;
+}
+
+// ---------- Google Calendar sync (docs/calendar-sync.md) ----------
+
+/**
+ * The connected Google account, at users/{uid}/calendar/google. `secret` (the refresh
+ * token, sealed like the social logins) is the only secret; nothing in the doc is a
+ * calendar's content.
+ */
+export interface CalendarLink {
+  /** The Google account's primary calendar id, which is its email address. */
+  email: string;
+  connectedAt: string;
+  /** Scopes Google granted: the user can leave some unticked on the consent screen. */
+  scopes: string[];
+  /** The calendars whose busy times count as time already spoken for. */
+  readCalendars: string[];
+  /** The "AimYear" calendar AimYear made and writes to; none without the app.created scope. */
+  aimyearCalendarId?: string;
+  /** revoked: Google refused the refresh token (access removed in the Google account): connect again. */
+  status: 'ok' | 'revoked';
+  secret: SealedSecret;
+}
+
+/** Busy time from the chosen calendars for one local day, at users/{uid}/calendar_busy/{date}. Only start and end. */
+export interface BusyDay {
+  date: string;
+  /** ISO instants, merged, clipped to the day. */
+  intervals: { start: string; end: string }[];
+  /** The calendars it was read from, so a new choice reads again. */
+  calendars: string[];
+  fetchedAt: string;
+}
+
+/**
+ * A write to the AimYear calendar that failed and waits for the next try, at
+ * users/{uid}/calendar_outbox/{key}. It names what to write, never the content: the
+ * retry reads the session or the day as it is then.
+ */
+export interface CalendarOutboxItem {
+  key: string;
+  kind: 'session' | 'session_delete' | 'main_step';
+  /** A session id, or a YYYY-MM-DD for the main step. */
+  ref: string;
+  attempts: number;
+  lastError: string;
+  at: string;
 }

@@ -1,5 +1,5 @@
 import { DEFAULT_PROFILE, plainOp, type Tx } from '../src/store.js';
-import type { AppliedOp, Block, Commitment, Day, Device, Goal, Mode, Move, Path, Network, Pending, PostRecord, Profile, Routine, Session, SocialAccount } from '../src/types.js';
+import type { AppliedOp, Block, Commitment, Day, Device, Goal, Mode, Move, Path, Network, Pending, PostRecord, Profile, Routine, Session, SocialAccount, CalendarLink, BusyDay, CalendarOutboxItem } from '../src/types.js';
 
 /** The Store's interface kept in memory, so service logic can be tested without Firestore. */
 export class FakeStore {
@@ -76,6 +76,17 @@ export class FakeStore {
   async getSocialAccount(n: Network) { const a = this.social.get(n); return a ? structuredClone(a) : null; }
   async saveSocialAccount(a: SocialAccount) { this.social.set(a.network, structuredClone(a)); }
   async deleteSocialAccount(n: Network) { this.social.delete(n); }
+  calendar: CalendarLink | null = null;
+  busy = new Map<string, BusyDay>();
+  outbox = new Map<string, CalendarOutboxItem>();
+  async getCalendarLink() { return structuredClone(this.calendar); }
+  async saveCalendarLink(l: CalendarLink) { this.calendar = structuredClone(l); }
+  async deleteCalendarData() { this.calendar = null; this.busy.clear(); this.outbox.clear(); }
+  async getBusyDays(from: string, to: string) { return [...this.busy.values()].filter(b => b.date >= from && b.date <= to).map(b => structuredClone(b)); }
+  async saveBusyDay(b: BusyDay) { this.busy.set(b.date, structuredClone(b)); }
+  async getCalendarOutbox() { return [...this.outbox.values()].map(i => structuredClone(i)); }
+  async saveCalendarOutbox(i: CalendarOutboxItem) { this.outbox.set(i.key, structuredClone(i)); }
+  async removeCalendarOutbox(key: string) { this.outbox.delete(key); }
   async getPostRecord(id: string) { const r = this.posts.get(id); return r ? structuredClone(r) : null; }
   async savePostRecord(r: PostRecord) { this.posts.set(r.id, structuredClone(r)); }
   async claimPost(r: PostRecord, staleMs: number) {

@@ -185,7 +185,11 @@ Data lives in Firestore under `users/{uid}/aim/{goal,path,profile}`, `users/{uid
 `expiresAt`), `users/{uid}/social/{wip,bluesky}` (handle and the login sealed with AES-256-GCM),
 `users/{uid}/posts/{date}_{network}` (the posts AimYear made: their ids tell them apart from the
 user's own posts, and the doc is claimed before each post so a retry never posts twice),
-`users/{uid}/aim/pro` (the RevenueCat status); OAuth under `oauth_clients`, `oauth_requests`, `oauth_codes`, `oauth_tokens`;
+`users/{uid}/aim/pro` (the RevenueCat status), `users/{uid}/calendar/google` (the Google Calendar
+link: account email, chosen calendars, the AimYear calendar id, the refresh token sealed like the
+social logins), `users/{uid}/calendar_busy/{date}` (busy start/end only, cached for 10 minutes),
+`users/{uid}/calendar_outbox/{key}` (failed writes to the AimYear calendar waiting for the retry),
+`calendar_oauth_states/{sha256}` (one-time connect states, 10 minutes); OAuth under `oauth_clients`, `oauth_requests`, `oauth_codes`, `oauth_tokens`;
 reminders in `pending_notifications` (claimed by a transactional delete before each push) and,
 for desktop apps, `desktop_reminders` (taken once by `POST /desktop/reminders`).
 
@@ -209,7 +213,11 @@ issuer), `AIMYEAR_ALLOWED_ORIGINS` (extra browser origins), `AIMYEAR_WORKPLACE`,
 without it connecting a network refuses), `AIMYEAR_PRO_UIDS` (comma-separated uids that always
 have Pro), `REVENUECAT_SECRET_KEY` (a RevenueCat secret API key, for the REST check; a secret),
 `REVENUECAT_ENTITLEMENT` (default `AimYear Pro`), `REVENUECAT_WEBHOOK_AUTH` (the Authorization
-value set on the RevenueCat webhook; a secret; unset refuses every webhook call).
+value set on the RevenueCat webhook; a secret; unset refuses every webhook call),
+`GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` (a Google OAuth client of type Web
+application, for Google Calendar sync; the secret from Secret Manager; unset refuses connecting),
+`GOOGLE_OAUTH_REDIRECT_URI` (default `<AIMYEAR_BASE_URL>/calendar/google/callback`; must be listed on
+the OAuth client). Google Calendar tokens are sealed with `AIMYEAR_SOCIAL_KEY` too.
 
 ## Tests
 
@@ -237,7 +245,9 @@ gcloud run deploy aimyear-mcp --source . --project aimyear-app --region us-centr
 Env vars on the service: `AIMYEAR_TOKENS`, `AIMYEAR_TZ`, `AIMYEAR_PROJECT`,
 `AIMYEAR_BASE_URL=https://mcp.aimyear.com`, `AIMYEAR_SOCIAL_KEY` (as a Secret Manager secret,
 never a plain env value), `AIMYEAR_PRO_UIDS`, and for Pro `REVENUECAT_SECRET_KEY` and
-`REVENUECAT_WEBHOOK_AUTH` (Secret Manager secrets) and optionally `REVENUECAT_ENTITLEMENT`.
+`REVENUECAT_WEBHOOK_AUTH` (Secret Manager secrets) and optionally `REVENUECAT_ENTITLEMENT`;
+for Google Calendar sync `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` (a Secret Manager
+secret). Google's redirect URI is `https://mcp.aimyear.com/calendar/google/callback`.
 The RevenueCat webhook URL is `https://mcp.aimyear.com/revenuecat/webhook`. `mcp.aimyear.com` is a Cloud Run domain mapping
 (CNAME to `ghs.googlehosted.com` in Route 53) and is in Firebase Auth's authorized domains.
 Health: `/health`. The legacy URL `https://<service>/c/<token>/mcp` still works.

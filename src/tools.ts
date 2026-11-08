@@ -4,6 +4,7 @@ import { AimService, AimError, ProRequiredError } from './service.js';
 import { AREAS, NETWORKS, TRACKINGS } from './types.js';
 import type { SocialService } from './social/service.js';
 import type { AccountService } from './account.js';
+import type { CalendarService } from './calendar/service.js';
 import { levelOfTool } from './access.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -24,16 +25,16 @@ type Handler = (args: any) => Promise<unknown>;
 type Kind = 'read' | 'write' | 'idempotent' | 'destructive';
 const READ = ['get_goal', 'check_goal_draft', 'get_path', 'next_steps', 'get_commitments', 'get_capacity', 'get_planning_context', 'get_plan', 'get_routines',
   'get_now', 'list_sessions', 'find_gaps', 'summarize_day', 'summarize_week', 'find_leaks', 'get_settings', 'list_devices', 'list_social_accounts', 'get_post_draft',
-  'get_insights', 'list_agents', 'list_moves'];
+  'get_insights', 'list_agents', 'list_moves', 'get_calendar'];
 // Replaces a whole list or removes something: an earlier value is gone after the call.
 const DESTRUCTIVE = ['set_goal', 'set_levers', 'set_projects', 'set_milestones', 'set_tracks', 'set_commitments', 'set_routines', 'set_plan',
-  'delete_step', 'delete_plan_item', 'delete_session', 'delete_move', 'delete_device', 'stop_timer', 'delete_social_account', 'delete_agent'];
+  'delete_step', 'delete_plan_item', 'delete_session', 'delete_move', 'delete_device', 'stop_timer', 'delete_social_account', 'delete_agent', 'set_calendar', 'delete_calendar'];
 // Calling twice with the same arguments leaves the same result.
 const IDEMPOTENT = ['record_progress', 'edit_milestone', 'edit_step', 'edit_plan_item', 'set_day_mode', 'split_attention', 'edit_session', 'set_settings', 'add_device',
   // Connecting again replaces the saved login; a day's post goes to each network once, however often it is called.
   'add_social_account', 'add_post'];
 // Reaches a network outside AimYear (WIP, Bluesky).
-const OPEN_WORLD = ['add_social_account', 'get_post_draft', 'add_post'];
+const OPEN_WORLD = ['add_social_account', 'get_post_draft', 'add_post', 'get_calendar', 'set_calendar', 'add_calendar', 'delete_calendar'];
 export function kindOf(name: string): Kind {
   if (READ.includes(name)) return 'read';
   if (DESTRUCTIVE.includes(name)) return 'destructive';
@@ -56,7 +57,7 @@ export const INSTRUCTIONS = `AimYear keeps one person's big aim for the year, th
 
 Names: get_ reads one thing, list_ reads several, find_ looks for problems, set_ replaces a whole list, add_ / edit_ / delete_ change one entry. A session is one piece of work; the timer runs while sessions run. A move (add_move) is one action toward the aim with no duration, for work that had no timer. The weekly target (days a week toward the aim, set_settings weekly_target) is what AimYear leads with, not a daily streak. When a result has quiet_numbers: true, the user chose not to hear minutes or percentages: speak in words, moves and days only.
 
-Typical flow: get_goal (or check_goal_draft → set_goal), get_path (a path can have up to 3 tracks, set_tracks: different ways to the same aim, each with its own current milestone; the main step can come from any of them), get_planning_context → set_plan with one main step (routines from set_routines are added to each day's plan by the server), start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Hard first: the first step of each stage and each day's main step should be on a hard lever (the work the user puts off: outreach, applications, selling, publishing). Preparation (CV, profile, research, polishing) comes only when it blocks the hard step, and only as much as it blocks; do the hard step with what exists now and improve after the replies. set_plan, add_steps and set_levers warn when this is broken: fix it before moving on. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine. Posting progress in public (WIP, Bluesky; Pro): get_post_draft shows the day's draft from the record; add_post publishes it only when the user explicitly asks, with their edits. get_insights gives the week or month at a glance (aim/other/life minutes, hard share, when hard work happens, comebacks). list_agents shows the agents connected to the account; delete_agent disconnects one, only when the user asks.
+Typical flow: get_goal (or check_goal_draft → set_goal), get_path (a path can have up to 3 tracks, set_tracks: different ways to the same aim, each with its own current milestone; the main step can come from any of them), get_planning_context → set_plan with one main step (routines from set_routines are added to each day's plan by the server), start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Hard first: the first step of each stage and each day's main step should be on a hard lever (the work the user puts off: outreach, applications, selling, publishing). Preparation (CV, profile, research, polishing) comes only when it blocks the hard step, and only as much as it blocks; do the hard step with what exists now and improve after the replies. set_plan, add_steps and set_levers warn when this is broken: fix it before moving on. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine. Posting progress in public (WIP, Bluesky; Pro): get_post_draft shows the day's draft from the record; add_post publishes it only when the user explicitly asks, with their edits. get_insights gives the week or month at a glance (aim/other/life minutes, hard share, when hard work happens, comebacks). list_agents shows the agents connected to the account; delete_agent disconnects one, only when the user asks. Google Calendar (Pro): add_calendar gives a link for the user to open and connect; busy times from the calendars chosen with set_calendar then count as time already spoken for in get_planning_context and get_capacity (start and end only, never titles), and finished sessions and each day's main step are written to an "AimYear" calendar, never to another one. get_calendar shows the state; delete_calendar disconnects, only when the user asks.
 
 The method behind these tools (setting a countable aim, stages by readiness, hard first, an honest record, a weekly target) is the prompt "aim", also the resource aimyear://skill/aim. If the client has no /aim skill installed, read it before setting an aim or planning.`;
 
@@ -79,10 +80,11 @@ function wrap(name: string, fn: Handler, signedIn: boolean) {
 }
 
 /** svc is null for an anonymous caller: the tools are listed, and every call is refused. */
-export function registerTools(server: McpServer, maybeSvc: AimService | null, maybeSocial: SocialService | null = null, maybeAccount: AccountService | null = null) {
+export function registerTools(server: McpServer, maybeSvc: AimService | null, maybeSocial: SocialService | null = null, maybeAccount: AccountService | null = null, maybeCalendar: CalendarService | null = null) {
   const svc = maybeSvc as AimService;
   const social = maybeSocial as SocialService;
   const account = maybeAccount as AccountService;
+  const calendar = maybeCalendar as CalendarService;
   const t = (name: string, description: string, shape: Record<string, z.ZodTypeAny>, fn: Handler) =>
     server.registerTool(name, { title: title(name), description, inputSchema: shape, annotations: annotationsFor(name) }, wrap(name, fn, maybeSvc !== null));
 
@@ -143,10 +145,10 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
     if (r.ok && social) await social.armOffer().catch(e => console.error('[set_commitments] post offer re-arm failed', (e as Error).message));
     return r;
   });
-  t('get_capacity', 'Weekly time budget out of 168 hours: overhead, hours committed per area, focus windows, and what is still unaccounted for. Nothing is assumed.', {}, () => svc.capacity());
+  t('get_capacity', 'Weekly time budget out of 168 hours: overhead, hours committed per area, focus windows, and what is still unaccounted for. Nothing is assumed. With Google Calendar connected (Pro), calendar_next_7_days shows each coming day\'s busy minutes and the focus window left after them.', {}, () => svc.capacity());
 
   // ---- day ----
-  t('get_planning_context', 'Everything needed to plan a day: goal and pace, next_steps, yesterday\'s summary and undone items, week balance, days since a hard lever. Defaults to tomorrow. The agent plans; then call set_plan.', { date: date.optional() }, a => svc.getPlanningContext(a.date));
+  t('get_planning_context', 'Everything needed to plan a day: goal and pace, next_steps, yesterday\'s summary and undone items, week balance, days since a hard lever. With Google Calendar connected (Pro), calendar lists that day\'s busy times (start and end, no titles) and focus_window_minutes is what is left after them. Defaults to tomorrow. The agent plans; then call set_plan.', { date: date.optional() }, a => svc.getPlanningContext(a.date));
   t('get_plan', 'The plan for a day (default today).', { date: date.optional() }, a => svc.getPlan(a.date));
   t('set_plan', 'Replace the plan for a day. Exactly one item must have isMainStep=true (the step toward the goal), ideally linked by stepId from next_steps and on a hard lever. Warns when no item is on a hard lever. Other items: paid work, family, workout, etc. with their area. Items that stay keep their done state.', {
     date: date.optional(), items: z.array(z.object({ title: z.string(), area, projectId: z.string().optional(), leverId: z.string().optional(), stepId: z.string().optional(), isMainStep: z.boolean().optional(), estimateMin: z.number().int().optional() })),
@@ -232,6 +234,14 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
   t('add_post', 'Post the day\'s progress, only after the user explicitly said to post. text is the draft as the user edited it (default: the draft from get_post_draft). Goes to the networks chosen in settings, or the ones given. A network where the user already posted that day themselves is skipped. Each day goes to each network once: a retry never posts twice. Today or yesterday only. Pro.', {
     date: date.optional(), text: z.string().max(4000).optional(), networks: z.array(network).optional().describe('default: the networks chosen in settings'),
   }, a => social.post(a));
+
+  // ---- Google Calendar (Pro, docs/calendar-sync.md) ----
+  t('get_calendar', 'Google Calendar sync: connected or not, the Google account, its calendars (id, name, whether their busy times are read), whether the AimYear calendar exists, permissions the user did not allow, and whether the user has Pro. Never returns a token or an event title.', {}, () => calendar.status());
+  t('add_calendar', 'Connect Google Calendar (Pro): returns a Google consent link for the signed-in user. Give the link to the user to open in a browser; it works once, for 10 minutes. After they allow access, call get_calendar to see the result. AimYear reads only busy times (start, end) from the calendars the user picks and writes only to its own calendar named "AimYear". The app\'s Connect button calls this too.', {}, () => calendar.connectUrl());
+  t('set_calendar', 'Choose which Google calendars count as busy (Pro): read_calendars is the full list of calendar ids from get_calendar ([] for none). Busy times from them reduce that day\'s focus window in get_planning_context and get_capacity. The AimYear calendar itself never counts.', {
+    read_calendars: z.array(z.string().min(1).max(1024)).max(50),
+  }, a => calendar.setCalendars(a.read_calendars));
+  t('delete_calendar', 'Disconnect Google Calendar: revokes AimYear\'s access at Google and deletes everything stored about it; reading and writing both stop. The AimYear calendar and its events stay in the user\'s Google account. Only on the user\'s explicit request.', {}, () => calendar.disconnect());
 
   // ---- prompts ----
   server.registerPrompt('plan-tomorrow', { description: 'Plan tomorrow: one main step toward the goal, then the rest of life.' }, () => ({

@@ -30,17 +30,27 @@ import type { Workplace } from './types.js';
 import { AccountService, agentFromUserAgent, agentName, firestoreAccountBackend, type AccountBackend } from './account.js';
 import { pro as realPro, type createPro } from './pro.js';
 import { initFirestore } from './store.js';
+import { CalendarService, finishGoogleCallback, realCalendarDeps, type CalendarDeps } from './calendar/service.js';
 
 /** Who is calling, for the record: the agent's name on sessions, and the OAuth client id. */
-export interface Caller { agent?: () => Promise<string | undefined>; clientId?: string; accountBackend?: AccountBackend; storeFor?: (uid: string) => Store }
+export interface Caller { agent?: () => Promise<string | undefined>; clientId?: string; accountBackend?: AccountBackend; storeFor?: (uid: string) => Store; calendarDeps?: CalendarDeps }
 
 export function buildServer(uid: string | null, clientSessionId: string, workplace: Workplace, socialDeps?: SocialDeps, caller: Caller = {}) {
   const server = new McpServer({ name: 'aimyear', version: VERSION }, { instructions: INSTRUCTIONS });
-  if (!uid) { registerTools(server, null, null, null); return server; }
+  if (!uid) { registerTools(server, null, null, null, null); return server; }
   const store = caller.storeFor ? caller.storeFor(uid) : new Store(uid);
-  const svc = new AimService(store, clientSessionId, workplace, caller.agent);
-  registerTools(server, svc, new SocialService(store, svc, socialDeps), new AccountService(caller.accountBackend ?? firestoreAccountBackend(), uid, caller.clientId));
+  const calendar = new CalendarService(store, caller.calendarDeps ?? realCalendarDeps());
+  const svc = new AimService(store, clientSessionId, workplace, caller.agent, calendar);
+  registerTools(server, svc, new SocialService(store, svc, socialDeps), new AccountService(caller.accountBackend ?? firestoreAccountBackend(), uid, caller.clientId), calendar);
   return server;
+}
+
+const esc = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+/** The page Google's consent flow lands on. Plain, no script: it only says what happened. */
+export function callbackPage(ok: boolean, message: string) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AimYear · Google Calendar</title>
+<style>body{font:16px/1.5 -apple-system,system-ui,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1.25rem;color:#1d1d1f;background:#fbfaf7}h1{font-size:1.4rem}p{color:#555}@media(prefers-color-scheme:dark){body{background:#151515;color:#eee}p{color:#aaa}}</style></head>
+<body><h1>${ok ? 'Google Calendar connected' : 'Not connected'}</h1><p>${esc(message)}</p><p><a href="https://aimyear.com">aimyear.com</a></p></body></html>`;
 }
 
 /** A Firebase ID token is a JWT; OAuth and static tokens never contain a dot. */
@@ -83,9 +93,12 @@ export interface AppOptions {
   webhookAuth?: string;
   /** Tests pass an in-memory store; production uses Firestore. */
   storeFor?: (uid: string) => Store;
+  /** Tests pass a fake Google and Pro check; production uses src/calendar/service.ts's real ones. */
+  calendarDeps?: CalendarDeps;
 }
 
-export function createApp({ tokens, baseUrl, provider, extraOrigins = [], socialDeps, verifyIdToken = realVerify, accountBackend, pro, notifications = () => new Notifications(), webhookAuth = process.env.REVENUECAT_WEBHOOK_AUTH, storeFor = (uid: string) => new Store(uid) }: AppOptions) {
+export function createApp({ tokens, baseUrl, provider, extraOrigins = [], socialDeps, verifyIdToken = realVerify, accountBackend, pro, notifications = () => new Notifications(), webhookAuth = process.env.REVENUECAT_WEBHOOK_AUTH, storeFor = (uid: string) => new Store(uid), calendarDeps }: AppOptions) {
+  const calDeps = () => calendarDeps ?? realCalendarDeps();
   const accounts = () => accountBackend ?? firestoreAccountBackend();
   const resourceUrl = new URL('/mcp', baseUrl);
   const oauth = provider ?? new FirestoreOAuthProvider(resourceUrl);
@@ -106,6 +119,16 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
   }));
 
   app.use(express.json({ limit: '1mb' }));
+
+  // ---- Google Calendar: where Google's consent page sends the browser back ----
+  // Public: the one-time state in the query names the user (src/calendar/service.ts).
+  app.get('/calendar/google/callback', async (req, res) => {
+    const q = (k: string) => (typeof req.query[k] === 'string' ? String(req.query[k]) : undefined);
+    let r: { ok: boolean; message: string };
+    try { r = await finishGoogleCallback({ code: q('code'), state: q('state'), error: q('error') }, calDeps(), storeFor); }
+    catch (e) { console.error('[calendar/callback] failed', (e as Error).name); r = { ok: false, message: 'Something went wrong. Try connecting again from AimYear.' }; }
+    res.status(r.ok ? 200 : 400).set({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'" }).type('html').send(callbackPage(r.ok, r.message));
+  });
 
   // ---- the menu bar app and the scheduler (static tokens) ----
   app.get('/now/:token', async (req, res) => {
@@ -193,7 +216,7 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
     }
     const workplace = (req.header('x-aimyear-workplace') as Workplace) ?? 'mobile';
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    const server = buildServer(signedIn?.uid ?? null, signedIn ? `remote:${signedIn.client}` : 'anonymous', workplace, socialDeps, signedIn ? { agent: signedIn.agent, clientId: signedIn.clientId, accountBackend: accounts(), storeFor } : {});
+    const server = buildServer(signedIn?.uid ?? null, signedIn ? `remote:${signedIn.client}` : 'anonymous', workplace, socialDeps, signedIn ? { agent: signedIn.agent, clientId: signedIn.clientId, accountBackend: accounts(), storeFor, calendarDeps: calDeps() } : {});
     instrument(transport, req.body, ctx);
     res.on('close', () => { transport.close().catch(() => {}); server.close().catch(() => {}); });
     await server.connect(transport);
@@ -239,7 +262,7 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
     }
   };
   const workplaceOf = (req: express.Request): Workplace => (req.header('x-aimyear-workplace') === 'mobile' ? 'mobile' : 'desktop');
-  const svcFor = (who: Signed, req: express.Request, label: string) => new AimService(storeFor(who.uid), `remote:${who.client}:${label}`, workplaceOf(req), who.agent);
+  const svcFor = (who: Signed, req: express.Request, label: string) => { const store = storeFor(who.uid); return new AimService(store, `remote:${who.client}:${label}`, workplaceOf(req), who.agent, new CalendarService(store, calDeps())); };
 
   // A desktop app (macOS, Windows) polls this about every minute. Each reminder comes once.
   // pricing.md: reminders are Pro. A Free desktop app gets a refusal it can show as the paywall.
@@ -289,6 +312,8 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
   app.post('/account/delete', signed(async (req, res, who) => {
     if (who.via !== 'firebase') { res.status(403).json({ error: 'Delete the account from the AimYear app.', speak: 'Deleting the account is done in the AimYear app, signed in as you.' }); return; }
     if ((req.body ?? {}).confirm !== true) throw new AimError('Pass {"confirm": true} to delete the account and all its data.');
+    // Take AimYear's Google access back first: deleting the data alone would leave the grant at Google.
+    try { await new CalendarService(storeFor(who.uid), calDeps()).disconnect(); } catch (e) { console.error('[account/delete] calendar revoke failed', (e as Error).message); }
     res.set('Cache-Control', 'no-store').json(await new AccountService(accounts(), who.uid).deleteEverything());
   }));
 

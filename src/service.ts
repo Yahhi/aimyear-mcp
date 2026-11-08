@@ -6,6 +6,7 @@ import { checkGoal, checkStepTitle, type GoalDraft } from './domain/goal.js';
 import { classify, decideVerdict, isGoalWork, leverFor, linkedPlanItem, withPlanItem } from './domain/classify.js';
 import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, Track, PlanItem, Profile, Project, Routine, Session, Step, Stop, Workplace, Network, Move, Tracking } from './types.js';
 import { NETWORKS, TRACKINGS } from './types.js';
+import { focusDay, type FocusDay } from './calendar/busy.js';
 
 export class AimError extends Error {}
 /** A Pro-only feature refused for lack of Pro. Clients key on `code`, never on the wording. */
@@ -24,6 +25,20 @@ const TRACKING_TEXT: Record<Tracking, string> = {
   quiet: 'Tracking: quiet numbers, the record is kept but spoken in words and days.',
 };
 const MOVES_ONLY = 'You record moves, not time (tracking: moves), so there is no timer. Log what changed with add_move, or switch to time with set_settings tracking "time".';
+
+/**
+ * Google Calendar sync as the service sees it (src/calendar/service.ts): busy times for
+ * planning, and the writes after a session or a plan changed. Every write is best effort
+ * and never throws: a failed one waits in the calendar's own retry queue.
+ */
+export interface CalendarHooks {
+  busy(from: string, to: string, tz: string): Promise<{ days: Map<string, { start: string; end: string }[]>; error?: string } | null>;
+  sessionEnded(sessionId: string): Promise<unknown>;
+  sessionDeleted(sessionId: string): Promise<unknown>;
+  mainStepChanged(date: string): Promise<unknown>;
+}
+/** How long a stop or a plan waits for its calendar write before answering anyway. */
+const CALENDAR_WAIT_MS = 6000;
 
 export interface SessionInput {
   direction?: Direction;
@@ -46,8 +61,31 @@ export class AimService {
    * agent: who is calling, recorded on the sessions it starts or logs ("app", "Claude Code",
    * "ChatGPT"…). A function, so the OAuth client name is looked up only when a session needs it.
    */
-  constructor(private store: Store, private clientSessionId: string, private clientWorkplace: Workplace = 'desktop', private agentOf: () => Promise<string | undefined> = async () => undefined) {}
+  constructor(private store: Store, private clientSessionId: string, private clientWorkplace: Workplace = 'desktop', private agentOf: () => Promise<string | undefined> = async () => undefined, private calendar: CalendarHooks | null = null) {}
   private agent() { return (this.agentCache ??= this.agentOf().catch(() => undefined)); }
+
+  /** A calendar write after the record changed: waited for a few seconds at most, and never an error. */
+  private async toCalendar(fn: (c: CalendarHooks) => Promise<unknown>) {
+    if (!this.calendar) return;
+    const c = this.calendar;
+    await Promise.race([
+      fn(c).catch(e => console.error('[calendar] write failed', (e as Error).message)),
+      new Promise(r => setTimeout(r, CALENDAR_WAIT_MS).unref?.()),
+    ]);
+  }
+
+  /** The day's focus window with the chosen calendars' busy time taken out, or null without calendar sync. */
+  private async calendarDays(from: string, to: string): Promise<{ days: Map<string, FocusDay>; error?: string } | null> {
+    if (!this.calendar) return null;
+    const tz = await this.tz();
+    let r;
+    try { r = await this.calendar.busy(from, to, tz); } catch (e) { console.error('[calendar] busy failed', (e as Error).message); return null; }
+    if (!r) return null;
+    const items = await this.store.getCommitments();
+    const days = new Map<string, FocusDay>();
+    for (const [d, busy] of r.days) days.set(d, focusDay(d, tz, items, busy));
+    return { days, error: r.error };
+  }
 
   // ---------- helpers ----------
   private async profile(): Promise<Profile> {
@@ -512,12 +550,19 @@ export class AimService {
     const netWindows = Math.max(0, windows - carved);
     const carvedList = items.filter(c => c.insideWindowId && c.kind === 'commitment').map(c => `${c.title} (${h(occ(c) * c.minutes)} h/week)`);
     const unaccounted = weekMin - overhead - committed - netWindows;
+    // Busy calendar time is not recurring, so it is shown per day for the coming week.
+    const today = await this.today();
+    const cal = await this.calendarDays(today, addDays(today, 6));
+    const calendarWeek = cal ? [...cal.days.entries()].map(([date, f]) => ({ date, busy_min: f.busy_min, taken_from_focus_windows_min: f.calendar_min, focus_window_min: f.net_min })) : null;
+    const calTaken = calendarWeek?.reduce((n, x) => n + x.taken_from_focus_windows_min, 0) ?? 0;
+    const calText = calendarWeek ? ` Google Calendar, next 7 days: ${h(calendarWeek.reduce((n, x) => n + x.busy_min, 0))} h busy, ${h(calTaken)} h of it inside focus windows, so those windows have that much less.${cal?.error ? ` (Calendar: ${cal.error}.)` : ''}` : '';
     return {
       hours_in_a_week: 168, overhead_hours: h(overhead), committed_hours: h(committed),
       focus_window_hours_gross: h(windows), carved_out_of_windows_hours: h(carved), focus_window_hours_net: h(netWindows), carved_out_by: carvedList,
       unaccounted_hours: h(unaccounted), by_area_hours: Object.fromEntries(Object.entries(perArea).map(([k, v]) => [k, h(v)])),
       focus_windows: windowList, assumed_entries: assumedList,
-      speak: `Per week: ${h(overhead)} h overhead (sleep, meals, hygiene, moving), ${h(committed)} h committed to areas (${Object.entries(perArea).map(([k, v]) => `${k} ${h(v)}h`).join(', ') || 'none'}), ${h(windows)} h of focus windows minus ${h(carved)} h carved out of them (${carvedList.join(', ') || 'nothing'}) = ${h(netWindows)} h genuinely free for the goal, ${h(unaccounted)} h not yet accounted for.${windowList.length ? ` Windows: ${windowList.join('; ')}.` : ' No focus windows recorded yet, so the planner has nowhere to put the main step.'}${assumedList.length ? ` Assumed by Claude, please confirm: ${assumedList.join(', ')}.` : ''}`,
+      calendar_next_7_days: calendarWeek,
+      speak: `Per week: ${h(overhead)} h overhead (sleep, meals, hygiene, moving), ${h(committed)} h committed to areas (${Object.entries(perArea).map(([k, v]) => `${k} ${h(v)}h`).join(', ') || 'none'}), ${h(windows)} h of focus windows minus ${h(carved)} h carved out of them (${carvedList.join(', ') || 'nothing'}) = ${h(netWindows)} h genuinely free for the goal, ${h(unaccounted)} h not yet accounted for.${windowList.length ? ` Windows: ${windowList.join('; ')}.` : ' No focus windows recorded yet, so the planner has nowhere to put the main step.'}${assumedList.length ? ` Assumed by Claude, please confirm: ${assumedList.join(', ')}.` : ''}${calText}`,
     };
   }
 
@@ -665,7 +710,8 @@ export class AimService {
     const day = await this.store.getOrCreateDay(d, (await this.profile()).defaultMode);
     const mains = items.filter(i => i.isMainStep);
     const warnings: string[] = [];
-    const windowMin = await this.windowMinutesFor(d);
+    // With calendar sync, a day whose window is all meetings needs no main step.
+    const windowMin = (await this.calendarDays(d, d))?.days.get(d)?.net_min ?? await this.windowMinutesFor(d);
     if (day.mode !== 'off' && windowMin > 0) {
       if (mains.length === 0) return { ok: false, problems: ['plan has no main step'], speak: 'Every day needs exactly one step toward the goal marked as the main step. Which item is it? (Use next_steps for candidates.)' };
       if (mains.length > 1) return { ok: false, problems: ['more than one main step'], speak: 'Only one item can be the main step. Which one?' };
@@ -698,6 +744,7 @@ export class AimService {
     for (const old of prev.values()) if (old.routineId && !day.plan.some(p => p.routineId === old.routineId)) day.plan.push(old);
     await this.applyRoutines(day);
     await this.store.saveDay(day);
+    await this.toCalendar(c => c.mainStepChanged(d));
     const main = day.plan.find(p => p.isMainStep);
     return { ok: true, date: d, plan: day.plan, warnings, speak: `Plan for ${d} saved (${day.plan.length} items). Main step: ${main ? `"${main.title}" [${main.id}]` : 'none (mode off)'}. ${warnings.join(' ')}` };
   }
@@ -798,15 +845,21 @@ export class AimService {
     const commitments = await this.commitmentsFor(d);
     const cap = await this.capacity();
     const committedToday = commitments.reduce((sum, c) => sum + c.minutes, 0);
-    const windowMinutes = await this.windowMinutesFor(d);
+    const cal = await this.calendarDays(d, d);
+    const f = cal?.days.get(d);
+    const windowMinutes = f ? f.net_min : await this.windowMinutesFor(d);
+    // Time already spoken for in Google Calendar: start and end only, never what it is.
+    const calendar = cal ? { busy: f?.busy ?? [], busy_minutes: f?.busy_min ?? 0, taken_from_focus_windows_minutes: f?.calendar_min ?? 0, declared_focus_window_minutes: f?.declared_min ?? await this.windowMinutesFor(d), error: cal.error ?? null } : null;
+    const calText = !calendar ? '' : calendar.error && !f ? `Google Calendar could not be read (${calendar.error}), so busy times are not counted. `
+      : calendar.busy.length ? `Already spoken for in the calendar (busy, no titles): ${calendar.busy.map(b => `${b.start}–${b.end}`).join(', ')}${calendar.taken_from_focus_windows_minutes ? `; that takes ${Math.round(calendar.taken_from_focus_windows_minutes / 6) / 10} h off the focus window` : ''}. ` : 'Calendar: nothing busy that day. ';
     return {
-      date: d, commitments, committed_minutes_that_day: committedToday, focus_window_minutes: windowMinutes, capacity: cap, goal: goal.goal ? { title: goal.goal.title, metric: goal.goal.metric, current: goal.current_value, target: goal.goal.target, days_left: goal.days_left, levers: goal.goal.levers, projects: goal.goal.projects } : null,
+      date: d, commitments, committed_minutes_that_day: committedToday, focus_window_minutes: windowMinutes, calendar, capacity: cap, goal: goal.goal ? { title: goal.goal.title, metric: goal.goal.metric, current: goal.current_value, target: goal.goal.target, days_left: goal.days_left, levers: goal.goal.levers, projects: goal.goal.projects } : null,
       milestone: next.milestone ?? null, next_steps: next.steps,
       carry_over: carryOver,
       yesterday: { date: yesterday, main_step_done: ySum.main_step.done, goal_attention_min: ySum.goal_attention_min, by_area: ySum.by_area, undone_items: undone },
       week: { main_step_days: week.main_step_days, goal_share: week.goal_share, hard_share: week.hard_share, by_area: week.by_area },
       days_since_hard_lever: daysSinceHard, existing_plan: existing?.plan ?? [], routines,
-      speak: `Planning ${d}. ${windowMinutes === 0 ? 'NO focus window that day: do not plan goal work, and do not ask for a main step. ' : `Focus window: ${Math.round(windowMinutes / 6) / 10} h. `}Fixed that day: ${commitments.length ? commitments.map(c => `${c.title} ${c.minutes}min${c.usableForWork ? ' (usable)' : ''}`).join(', ') : 'nothing recorded'} = ${Math.round(committedToday / 6) / 10} h. ${goal.speak} Days since a hard lever: ${daysSinceHard ?? 'never'}. Yesterday main step ${ySum.main_step.done ? 'done' : 'NOT done'}${undone.length ? `, ${undone.length} items left undone` : ''}. ${carryOver ? `The main step of ${carryOver.date} is not done: "${carryOver.title}". Plan it again as the main step unless the user says otherwise.` : 'Pick the main step from next_steps: the first open step of a track, in path order.'} Then fit paid work, family, workout.${routines.length ? ` Routines that day (already in the plan, set_plan keeps them): ${routines.map(r => r.title).join('; ')}.` : ''}`,
+      speak: `Planning ${d}. ${windowMinutes === 0 ? 'NO focus window that day: do not plan goal work, and do not ask for a main step. ' : `Focus window: ${Math.round(windowMinutes / 6) / 10} h. `}${calText}Fixed that day: ${commitments.length ? commitments.map(c => `${c.title} ${c.minutes}min${c.usableForWork ? ' (usable)' : ''}`).join(', ') : 'nothing recorded'} = ${Math.round(committedToday / 6) / 10} h. ${goal.speak} Days since a hard lever: ${daysSinceHard ?? 'never'}. Yesterday main step ${ySum.main_step.done ? 'done' : 'NOT done'}${undone.length ? `, ${undone.length} items left undone` : ''}. ${carryOver ? `The main step of ${carryOver.date} is not done: "${carryOver.title}". Plan it again as the main step unless the user says otherwise.` : 'Pick the main step from next_steps: the first open step of a track, in path order.'} Then fit paid work, family, workout.${routines.length ? ` Routines that day (already in the plan, set_plan keeps them): ${routines.map(r => r.title).join('; ')}.` : ''}`,
     };
   }
 
@@ -865,6 +918,7 @@ export class AimService {
     const now = new Date().toISOString();
     const closed = await this.store.getRunningSessions();
     for (const s of closed) { s.end = now; s.outcome = summary ? outcome : 'partial'; s.summary = summary?.trim() || s.summary || 'Closed when the timer stopped.'; await this.store.saveSession(s); }
+    for (const s of closed) await this.toCalendar(c => c.sessionEnded(s.id));
     const closedNote = closed.length ? ` Closed ${closed.map(s => `"${s.task}"`).join(', ')}.` : '';
     if (!b) return { ok: closed.length > 0, closed_sessions: closed.map(s => s.id), speak: `No timer is running.${closedNote}` };
     b.ended = true;
@@ -1076,6 +1130,7 @@ export class AimService {
       return { result: { ok: true, applied: m.applied, session: view, block: this.blockView(block), timer_stopped: timerStops, speak }, sessionId: s.id };
     });
     await this.stopIdleTimer();
+    await this.toCalendar(c => c.sessionEnded(first.id));
     return result;
   }
 
@@ -1103,6 +1158,7 @@ export class AimService {
       tx.deleteSession(s.id);
       return { result: { ok: true, deleted: s.id, timer_stopped: false, speak: `Deleted [${s.id}] "${s.task}" (${localDate(new Date(s.start), tz)} ${localTime(new Date(s.start), tz)}–${s.end ? localTime(new Date(s.end), tz) : 'running'}). It no longer counts.` }, sessionId: s.id };
     });
+    await this.toCalendar(c => c.sessionDeleted(first.id));
     // A timer only runs for sessions: deleting the last running one stops it, as stop_session does.
     if (await this.stopIdleTimer()) return { ...result, timer_stopped: true, speak: `${result.speak} No session is left, so the timer stopped.` };
     return result;
@@ -1153,6 +1209,7 @@ export class AimService {
       s.projectId = cls.projectId ?? s.projectId; s.leverId = cls.leverId ?? s.leverId;
     }
     await this.store.saveSession(s);
+    if (s.end) await this.toCalendar(c => c.sessionEnded(s.id));
     const view = await this.sessionView(s);
     return { ok: true, session: view, changed, speak: `Fixed [${s.id}] "${s.task}": ${localDate(new Date(s.start), tz)} ${localTime(new Date(s.start), tz)}–${s.end ? localTime(new Date(s.end), tz) : 'running'}, ${view.wall_min} min wall, ${view.attention_min} min attention → ${s.classification}. Changed: ${changed.join(', ')}.` };
   }
@@ -1184,11 +1241,14 @@ export class AimService {
       task: input.task.trim(), notes: [], classification: cls.classification, unclassified: cls.unclassified, verdictAtStart: v.verdict, outcome: 'done',
       agent: await this.agent(),
     };
-    return this.applyOnce(op, async tx => {
+    const logged = await this.applyOnce(op, async tx => {
       tx.saveSession(session);
       const view = await this.sessionView(session);
       return { result: { ok: true, session: view, classification: cls.classification, matched_by: cls.matchedBy, speak: `Logged [${session.id}] "${session.task}" ${localTime(start, tz)}–${localTime(end, tz)} on ${date}: ${view.wall_min} min wall, ${view.attention_min} min attention → ${cls.classification}${cls.unclassified ? ' (unclassified)' : ''}.` }, sessionId: session.id };
     });
+    // A replayed op answers with the first session, so its id is the one to write.
+    await this.toCalendar(c => c.sessionEnded(logged.session.id));
+    return logged;
   }
 
   // ---------- moves (docs/moves.md) ----------

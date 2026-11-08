@@ -56,6 +56,10 @@ export const TOOLS: Record<string, Entry> = {
   delete_social_account: auth('deletes the person\'s saved network login'),
   get_post_draft: auth('drafts a post from the person\'s private record and reads their own feed'),
   add_post: auth('posts on the person\'s own WIP or Bluesky account, at their explicit request'),
+  get_calendar: auth('reads whether the person connected Google Calendar and the list of their calendars (never a token or an event)'),
+  add_calendar: auth('makes a one-time Google consent link bound to the signed-in person'),
+  set_calendar: auth('changes which of the person\'s calendars count as busy'),
+  delete_calendar: auth('revokes AimYear\'s Google Calendar access and deletes what is stored about it'),
 };
 
 /** HTTP routes, "VERB /path". */
@@ -78,6 +82,7 @@ export const ROUTES: Record<string, Entry> = {
   'DELETE /account/agents/:clientId': auth('disconnects one of the person\'s agents (Bearer token)'),
   'GET /account/export': auth('everything the server keeps about the person, as JSON (Bearer token)'),
   'POST /account/delete': auth('deletes the person\'s account and data; the app\'s Firebase sign-in only, with {"confirm": true}'),
+  'GET /calendar/google/callback': pub('Google\'s consent page returns here; only the one-time state from add_calendar (10 minutes, single use) names whose calendar connects'),
   'POST /revenuecat/webhook': admin('RevenueCat subscription events; the Authorization header must equal REVENUECAT_WEBHOOK_AUTH'),
   'GET /.well-known/oauth-authorization-server': pub('OAuth discovery (RFC 8414)'),
   'GET /.well-known/oauth-protected-resource': pub('OAuth discovery (RFC 9728)'),

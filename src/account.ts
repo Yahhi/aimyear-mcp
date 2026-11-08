@@ -8,14 +8,16 @@
  * install of an app), so the oauth_clients row is removed only when nobody else uses it.
  *
  * Deleting the account removes: users/{uid} with every subcollection (aim, days,
- * sessions, blocks, devices, ops, social logins, posts, Pro status), the top-level rows
- * for the uid (pending_notifications, desktop_reminders, oauth_tokens, oauth_codes), the
+ * sessions, blocks, devices, ops, social logins, posts, Pro status, the Google Calendar
+ * link and its busy cache), the top-level rows for the uid (pending_notifications,
+ * desktop_reminders, calendar_oauth_states, oauth_tokens, oauth_codes), the
  * OAuth clients only this person used, and the Firebase Auth user. It does not touch
  * store subscriptions: Apple, Google and aimyear.com bill on their own.
  */
 import type { Firestore } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
 import { initFirestore, PENDING, DESKTOP_REMINDERS } from './store.js';
+import { STATES as CALENDAR_STATES } from './calendar/service.js';
 import { VERSION } from './version.js';
 
 export interface TokenInfo { id: string; client_id: string; type: 'access' | 'refresh'; created: string; expires: number }
@@ -102,7 +104,8 @@ export class AccountService {
     const tree = await this.backend.userTree(this.uid);
     for (const [path, data] of Object.entries(tree)) {
       // users/{uid}/social/{network}.secret is the network login, encrypted: never exported.
-      if (/^social\/[^/]+$/.test(path) && data && typeof data === 'object') {
+      // users/{uid}/calendar/google.secret is the Google refresh token, sealed the same way.
+      if ((/^social\/[^/]+$/.test(path) || path === 'calendar/google') && data && typeof data === 'object') {
         const { secret: _s, ...rest } = data as Record<string, unknown>;
         tree[path] = rest;
       }
@@ -113,7 +116,7 @@ export class AccountService {
       data: tree,
       server_rows: await this.backend.topLevelOf(this.uid),
       agents: await this.agents(),
-      speak: `Your AimYear data: ${Object.keys(tree).length} records, plus your connected agents. Saved WIP and Bluesky logins are not included.`,
+      speak: `Your AimYear data: ${Object.keys(tree).length} records, plus your connected agents. Saved WIP and Bluesky logins and the Google Calendar access are not included.`,
     };
   }
 
@@ -222,12 +225,12 @@ export function firestoreAccountBackend(db: Firestore = initFirestore()): Accoun
     },
     async topLevelOf(uid) {
       const out: Record<string, unknown[]> = {};
-      for (const col of [PENDING, DESKTOP_REMINDERS]) out[col] = (await db.collection(col).where('uid', '==', uid).get()).docs.map(d => d.data());
+      for (const col of [PENDING, DESKTOP_REMINDERS, CALENDAR_STATES]) out[col] = (await db.collection(col).where('uid', '==', uid).get()).docs.map(d => d.data());
       return out;
     },
     async deleteTopLevelOf(uid) {
       let n = 0;
-      for (const col of [PENDING, DESKTOP_REMINDERS]) n += await deleteQuery(db, db.collection(col).where('uid', '==', uid));
+      for (const col of [PENDING, DESKTOP_REMINDERS, CALENDAR_STATES]) n += await deleteQuery(db, db.collection(col).where('uid', '==', uid));
       return n;
     },
     async authUser(uid) {
