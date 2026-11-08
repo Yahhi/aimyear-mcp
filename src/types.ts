@@ -139,6 +139,11 @@ export interface Profile {
   tracking?: Tracking;
   /** Days a week this person wants to move toward the aim, 1 to 7. Unset is 4. */
   weeklyTarget?: number;
+  /**
+   * The weekly review email on Sunday at 19:00 local (docs/weekly-review.md, Pro). Unset
+   * is on; the one-click unsubscribe link sets it to false.
+   */
+  weeklyReviewEmail?: boolean;
 }
 
 export const TRACKINGS = ['time', 'moves', 'quiet'] as const;
@@ -264,8 +269,11 @@ export interface Pending {
   uid: string;
   blockId: string;
   dueAt: string;
-  /** post_offer: the evening draft of the day's progress post, with a Post action (Pro). blockId is '' then. */
-  kind: 'block_end' | 'break_end' | 'standup' | 'post_offer';
+  /**
+   * post_offer: the evening draft of the day's progress post, with a Post action (Pro).
+   * weekly_review: the weekly review email, Sunday 19:00 local (Pro). blockId is '' for both.
+   */
+  kind: 'block_end' | 'break_end' | 'standup' | 'post_offer' | 'weekly_review';
   workplace: Workplace;
   minutes: number;
   breakMin: number;
@@ -273,8 +281,27 @@ export interface Pending {
   elapsedMin?: number;
   /** The last reminder this timer will send: it looks forgotten. */
   final?: boolean;
-  /** post_offer: the local day the post is about. */
+  /** post_offer: the local day the post is about. weekly_review: the Monday of the week it reviews. */
   date?: string;
+}
+
+/**
+ * One week's review email, at users/{uid}/weekly_reviews/{monday}. Claimed in a
+ * transaction before the email goes out, so a retried tick never sends a week twice.
+ */
+export interface WeeklyReviewRecord {
+  /** The Monday of the week, YYYY-MM-DD in the person's timezone. */
+  week: string;
+  /**
+   * sending: claimed, the email is on its way (or the server died mid-way: it is never
+   * sent again, a missed review is better than a double one). failed: SES refused it,
+   * a later tick on the same Sunday may try again.
+   */
+  status: 'sending' | 'sent' | 'failed';
+  attemptAt: string;
+  sentAt?: string;
+  messageId?: string;
+  error?: string;
 }
 
 /**

@@ -6,6 +6,7 @@ import { checkGoal, checkStepTitle, type GoalDraft } from './domain/goal.js';
 import { classify, decideVerdict, isGoalWork, leverFor, linkedPlanItem, withPlanItem } from './domain/classify.js';
 import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, Track, PlanItem, Profile, Project, Routine, Session, Step, Stop, Workplace, Network, Move, Tracking } from './types.js';
 import { NETWORKS, TRACKINGS } from './types.js';
+import { nextReviewDue, reviewPendingId } from './review/schedule.js';
 
 export class AimError extends Error {}
 /** A Pro-only feature refused for lack of Pro. Clients key on `code`, never on the wording. */
@@ -15,6 +16,13 @@ const round = (n: number) => Math.round(n);
 
 /** Days a week toward the aim when the person set no weekly target (docs/moves.md). */
 export const DEFAULT_WEEKLY_TARGET = 4;
+/**
+ * Days toward the aim against the weekly target, said the same way everywhere (weekProgress,
+ * the weekly review email): "3 of 4 days toward the aim" below the target, "6 days toward the
+ * aim, target of 4 met" at or above it, never "6 of 4". `what` is what the days were toward.
+ */
+export const daysTowardAim = (days: number, target: number, what = ' toward the aim') =>
+  days >= target ? `${days} day${days === 1 ? '' : 's'}${what}, target of ${target} met` : `${days} of ${target} days${what}`;
 /** Minutes of sessions on the aim that make a day count toward the weekly target. */
 export const AIM_DAY_MIN = 10;
 /** Said instead of a session start or log when the person records moves, not time. */
@@ -416,12 +424,14 @@ export class AimService {
     return {
       timezone: prof.timezone, workplace: prof.defaultWorkplace, ...p, post_to: prof.postTo ?? null,
       tracking: prof.tracking ?? 'time', weekly_target: prof.weeklyTarget ?? DEFAULT_WEEKLY_TARGET,
-      speak: `Timezone ${prof.timezone}. Reminders go to ${prof.defaultWorkplace}. Stand-up every ${p.workMin} min${p.standup ? '' : ' (stand-up reminders off)'}, ${p.breakMin} min break, a ${p.longBreakMin} min break every ${p.longBreakEvery} blocks.${prof.postTo ? ` Progress posts go to: ${prof.postTo.join(', ') || 'no network'}.` : ''} ${TRACKING_TEXT[prof.tracking ?? 'time']} Weekly target: ${prof.weeklyTarget ?? DEFAULT_WEEKLY_TARGET} day(s) toward the aim.`,
+      weekly_review_email: prof.weeklyReviewEmail ?? true,
+      speak: `Timezone ${prof.timezone}. Reminders go to ${prof.defaultWorkplace}. Stand-up every ${p.workMin} min${p.standup ? '' : ' (stand-up reminders off)'}, ${p.breakMin} min break, a ${p.longBreakMin} min break every ${p.longBreakEvery} blocks.${prof.postTo ? ` Progress posts go to: ${prof.postTo.join(', ') || 'no network'}.` : ''} ${TRACKING_TEXT[prof.tracking ?? 'time']} Weekly target: ${prof.weeklyTarget ?? DEFAULT_WEEKLY_TARGET} day(s) toward the aim. Weekly review email on Sunday evening (Pro): ${prof.weeklyReviewEmail === false ? 'off' : 'on'}.`,
     };
   }
   async getSettings() { return this.settingsView(await this.profile()); }
-  async setSettings(s: { timezone?: string; workplace?: Workplace; workMin?: number; breakMin?: number; longBreakEvery?: number; longBreakMin?: number; standup?: boolean; post_to?: Network[]; tracking?: Tracking; weekly_target?: number }) {
+  async setSettings(s: { timezone?: string; workplace?: Workplace; workMin?: number; breakMin?: number; longBreakEvery?: number; longBreakMin?: number; standup?: boolean; post_to?: Network[]; tracking?: Tracking; weekly_target?: number; weekly_review_email?: boolean }) {
     const prof = await this.profile();
+    if (s.weekly_review_email !== undefined) prof.weeklyReviewEmail = s.weekly_review_email;
     if (s.tracking !== undefined) {
       if (!TRACKINGS.includes(s.tracking)) throw new AimError(`tracking must be one of ${TRACKINGS.join(', ')}`);
       if (s.tracking === 'moves' && (await this.store.getRunningSessions()).length) throw new AimError('A session is running. Stop it first (stop_session), then switch to moves.');
@@ -437,11 +447,28 @@ export class AimService {
     }
     if (s.workplace) prof.defaultWorkplace = s.workplace;
     if (s.post_to) prof.postTo = NETWORKS.filter(n => s.post_to!.includes(n));
-    const { timezone: _t, workplace: _w, post_to: _p, tracking: _k, weekly_target: _g, ...pom } = s;
+    const { timezone: _t, workplace: _w, post_to: _p, tracking: _k, weekly_target: _g, weekly_review_email: _r, ...pom } = s;
     prof.pomodoro = { ...prof.pomodoro, ...Object.fromEntries(Object.entries(pom).filter(([, v]) => v !== undefined)) };
     await this.store.saveProfile(prof); this.profileCache = prof;
+    // The timezone moves Sunday 19:00; the email setting adds or removes it.
+    await this.armWeeklyReview().catch(e => console.error('[set_settings] weekly review arm failed', (e as Error).message));
     const view = this.settingsView(prof);
     return { ok: true, ...view, speak: `Saved. ${view.speak}` };
+  }
+  /**
+   * docs/weekly-review.md: one pending doc per person for the next Sunday 19:00 local, or
+   * none when the email is off. Pro is checked when it comes due, not here. A review that
+   * is due and not yet sent is left alone, so re-arming never skips this Sunday's email.
+   */
+  async armWeeklyReview(now = new Date()): Promise<{ week_of: string; due_at: string } | null> {
+    const prof = await this.profile();
+    const id = reviewPendingId(this.store.uid);
+    if (prof.weeklyReviewEmail === false) { await this.store.removePending(id); return null; }
+    const cur = await this.store.getPending(id);
+    if (cur && Date.parse(cur.dueAt) <= now.getTime()) return { week_of: cur.date ?? '', due_at: cur.dueAt };
+    const next = nextReviewDue(prof.timezone, now);
+    if (cur?.dueAt !== next.dueAt) await this.store.savePending({ id, uid: this.store.uid, blockId: '', kind: 'weekly_review', date: next.week, dueAt: next.dueAt, workplace: 'mobile', minutes: 0, breakMin: 0 });
+    return { week_of: next.week, due_at: next.dueAt };
   }
   async setDayMode(date: string | undefined, mode: Mode) {
     const d = date ?? await this.today(); this.assertDate(d);
@@ -1307,10 +1334,10 @@ export class AimService {
     if (met) inARow++;
     const rowText = inARow > 1 ? ` ${inARow} weeks in a row.` : '';
     const speak = met
-      ? `This week: ${dates.length} day${dates.length === 1 ? '' : 's'} toward the aim, target of ${target} met.${rowText}`
+      ? `This week: ${daysTowardAim(dates.length, target)}.${rowText}`
       : reachable
-        ? `This week: ${dates.length} of ${target} days toward the aim, ${daysLeft} day(s) left after today.${rowText}`
-        : `This week: ${dates.length} of ${target} days toward the aim; the target is out of reach this week, and a new week starts on Monday.${rowText}`;
+        ? `This week: ${daysTowardAim(dates.length, target)}, ${daysLeft} day(s) left after today.${rowText}`
+        : `This week: ${daysTowardAim(dates.length, target)}; the target is out of reach this week, and a new week starts on Monday.${rowText}`;
     return { week_of: monday, through: d, target, days: dates.length, dates, met, days_left: daysLeft, reachable, weeks_in_a_row: inARow, speak };
   }
 
@@ -1461,6 +1488,7 @@ export class AimService {
     const today = await this.today();
     await this.profile();
     const day = await this.dayWithRoutines(today);
+    await this.armWeeklyReview().catch(e => console.error('[open-day] weekly review arm failed', (e as Error).message));
     return { ok: true, date: today, plan_items: day?.plan.length ?? 0, speak: `Opened ${today}${day ? ` with ${day.plan.length} plan item(s)` : ''}.` };
   }
 

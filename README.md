@@ -67,6 +67,14 @@ for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change 
 | Connected agents | `list_agents`, `delete_agent` |
 | Posting progress (Pro) | `add_social_account`, `list_social_accounts`, `delete_social_account`, `get_post_draft`, `add_post` |
 
+0.13 adds the weekly review email (Pro):
+- Every Sunday at 19:00 in the person's timezone, AimYear emails a review it writes from the
+  record (no AI model): days toward the aim against the weekly target, weeks in a row, what
+  moved (session summaries and moves), main steps done, the hard share, the path stage and its
+  pace, and last week. With `tracking` `moves` or `quiet` it has no minutes or percentages.
+- `set_settings` `weekly_review_email` (default on) turns it off and on; every email has a
+  one-click unsubscribe link (`/email/unsubscribe`, RFC 8058).
+
 0.12 adds moves and the weekly target:
 - `add_move` records one action toward the aim with no duration ("fixed the signup button
   text"), classified like a session; past days are fine, and a move can tick a plan item.
@@ -158,6 +166,8 @@ All take the same Bearer as `/mcp` (the app sends its Firebase ID token); JSON i
 | `GET /account/export` | Everything the server keeps about the person, as one JSON download: `{ format: "aimyear-export", version, exported_at, uid, account, data: { "aim/goal": …, "sessions/<id>": … }, server_rows, agents }`. Saved WIP and Bluesky logins are left out. |
 | `POST /account/delete` | `{ confirm: true }`, and only with the app's Firebase sign-in (an agent's or a static token is refused with 403). Deletes `users/{uid}` with everything under it, the person's reminders, OAuth tokens and codes, the OAuth clients only they used, and the Firebase Auth user. It does not cancel a store subscription, and says so. |
 | `POST /revenuecat/webhook` | RevenueCat's webhook. The `Authorization` header must equal `REVENUECAT_WEBHOOK_AUTH`. |
+| `GET /email/unsubscribe?t=…` | No sign-in: the token is the uid with an HMAC. Shows a page with one button; opening the link changes nothing. |
+| `POST /email/unsubscribe?t=…` | One-click unsubscribe (RFC 8058, body `List-Unsubscribe=One-Click`) and the page's button: turns `weekly_review_email` off. |
 
 ---
 
@@ -176,6 +186,7 @@ The rest of this file is for working on the server itself. You don't need it to 
 | `src/social/` | Posting progress: the draft (`draft.ts`), the WIP and Bluesky clients (`clients.ts`), credential sealing (`crypto.ts`), connect / check / post / evening offer (`service.ts`). |
 | `src/pro.ts` | The one Pro check point: `AIMYEAR_PRO_UIDS` (by hand) → RevenueCat REST (cached a minute) → the webhook-fed `users/{uid}/aim/pro`. The webhook handler too. |
 | `src/account.ts` | Connected agents (list, disconnect), export and delete of the whole account. |
+| `src/review/` | The weekly review email: the builder (`build.ts`: record → facts → subject, text, HTML), when it is due (`schedule.ts`), sending through SES once a week (`deliver.ts`, called by `/tick`), the signed unsubscribe link (`unsubscribe.ts`). `npx tsx scripts/weekly-review-preview.ts` renders two made-up weeks into `tmp/`. |
 | `src/domain/insights.ts` | Week and month insights and comebacks, the same rules the app used on the device. |
 | `src/surface.ts` | The surface fingerprint behind `surface.lock.json`. |
 | `.githooks/pre-commit` | Regenerates `docs/ACCESS.md` from `src/access.ts` and stages it on every commit, so the committed table can't drift (`npm ci` points `core.hooksPath` at it through the `prepare` script; `test/access.test.ts` still fails on a stale file). |
@@ -185,7 +196,8 @@ Data lives in Firestore under `users/{uid}/aim/{goal,path,profile}`, `users/{uid
 `expiresAt`), `users/{uid}/social/{wip,bluesky}` (handle and the login sealed with AES-256-GCM),
 `users/{uid}/posts/{date}_{network}` (the posts AimYear made: their ids tell them apart from the
 user's own posts, and the doc is claimed before each post so a retry never posts twice),
-`users/{uid}/aim/pro` (the RevenueCat status); OAuth under `oauth_clients`, `oauth_requests`, `oauth_codes`, `oauth_tokens`;
+`users/{uid}/aim/pro` (the RevenueCat status), `users/{uid}/weekly_reviews/{monday}` (each week's
+review email, claimed before it is sent so a retried tick never sends twice); OAuth under `oauth_clients`, `oauth_requests`, `oauth_codes`, `oauth_tokens`;
 reminders in `pending_notifications` (claimed by a transactional delete before each push) and,
 for desktop apps, `desktop_reminders` (taken once by `POST /desktop/reminders`).
 
@@ -209,7 +221,11 @@ issuer), `AIMYEAR_ALLOWED_ORIGINS` (extra browser origins), `AIMYEAR_WORKPLACE`,
 without it connecting a network refuses), `AIMYEAR_PRO_UIDS` (comma-separated uids that always
 have Pro), `REVENUECAT_SECRET_KEY` (a RevenueCat secret API key, for the REST check; a secret),
 `REVENUECAT_ENTITLEMENT` (default `AimYear Pro`), `REVENUECAT_WEBHOOK_AUTH` (the Authorization
-value set on the RevenueCat webhook; a secret; unset refuses every webhook call).
+value set on the RevenueCat webhook; a secret; unset refuses every webhook call). The weekly
+review email: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` (default `us-east-1`)
+for Amazon SES; `AIMYEAR_REVIEW_FROM` (default `AimYear <review@aimyear.com>`);
+`AIMYEAR_UNSUBSCRIBE_KEY` (optional, 32+ characters, the HMAC key for unsubscribe links; unset,
+the key is derived from `AIMYEAR_SOCIAL_KEY`; with neither, no review is sent).
 
 ## Tests
 
@@ -252,6 +268,8 @@ Env vars on the service: `AIMYEAR_TOKENS`, `AIMYEAR_TZ`, `AIMYEAR_PROJECT`,
 `AIMYEAR_BASE_URL=https://mcp.aimyear.com`, `AIMYEAR_SOCIAL_KEY` (as a Secret Manager secret,
 never a plain env value), `AIMYEAR_PRO_UIDS`, and for Pro `REVENUECAT_SECRET_KEY` and
 `REVENUECAT_WEBHOOK_AUTH` (Secret Manager secrets) and optionally `REVENUECAT_ENTITLEMENT`.
+For the weekly review email: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (Secret Manager
+secrets; an IAM user allowed `ses:SendEmail` on the `aimyear.com` identity only), `AWS_REGION=us-east-1`.
 The RevenueCat webhook URL is `https://mcp.aimyear.com/revenuecat/webhook`. `mcp.aimyear.com` is a Cloud Run domain mapping
 (CNAME to `ghs.googlehosted.com` in Route 53) and is in Firebase Auth's authorized domains.
 Health: `/health`. The legacy URL `https://<service>/c/<token>/mcp` still works.

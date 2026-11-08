@@ -2,7 +2,7 @@ import { initializeApp, cert, getApps, applicationDefault } from 'firebase-admin
 import { getFirestore, Firestore, FieldValue } from 'firebase-admin/firestore';
 import { readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import type { Goal, Path, Profile, Day, Block, Session, Move, Mode, Workplace, Commitment, Device, Pending, Direction, Routine, AppliedOp, Network, SocialAccount, PostRecord, DesktopReminder } from './types.js';
+import type { Goal, Path, Profile, Day, Block, Session, Move, Mode, Workplace, Commitment, Device, Pending, Direction, Routine, AppliedOp, Network, SocialAccount, PostRecord, DesktopReminder, WeeklyReviewRecord } from './types.js';
 
 let dbSingleton: Firestore | null = null;
 export function initFirestore(): Firestore {
@@ -318,6 +318,10 @@ export class Store {
   async removeDevice(token: string) { await this.devices().doc(token.slice(-40)).delete(); }
 
   // --- pending reminders ---
+  async getPending(id: string): Promise<Pending | null> {
+    const snap = await this.db.collection(PENDING).doc(id).get();
+    return snap.exists ? (snap.data() as Pending) : null;
+  }
   async savePending(p: Pending) { await this.db.collection(PENDING).doc(p.id).set(p); }
   async removePending(id: string) { await this.db.collection(PENDING).doc(id).delete(); }
   async clearPendings(blockId: string) {
@@ -358,6 +362,25 @@ export class Store {
       return { claimed: true as const };
     });
   }
+
+  // --- the weekly review email (docs/weekly-review.md) ---
+  private weeklyReviews() { return this.user().collection('weekly_reviews'); }
+  /**
+   * Takes the right to send one week's review, in a transaction. Refused when that week
+   * was sent, or is being sent (or died mid-way: never sent twice); a failed attempt can
+   * be claimed again.
+   */
+  async claimWeeklyReview(r: WeeklyReviewRecord): Promise<{ claimed: true } | { claimed: false; existing: WeeklyReviewRecord }> {
+    const ref = this.weeklyReviews().doc(r.week);
+    return this.db.runTransaction(async tx => {
+      const snap = await tx.get(ref);
+      const cur = snap.exists ? (snap.data() as WeeklyReviewRecord) : null;
+      if (cur && cur.status !== 'failed') return { claimed: false as const, existing: cur };
+      tx.set(ref, r);
+      return { claimed: true as const };
+    });
+  }
+  async saveWeeklyReview(r: WeeklyReviewRecord) { await this.weeklyReviews().doc(r.week).set(r); }
 
   // --- blocks ---
   async saveBlock(b: Block) { await this.blocks().doc(b.id).set(b); }
