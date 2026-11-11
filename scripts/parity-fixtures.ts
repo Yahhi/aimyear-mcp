@@ -22,6 +22,9 @@ const attentionCases = [
     sessions: [S('a', '2026-10-20T09:00:00Z', '2026-10-20T11:00:00Z'), S('b', '2026-10-20T09:30:00Z', '2026-10-20T10:00:00Z', { exclusive: true }), S('c', '2026-10-20T10:30:00Z', '2026-10-20T12:00:00Z', { weight: 0 })] },
   { name: 'a session across midnight is clipped to the day', window: ['2026-10-20T00:00:00Z', '2026-10-21T00:00:00Z'], now: '2026-10-21T08:00:00Z',
     sessions: [S('a', '2026-10-19T23:00:00Z', '2026-10-20T01:00:00Z'), S('b', '2026-10-20T23:30:00Z', '2026-10-21T02:00:00Z')] },
+  { name: 'a switch to 70/30 halfway keeps the equal split before it', window: ['2026-10-20T00:00:00Z', '2026-10-21T00:00:00Z'], now: '2026-10-20T12:00:00Z',
+    sessions: [S('a', '2026-10-20T10:00:00Z', '2026-10-20T11:00:00Z', { weight: 0.7, weightHistory: [{ until: '2026-10-20T10:30:00Z', weight: 1 }] }),
+      S('b', '2026-10-20T10:00:00Z', undefined, { weight: 0.3, weightHistory: [{ until: '2026-10-20T10:30:00Z', weight: 1 }] })] },
 ].map(c => {
   const r = computeAttention(c.sessions, new Date(c.window[0]), new Date(c.window[1]), new Date(c.now));
   return { ...c, attention: Object.fromEntries(r.attention), wall: Object.fromEntries(r.wall) };

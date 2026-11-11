@@ -9,6 +9,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { oidcFederationProvider } from '@anthropic-ai/sdk/lib/credentials/oidc-federation';
 import { z } from 'zod';
 import type { WipProject } from './clients.js';
+import { googleIdentityToken } from '../gcp-identity.js';
 
 /** An AimYear project or lever without a hashtag yet. */
 export interface MatchEntry { id: string; kind: 'project' | 'lever'; name: string; keywords: string[]; repos: string[] }
@@ -76,14 +77,6 @@ export async function matchWipProjects(entries: MatchEntry[], wip: WipProject[],
 // ---------- the model step: Claude Haiku 5.5 through Workload Identity Federation ----------
 
 export const MATCH_MODEL = 'claude-haiku-5-5';
-const METADATA_URL = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=https://api.anthropic.com&format=full';
-
-/** Cloud Run's identity token for this service, from the metadata server. */
-async function googleIdentityToken(): Promise<string> {
-  const r = await fetch(METADATA_URL, { headers: { 'Metadata-Flavor': 'Google' } });
-  if (!r.ok) throw new Error(`metadata server answered ${r.status}`);
-  return r.text();
-}
 
 const Answer = z.object({ matches: z.array(z.object({ id: z.string(), hashtag: z.string() })) });
 const ANSWER_SCHEMA = {
@@ -105,7 +98,7 @@ export function claudeMatcherFromEnv(env: NodeJS.ProcessEnv = process.env): Proj
   let client: Anthropic | null = null;
   const get = () => client ??= new Anthropic({
     credentials: oidcFederationProvider({
-      identityTokenProvider: googleIdentityToken,
+      identityTokenProvider: () => googleIdentityToken('https://api.anthropic.com'),
       federationRuleId: rule, organizationId: org,
       serviceAccountId: env.ANTHROPIC_SERVICE_ACCOUNT_ID, workspaceId: env.ANTHROPIC_WORKSPACE_ID,
       baseURL: 'https://api.anthropic.com', fetch,

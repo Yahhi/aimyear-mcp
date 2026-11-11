@@ -70,7 +70,8 @@ export class FakeStore {
   async deleteMove(id: string) { this.moves.delete(id); this.writes++; }
   async getMovesInRange(from: string, to: string) { return [...this.moves.values()].filter(m => m.date >= from && m.date <= to).map(m => structuredClone(m)); }
   async getRunningSessions() { return [...this.sessions.values()].filter(s => !s.end).map(s => structuredClone(s)); }
-  async saveDevice(d: Device) { this.devices.set(d.token, d); }
+  // A merge, like Firestore set(..., { merge: true }).
+  async saveDevice(d: Pick<Device, 'token'> & Partial<Device>) { this.devices.set(d.token, { ...this.devices.get(d.token), ...d } as Device); }
   async getDevices() { return [...this.devices.values()]; }
   async removeDevice(t: string) { this.devices.delete(t); }
   async getPending(id: string) { const p = this.pendings.get(id); return p ? structuredClone(p) : null; }

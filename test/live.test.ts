@@ -254,3 +254,23 @@ test('POST /devices/live-activity: Pro only, a registered device, hex tokens; th
     assert.equal(a.fcm.sent.length, 3);
   } finally { await a.close(); }
 });
+
+test('two reports at the same moment both stick: the start token does not wipe the activity token', async () => {
+  const store = new FakeStore();
+  await store.saveDevice({ token: 'fcm-race', platform: 'ios', lastSeen: '2026-11-09T18:00:00.000Z', liveStartToken: 'old-start', liveToken: null });
+  store.sessions.set('s1', session()); // a timer runs, so the follow-up sync keeps the activity
+  // Both requests read the device before either writes (the phone sends them 3 ms apart).
+  const real = store.getDevices.bind(store);
+  let reads = 0;
+  let release!: () => void;
+  const bothRead = new Promise<void>(r => { release = r; });
+  store.getDevices = async () => { const d = structuredClone(await real()); if (++reads === 2) release(); await bothRead; return d; };
+  await Promise.all([
+    reportLive(store, 'fcm-race', { activityToken: 'activity-1' }, async () => 'id'),
+    reportLive(store, 'fcm-race', { startToken: 'new-start' }, async () => 'id'),
+  ]);
+  store.getDevices = real;
+  const [d] = await store.getDevices();
+  assert.equal(d.liveToken, 'activity-1');
+  assert.equal(d.liveStartToken, 'new-start');
+});

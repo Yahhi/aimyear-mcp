@@ -210,7 +210,15 @@ export interface Session {
   end?: string;
   source: Source;
   clientSessionId?: string;
+  /** The attention weight now (docs/apps.md, "Two timers at once"). */
   weight: number;
+  /**
+   * Earlier weights, oldest first: each held from the previous entry's `until` (or the
+   * start) until its own `until`; `weight` holds after the last one. Written when attention
+   * is switched from a moment on (split_attention from_now, the app's switch); a change for
+   * the whole session clears it.
+   */
+  weightHistory?: { until: string; weight: number }[];
   exclusive?: boolean;
   workplace: Workplace;
   area: Area;

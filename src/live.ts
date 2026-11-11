@@ -34,20 +34,43 @@ export interface LiveContent {
 const STALE_AFTER_S = 4 * 3600;
 
 export type SendLive = (m: Message) => Promise<string>;
+
+/** A device write: its token plus only the fields that changed. */
+export type DevicePatch = Pick<Device, 'token'> & Partial<Device>;
+
+const LIVE_FIELDS = ['liveStartToken', 'liveToken', 'liveStartedAt', 'lastSeen'] as const;
+
+/**
+ * The live fields that differ between what was read and what is to be written. The phone
+ * sends its start token and its activity token in two requests at the same moment
+ * (2026-11-09: 18:37:17.072 and .075); writing the whole record read before the other
+ * request saved would put the other field back, and the activity token was lost.
+ */
+function changes(before: Device, after: Device): DevicePatch | null {
+  const patch: DevicePatch = { token: before.token };
+  let any = false;
+  for (const k of LIVE_FIELDS) {
+    if ((after[k] ?? null) !== (before[k] ?? null)) { (patch as Record<string, unknown>)[k] = after[k] ?? null; any = true; }
+  }
+  return any ? patch : null;
+}
 const realSend: SendLive = m => getMessaging().send(m);
 
 /** What syncLive needs from a user's store (src/store.ts Store). */
 export interface LiveStore {
   getDevices(): Promise<Device[]>;
-  saveDevice(d: Device): Promise<void>;
+  /** Writes only the fields given (a merge): two reports at once must not undo each other. */
+  saveDevice(d: DevicePatch): Promise<void>;
   getRunningSessions(): Promise<Session[]>;
   getGoal(): Promise<Goal | null>;
 }
 
-/** The session the activity shows: like the app's timer screen, the newest one started in an app, else the newest. */
+/** The session the activity shows, like the app: the one in focus (largest share), on a tie the newest started in an app, else the newest. */
 export function currentSession(running: Session[]): Session | null {
   if (!running.length) return null;
-  const sorted = [...running].sort((a, b) => b.start.localeCompare(a.start));
+  // In focus: the largest share now (docs/apps.md, "Two timers at once"); on a tie, as before.
+  const top = Math.max(...running.map(s => s.weight ?? 1));
+  const sorted = running.filter(s => (s.weight ?? 1) === top).sort((a, b) => b.start.localeCompare(a.start));
   return sorted.find(s => s.agent === 'app') ?? sorted[0];
 }
 
@@ -125,7 +148,8 @@ export async function syncLive(store: LiveStore, opts: { send?: SendLive; now?: 
         if (d.liveToken) { await push('end', d.liveToken); next.liveToken = null; }
         next.liveStartedAt = null;
       }
-      if (next.liveToken !== d.liveToken || next.liveStartToken !== d.liveStartToken || next.liveStartedAt !== d.liveStartedAt) await store.saveDevice(next);
+      const patch = changes(d, next);
+      if (patch) await store.saveDevice(patch);
     }
   } catch (e) {
     console.error('[live] sync failed', (e as Error).message);
@@ -152,7 +176,10 @@ export async function reportLive(store: LiveStore, fcmToken: string, report: { s
       if ((await store.getRunningSessions()).length) next.liveStartedAt = next.liveStartedAt ?? new Date().toISOString();
     }
   } else if (report.activityToken !== undefined) next.liveToken = report.activityToken || null;
-  await store.saveDevice(next);
+  const patch = changes(d, next);
+  if (patch) await store.saveDevice(patch);
+  const kind = report.ended ? 'ended' : report.activityToken ? 'activity token' : report.activityToken === null ? 'activity cleared' : report.startToken ? 'start token' : 'start cleared';
+  console.log(`[live] report ${kind} from …${fcmToken.slice(-8)}${report.ended && report.activityToken && report.activityToken !== d.liveToken ? ' (an older activity: kept the current one)' : ''}`);
   const sent = report.activityToken && !report.ended ? await syncLive(store, { send, only: fcmToken }) : [];
   return { ok: true as const, start_token: !!next.liveStartToken, activity: !!next.liveToken, sent };
 }

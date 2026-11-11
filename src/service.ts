@@ -975,9 +975,10 @@ export class AimService {
   }
 
   /** The running sessions; `extra` is one just started whose write has not landed yet. */
-  private async runningView(extra?: Session) {
-    const stored = (await this.store.getRunningSessions()).filter(s => s.id !== extra?.id);
-    const running = extra ? [...stored, extra] : stored;
+  /** extra: sessions just written in a transaction that may not be committed yet. */
+  private async runningView(...extra: Session[]) {
+    const stored = (await this.store.getRunningSessions()).filter(s => !extra.some(e => e.id === s.id));
+    const running = [...stored, ...extra];
     const total = running.reduce((s, x) => s + (x.weight ?? 1), 0) || 1;
     return running.map(s => ({ id: s.id, task: s.task, classification: s.classification, started: s.start, share: Math.round(((s.weight ?? 1) / total) * 100) / 100, mine: s.clientSessionId === this.clientSessionId, agent: s.agent ?? null }));
   }
@@ -1030,7 +1031,7 @@ export class AimService {
       agent: await this.agent(),
     };
     const started = async () => {
-      const running = await this.runningView(session);
+      const running = await this.runningView(session, ...switched);
       // Reminders go to every device (docs/notifications.md): pushes to the phones, the desktop inbox for the desktop apps.
       const devices = await this.store.getDevices();
       const phones = [...new Set(devices.filter(d => d.platform === 'ios' || d.platform === 'android').map(d => d.platform))];
@@ -1042,10 +1043,19 @@ export class AimService {
         speak: `${verdict.message} Session [${session.id}] "${session.task}" → ${cls.classification}${cls.unclassified ? ' (unclassified: tell me the lever or project)' : ''}. Timer ${joined ? 'joined' : 'started'}${running.length > 1 ? `; ${running.length} sessions share attention` : ''}.`,
       };
     };
+    // Starting while others run is a switch (docs/apps.md "Two timers at once"): the new
+    // session gets 70% from its start, the others share 30%, the time before keeps its split.
+    const others = input.weight === undefined ? (await this.store.getRunningSessions()).filter(o => o.id !== session.id) : [];
+    if (others.length) session.weight = 0.7;
+    const switched = others.filter(o => (o.weight ?? 1) !== 0.3 / others.length)
+      .map(o => ({ ...o, weightHistory: [...(o.weightHistory ?? []), { until: session.start, weight: o.weight ?? 1 }], weight: 0.3 / others.length }));
     return this.applyOnce(op, async tx => {
       // Two attempts with the same client session_id can race: the first one in wins.
       const existing = input.sessionId ? await tx.getSession(input.sessionId) : null;
-      if (!existing) tx.saveSession(session);
+      if (!existing) {
+        tx.saveSession(session);
+        for (const o of switched) tx.saveSession(o);
+      }
       const result = existing ? await this.alreadyStarted(existing) : await started();
       return { result, sessionId: (existing ?? session).id };
     });
@@ -1063,13 +1073,24 @@ export class AimService {
     };
   }
 
-  async splitAttention(shares: Record<string, number>) {
+  /**
+   * fromNow (the app's switch, docs/apps.md "Two timers at once"): the new weights hold from
+   * now on and the time before keeps its split; otherwise they apply to the whole session.
+   */
+  async splitAttention(shares: Record<string, number>, fromNow = false) {
     const running = await this.store.getRunningSessions();
-    const changed: string[] = [];
-    for (const s of running) if (shares[s.id] !== undefined) { s.weight = Math.max(0, shares[s.id]); await this.store.saveSession(s); changed.push(s.id); }
-    if (!changed.length) throw new AimError(`No running session matched. Running: ${running.map(s => s.id).join(', ') || 'none'}`);
+    if (!running.some(s => shares[s.id] !== undefined)) throw new AimError(`No running session matched. Running: ${running.map(s => s.id).join(', ') || 'none'}`);
+    const now = new Date().toISOString();
+    for (const s of running) {
+      if (shares[s.id] === undefined) continue;
+      const next = Math.max(0, shares[s.id]);
+      if (!fromNow) s.weightHistory = undefined;
+      else if (next !== s.weight) s.weightHistory = [...(s.weightHistory ?? []), { until: now, weight: s.weight ?? 1 }];
+      s.weight = next;
+      await this.store.saveSession(s);
+    }
     const view = await this.runningView();
-    return { ok: true, running_sessions: view, applies_to: 'whole session (retroactive)', speak: `Attention: ${view.map(v => `${Math.round(v.share * 100)}% ${v.task}`).join(', ')}.` };
+    return { ok: true, running_sessions: view, applies_to: fromNow ? 'from now on' : 'whole session (retroactive)', speak: `Attention${fromNow ? ' from now' : ''}: ${view.map(v => `${Math.round(v.share * 100)}% ${v.task}`).join(', ')}.` };
   }
 
   async addNote(note: string, sessionId?: string, opId?: string) {
@@ -1203,7 +1224,7 @@ export class AimService {
     if (patch.summary !== undefined) { s.summary = patch.summary.trim(); changed.push('summary'); }
     if (patch.outcome) { s.outcome = patch.outcome; changed.push('outcome'); }
     if (patch.attentionShare !== undefined) { s.attentionShareOverride = Math.min(1, Math.max(0, patch.attentionShare)); changed.push('attention'); }
-    if (patch.weight !== undefined) { s.weight = Math.max(0, patch.weight); changed.push('weight'); }
+    if (patch.weight !== undefined) { s.weight = Math.max(0, patch.weight); s.weightHistory = undefined; changed.push('weight'); }
     if (patch.exclusive !== undefined) { s.exclusive = patch.exclusive; changed.push('exclusive'); }
     if (!changed.length) throw new AimError('nothing to change: pass at least one field');
     // What the session counts toward follows from the label, so classify it again.

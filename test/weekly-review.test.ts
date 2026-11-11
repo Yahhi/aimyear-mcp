@@ -11,7 +11,7 @@ import type { Server } from 'node:http';
 import { AimService, daysTowardAim } from '../src/service.js';
 import { addDays, localDate, weekStart } from '../src/dates.js';
 import { gatherReview, renderReview, MOVED_CAP } from '../src/review/build.js';
-import { composeReview, deliverWeeklyReview, type EmailMessage, type ReviewDeps } from '../src/review/deliver.js';
+import { composeReview, deliverWeeklyReview, sesCredentials, SES_TOKEN_AUDIENCE, type EmailMessage, type ReviewDeps } from '../src/review/deliver.js';
 import { nextReviewDue, reviewPendingId, reviewWindow } from '../src/review/schedule.js';
 import { unsubscribeKey, unsubscribeToken, unsubscribeUrl, verifyUnsubscribeToken } from '../src/review/unsubscribe.js';
 import { pullDesktop, tick } from '../src/notifier.js';
@@ -334,4 +334,23 @@ test('the email it composes carries the account\'s own unsubscribe link', async 
   assert.equal(verifyUnsubscribeToken(KEY, new URL(mail.link).searchParams.get('t')), 'u9');
   assert.ok(mail.text.includes(mail.link));
   await assert.rejects(() => composeReview(svcOf(store), 'u9', lastWeek, { baseUrl: BASE, key: null }), /no unsubscribe key/);
+});
+
+// ---------- SES credentials: keyless on Cloud Run ----------
+
+test('SES credentials: AWS_ROLE_ARN trades a Google token for the role, without it the SDK defaults', async () => {
+  assert.equal(await sesCredentials({}), undefined);
+  const audiences: string[] = [];
+  const calls: { RoleArn: string; WebIdentityToken: string }[] = [];
+  const provider = await sesCredentials(
+    { AWS_ROLE_ARN: 'arn:aws:iam::123456789012:role/aimyear-mcp-ses' },
+    async audience => { audiences.push(audience); return 'google-id-token'; },
+    async params => { calls.push(params); return { accessKeyId: 'AK', secretAccessKey: 'SK', sessionToken: 'ST', expiration: new Date(Date.now() + 3600_000) }; },
+  );
+  assert.ok(provider);
+  const creds = await provider();
+  assert.equal(creds.accessKeyId, 'AK');
+  assert.deepEqual(audiences, [SES_TOKEN_AUDIENCE]);
+  assert.equal(calls[0].RoleArn, 'arn:aws:iam::123456789012:role/aimyear-mcp-ses');
+  assert.equal(calls[0].WebIdentityToken, 'google-id-token');
 });

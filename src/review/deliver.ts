@@ -19,6 +19,9 @@ import type { Pending } from '../types.js';
 import { gatherReview, renderReview } from './build.js';
 import { reviewWindow } from './schedule.js';
 import { unsubscribeKey, unsubscribeUrl } from './unsubscribe.js';
+import { googleIdentityToken } from '../gcp-identity.js';
+import type { FromWebTokenInit } from '@aws-sdk/credential-provider-web-identity';
+import type { AwsCredentialIdentityProvider } from '@aws-sdk/types';
 
 export const DEFAULT_FROM = 'AimYear <review@aimyear.com>';
 /** A failed send on Sunday evening is tried again this much later, while it is still Sunday evening. */
@@ -27,15 +30,43 @@ const RETRY_MS = 15 * 60000;
 export interface EmailMessage { to: string; from: string; subject: string; text: string; html: string; headers: Record<string, string> }
 export interface EmailSender { send(m: EmailMessage): Promise<{ messageId: string }> }
 
+/** The audience of the Google identity token the AWS role aimyear-mcp-ses trusts. */
+export const SES_TOKEN_AUDIENCE = 'https://aimyear.com/aws-ses';
+
+type AssumeWithWebIdentity = NonNullable<FromWebTokenInit['roleAssumerWithWebIdentity']>;
+
 /**
- * Amazon SES v2. Credentials and region come from the standard AWS env vars
- * (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION); the SDK is loaded on first use.
+ * SES credentials without a stored key: with AWS_ROLE_ARN set (Cloud Run), the service's Google
+ * identity token is traded for that role's short-lived credentials (AssumeRoleWithWebIdentity);
+ * the SDK keeps them until they expire and then asks again. Without AWS_ROLE_ARN, undefined:
+ * the SDK reads the standard env vars (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY), as locally.
+ * `token` and `assume` are for tests.
+ */
+export async function sesCredentials(
+  env: Record<string, string | undefined> = process.env,
+  token: (audience: string) => Promise<string> = googleIdentityToken,
+  assume?: AssumeWithWebIdentity,
+): Promise<AwsCredentialIdentityProvider | undefined> {
+  const roleArn = env.AWS_ROLE_ARN?.trim();
+  if (!roleArn) return undefined;
+  const { fromWebToken } = await import('@aws-sdk/credential-provider-web-identity');
+  const region = env.AWS_REGION || 'us-east-1';
+  return async () => fromWebToken({
+    roleArn, roleSessionName: 'aimyear-mcp-review', webIdentityToken: await token(SES_TOKEN_AUDIENCE),
+    clientConfig: { region }, ...(assume ? { roleAssumerWithWebIdentity: assume } : {}),
+  })();
+}
+
+/**
+ * Amazon SES v2, region from AWS_REGION (default us-east-1), credentials from sesCredentials;
+ * the SDK is loaded on first use.
  */
 export function sesSender(env: Record<string, string | undefined> = process.env): EmailSender {
   let client: Promise<{ send: (m: EmailMessage) => Promise<{ messageId: string }> }> | null = null;
   const load = async () => {
     const { SESv2Client, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
-    const ses = new SESv2Client({ region: env.AWS_REGION || 'us-east-1' });
+    const credentials = await sesCredentials(env);
+    const ses = new SESv2Client({ region: env.AWS_REGION || 'us-east-1', ...(credentials ? { credentials } : {}) });
     return {
       send: async (m: EmailMessage) => {
         const out = await ses.send(new SendEmailCommand({

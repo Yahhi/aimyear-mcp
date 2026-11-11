@@ -318,7 +318,8 @@ export class Store {
 
   // --- devices ---
   private devices() { return this.user().collection('devices'); }
-  async saveDevice(d: Device) { await this.devices().doc(d.token.slice(-40)).set(d, { merge: true }); }
+  /** A merge: only the fields given are written (src/live.ts, DevicePatch). */
+  async saveDevice(d: Pick<Device, 'token'> & Partial<Device>) { await this.devices().doc(d.token.slice(-40)).set(d, { merge: true }); }
   async getDevices(): Promise<Device[]> {
     const snap = await this.devices().get();
     return snap.docs.map(x => x.data() as Device).filter(x => !!x.token);

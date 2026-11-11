@@ -269,8 +269,9 @@ without it connecting a network refuses), `AIMYEAR_PRO_UIDS` (comma-separated ui
 have Pro), `REVENUECAT_SECRET_KEY` (a RevenueCat secret API key, for the REST check; a secret),
 `REVENUECAT_ENTITLEMENT` (default `AimYear Pro`), `REVENUECAT_WEBHOOK_AUTH` (the Authorization
 value set on the RevenueCat webhook; a secret; unset refuses every webhook call). The weekly
-review email: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` (default `us-east-1`)
-for Amazon SES; `AIMYEAR_REVIEW_FROM` (default `AimYear <review@aimyear.com>`);
+review email: `AWS_ROLE_ARN` (the role whose short-lived credentials the server gets for its
+Google identity token; without it, the standard `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`),
+`AWS_REGION` (default `us-east-1`) for Amazon SES; `AIMYEAR_REVIEW_FROM` (default `AimYear <review@aimyear.com>`);
 `AIMYEAR_UNSUBSCRIBE_KEY` (optional, 32+ characters, the HMAC key for unsubscribe links; unset,
 the key is derived from `AIMYEAR_SOCIAL_KEY`; with neither, no review is sent).
 
@@ -315,8 +316,11 @@ Env vars on the service: `AIMYEAR_TOKENS`, `AIMYEAR_TZ`, `AIMYEAR_PROJECT`,
 `AIMYEAR_BASE_URL=https://mcp.aimyear.com`, `AIMYEAR_SOCIAL_KEY` (as a Secret Manager secret,
 never a plain env value), `AIMYEAR_PRO_UIDS`, and for Pro `REVENUECAT_SECRET_KEY` and
 `REVENUECAT_WEBHOOK_AUTH` (Secret Manager secrets) and optionally `REVENUECAT_ENTITLEMENT`.
-For the weekly review email: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (Secret Manager
-secrets; an IAM user allowed `ses:SendEmail` on the `aimyear.com` identity only), `AWS_REGION=us-east-1`.
+For the weekly review email: `AWS_ROLE_ARN=arn:aws:iam::539247463479:role/aimyear-mcp-ses` and
+`AWS_REGION=us-east-1`, no AWS key. The role trusts only Google identity tokens of the
+`aimyear-mcp` service account (`accounts.google.com` with `aud` and `sub` its unique id and
+`oaud` `https://aimyear.com/aws-ses`) and may only send from the `aimyear.com` SES identity
+(Easy DKIM on, DMARC `p=none`).
 The RevenueCat webhook URL is `https://mcp.aimyear.com/revenuecat/webhook`. `mcp.aimyear.com` is a Cloud Run domain mapping
 (CNAME to `ghs.googlehosted.com` in Route 53) and is in Firebase Auth's authorized domains.
 Health: `/health`. The legacy URL `https://<service>/c/<token>/mcp` still works.

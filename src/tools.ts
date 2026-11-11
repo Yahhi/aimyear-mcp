@@ -91,7 +91,9 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
   const account = maybeAccount as AccountService;
   const after = (name: string, fn: Handler): Handler => !onTimer || !TIMER_TOOLS.includes(name) ? fn : async args => {
     const result = await fn(args);
-    await onTimer().catch(e => console.error(`[live] after ${name}`, (e as Error).message));
+    // What each iPhone was sent, so a Lock Screen timer that didn't follow can be traced (no tokens).
+    const sent = await onTimer().catch(e => { console.error(`[live] after ${name}`, (e as Error).message); return null; });
+    if (Array.isArray(sent) && sent.length) console.log(`[live] after ${name}: ${sent.map((r: { device: string; event: string; ok: boolean; error?: string }) => `${r.event} ${r.ok ? 'ok' : `failed (${r.error})`} ${r.device}`).join(', ')}`);
     return result;
   };
   const t = (name: string, description: string, shape: Record<string, z.ZodTypeAny>, fn: Handler) =>
@@ -197,7 +199,7 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
     op_id: opId, start_at: iso('when the work began'), session_id: z.string().min(6).max(64).optional().describe('for apps: the session id the app minted itself. Create-if-absent: if a session with this id exists it is returned and nothing is created. An agent leaves it out; the server mints the id'),
   }, a => svc.startSession({ ...a, opId: a.op_id, startAt: a.start_at, sessionId: a.session_id }));
   t('add_note', 'Add a one-line note to a running session (this connection\'s, or session_id). May classify a session that was unclassified.', { note: z.string(), session_id: z.string().optional().describe('from get_now; required with op_id'), op_id: opId }, a => svc.addNote(a.note, a.session_id, a.op_id));
-  t('split_attention', 'Set attention weights of the running sessions at once, e.g. {"abc": 0.7, "def": 0.3}. Applies to the whole session. For a finished session use edit_session.', { shares: z.record(z.string(), z.number().min(0)) }, a => svc.splitAttention(a.shares));
+  t('split_attention', 'Set attention weights of the running sessions at once, e.g. {"abc": 0.7, "def": 0.3}. Applies to the whole session, or with from_now only from now on (the user switched what they attend to; the time before keeps its split). For a finished session use edit_session.', { shares: z.record(z.string(), z.number().min(0)), from_now: z.boolean().optional().describe('true: the new split holds from now on, the earlier time keeps its split') }, a => svc.splitAttention(a.shares, a.from_now ?? false));
   t('stop_session', 'Stop a running session with a summary and outcome. Pass session_id from get_now; without it, only this connection\'s single running session is stopped, never another one. The timer keeps running for other sessions. outcome=done completes the linked plan item or path step. Without end_at or op_id it refuses a session that already ended: use edit_session for that. With end_at (apps delivering a stop queued offline) a second stop on the same session is merged, whatever order they arrive in: the earliest end wins, done wins over any other outcome, the first summary stays and a different later one goes to the notes; the answer says applied: ended | shortened | recorded.', {
     summary: z.string(), outcome, session_id: z.string().optional().describe('from get_now; required with op_id or end_at'), attention_share: z.number().min(0).max(1).optional().describe('corrects the share in hindsight'),
     end_at: iso('when the work ended'), op_id: opId, wip_text: wipText,
