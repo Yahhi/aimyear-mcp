@@ -8,6 +8,7 @@
 import { writeFileSync } from 'node:fs';
 import { computeAttention } from '../src/domain/attention.js';
 import { computeComebacks, computeInsights, type InsightRow } from '../src/domain/insights.js';
+import { amount, percent, roundHalf, share } from '../src/domain/numbers.js';
 import type { Session } from '../src/types.js';
 
 const out = process.argv[2] ?? '../aimyear-v2/test/fixtures/server_parity.json';
@@ -37,8 +38,9 @@ const rows: InsightRow[] = [
   { date: '2026-10-16', from: '10:00', wall_min: 5, classification: 'main_step', area: 'money', outcome: 'done' },
   { date: '2026-10-18', from: '11:20', wall_min: 30, classification: 'other_project', area: 'work' },
   { date: '2026-10-19', from: '18:00', wall_min: 60, classification: 'life', area: 'health' },
-  { date: '2026-10-20', from: '08:00', wall_min: 24, classification: 'goal_comfortable', area: 'work', lever_id: 'build' },
-  { date: '2026-10-20', from: '13:30', wall_min: 50, classification: 'main_step', area: 'money' },
+  // Attention minutes (docs/metrics.md): overlapping sessions split the time; exact, rounded once on the way out.
+  { date: '2026-10-20', from: '08:00', wall_min: 24, attention_min: 12.5, classification: 'goal_comfortable', area: 'work', lever_id: 'build' },
+  { date: '2026-10-20', from: '13:30', wall_min: 50, attention_min: 37.25, classification: 'main_step', area: 'money' },
   { date: '2026-10-20', from: '15:00', wall_min: null, classification: 'goal_hard', area: 'money', lever_id: 'outreach' },
   { date: '2026-10-20', from: '16:00', wall_min: 3, classification: 'goal_hard', area: 'money', lever_id: 'nolever' },
 ];
@@ -49,7 +51,15 @@ const insightsCases = [
   { name: 'month', from: '2026-09-21', to: '2026-10-20' },
 ].map(c => ({ ...c, result: computeInsights({ from: c.from, to: c.to, rows: rows.filter(r => r.date >= c.from), leverKind: id => (id ? kinds[id] : undefined), mainStepDays: new Set(mainStepDays) }) }));
 
+// docs/metrics.md: the traps both languages must round the same way.
+const numbersCases = {
+  round: [[0.285, 2], [0.575, 2], [2.15, 1], [1.45, 1], [-12.5, 0], [12.5, 0], [-0.125, 2], [57.49999999999999, 0], [-0.4, 0], [0.005, 2]].map(([x, d]) => ({ x, d, r: roundHalf(x, d) })),
+  share: [[23, 40], [49, 171], [2, 3], [1742 - 274, 2210], [1, 0], [37.25, 49.75]].map(([a, b]) => ({ a, b, share: share(a, b), percent: percent(a, b) })),
+  amount: [2.25, 1.45, 3, 0.1, 1000, 12.05].map(v => ({ v, s: amount(v) })),
+};
+
 writeFileSync(out, JSON.stringify({
+  numbers: numbersCases,
   note: 'Written by aimyear-mcp scripts/parity-fixtures.ts from the server\'s own functions. Do not edit by hand.',
   attention: attentionCases,
   insights: { rows, lever_kinds: kinds, main_step_days: mainStepDays, cases: insightsCases },

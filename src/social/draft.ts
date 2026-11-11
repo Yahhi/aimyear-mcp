@@ -6,6 +6,7 @@
  * as a bad day: a main step not done says so. Nothing is invented, and nothing is left out
  * to make the day look better.
  */
+import { amount } from '../domain/numbers.js';
 import { BLUESKY_MAX, graphemes } from './clients.js';
 import { daysTowardAim } from '../service.js';
 
@@ -100,7 +101,7 @@ export function buildDraft(f: DayFacts, max = BLUESKY_MAX): string {
   const a = f.aim;
   const progress = a.kind === 'done'
     ? (a.reached ? 'done' : `${a.stagesDone ?? 0} of ${a.stagesTotal ?? 0} stages done`)
-    : `${a.current ?? 0} of ${a.target ?? 0}`;
+    : `${amount(a.current)} of ${amount(a.target)}`;
   const aimLine = (t: string) => `Aim: ${t} (${progress}).`;
   const aimT = a.title.trim();
 

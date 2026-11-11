@@ -262,10 +262,8 @@ export class SocialService {
     if (!g.goal) return { reason: 'No aim set yet, so there is no progress to post.' };
     const s = await this.aim.daySummary(date);
     if (s.mode === 'off') return { reason: `Tracking was off on ${date}, so there is no record to post from.` };
-    const levers = g.goal.levers;
-    const isHard = (x: { classification: string; lever_id?: string }) =>
-      x.classification === 'goal_hard' || (x.classification === 'main_step' && levers.find(l => l.id === x.lever_id)?.kind === 'hard');
-    const hardMin = Math.round(s.sessions.filter(isHard).reduce((n, x) => n + x.attention_min, 0));
+    // docs/metrics.md: the day summary's hard minutes, the same rule and rounding as everywhere.
+    const hardMin = s.hard_attention_min;
     const r = s.routines;
     // What moved, in the user's words and in the order it happened: the summary of each
     // session toward the aim (else its task), and each move toward the aim.

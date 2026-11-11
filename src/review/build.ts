@@ -8,7 +8,8 @@
  * renderReview turns facts into the subject, a plain-text and an HTML email. With the
  * tracking setting moves or quiet (docs/moves.md), no minutes and no percentages appear.
  */
-import { daysTowardAim, type AimService } from '../service.js';
+import { daysTowardAim, RAW, type AimService } from '../service.js';
+import { amount, isHardWork, roundHalf } from '../domain/numbers.js';
 import { addDays, isoWeekday } from '../dates.js';
 
 /** "What moved" shows this many items; the rest are counted. */
@@ -68,7 +69,8 @@ export function sessionText(summary: string | undefined, task: string): string {
 }
 
 /** What moved toward the aim over the given days: deduplicated, the most meaningful first. */
-export function movedFrom(days: DaySummary[], hardLevers: Set<string>, exclude: string[] = []): { items: MovedItem[]; more: number } {
+/** `levers` maps a lever id to its kind ('hard' / 'comfortable'); docs/metrics.md decides what is hard. */
+export function movedFrom(days: DaySummary[], levers: Map<string, string>, exclude: string[] = []): { items: MovedItem[]; more: number } {
   const all: (MovedItem & { score: number; order: number })[] = [];
   let order = 0;
   for (const d of days) {
@@ -77,7 +79,7 @@ export function movedFrom(days: DaySummary[], hardLevers: Set<string>, exclude: 
       const text = sessionText(s.summary, s.task);
       if (!text) continue;
       const main = s.classification === 'main_step';
-      const hard = s.classification === 'goal_hard' || (main && !!s.lever_id && hardLevers.has(s.lever_id));
+      const hard = isHardWork(s, id => (id ? levers.get(id) : undefined));
       all.push({ text, hard, main, score: (main ? 4 : 0) + (hard ? 2 : 0) + (s.outcome === 'done' ? 1 : 0), order: order++ });
     }
     for (const m of d.moves) {
@@ -100,19 +102,21 @@ export function movedFrom(days: DaySummary[], hardLevers: Set<string>, exclude: 
 }
 
 function numbers(days: DaySummary[], week: { days: number; met: boolean; weeks_in_a_row: number }): WeekNumbers {
-  const aim = days.reduce((s, d) => s + d.goal_attention_min, 0);
-  const hard = days.reduce((s, d) => s + Math.round(d.goal_attention_min * d.hard_share_of_goal), 0);
+  // docs/metrics.md: pool the exact daily sums and round once (shown as whole minutes and one percent).
+  const aimExact = days.reduce((s, d) => s + d[RAW].goal, 0);
+  const hard = days.reduce((s, d) => s + d[RAW].hard, 0);
+  const aim = roundHalf(aimExact);
   return {
     days: week.days, met: week.met, weeksInARow: week.weeks_in_a_row,
     mainStepDays: days.filter(d => d.main_step.done).length,
     aimMoves: days.reduce((s, d) => s + d.aim_moves, 0),
     hardDays: days.filter(d => d.hard_lever_touched).length,
-    aimMinutes: aim, hardShare: aim ? hard / aim : null,
+    aimMinutes: aim, hardShare: aimExact ? hard / aimExact : null,
   };
 }
 
 const progressText = (m: { kind: string; current?: number | null; target: number; metric: string; steps_done: number; steps_total: number }) =>
-  m.kind === 'count' ? ((m.current ?? 0) >= m.target ? `${m.current} ${m.metric}, target of ${m.target} reached` : `${m.current ?? 0} of ${m.target} ${m.metric}`) : m.steps_total ? `${m.steps_done} of ${m.steps_total} steps done` : 'no steps yet';
+  m.kind === 'count' ? ((m.current ?? 0) >= m.target ? `${amount(m.current)} ${m.metric}, target of ${amount(m.target)} reached` : `${amount(m.current)} of ${amount(m.target)} ${m.metric}`) : m.steps_total ? `${m.steps_done} of ${m.steps_total} steps done` : 'no steps yet';
 
 /** Reads one week (Monday `week` to Sunday) of the record into facts. Writes nothing. */
 export async function gatherReview(svc: AimService, week: string): Promise<ReviewFacts> {
@@ -124,10 +128,10 @@ export async function gatherReview(svc: AimService, week: string): Promise<Revie
   const wp = await svc.weekProgress(sunday);
   const prevWp = await svc.weekProgress(prevSunday);
   const { goal } = await svc.getGoal();
-  const hardLevers = new Set((goal?.levers ?? []).filter(l => l.kind === 'hard').map(l => l.id));
+  const leverKinds = new Map((goal?.levers ?? []).map(l => [l.id, l.kind as string]));
   const mainSteps: string[] = [];
   for (const d of days) if (d.main_step.done && d.main_step.title && !mainSteps.some(t => norm(t) === norm(d.main_step.title!))) mainSteps.push(d.main_step.title);
-  const moved = movedFrom(days, hardLevers, mainSteps);
+  const moved = movedFrom(days, leverKinds, mainSteps);
   const path = await svc.getPath();
   const current = path.tracks.length
     ? path.tracks.map(t => ({ m: path.milestones.find(m => m.id === t.current_milestone_id), track: t.title as string | null }))
@@ -152,7 +156,7 @@ const md = (d: string) => `${MONTHS[Number(d.slice(5, 7)) - 1]} ${Number(d.slice
 export const weekRange = (from: string, to: string) => from.slice(5, 7) === to.slice(5, 7) ? `${md(from)} – ${Number(to.slice(8, 10))}` : `${md(from)} – ${md(to)}`;
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const hm = (min: number) => { const m = Math.round(min); const h = Math.floor(m / 60); return h ? `${h} h${m % 60 ? ` ${m % 60} min` : ''}` : `${m} min`; };
-const pct = (x: number | null) => (x === null ? '–' : `${Math.round(x * 100)}%`);
+const pct = (x: number | null) => (x === null ? '–' : `${roundHalf(100 * x)}%`);
 const PACE: Record<Pace, string> = { ahead: 'ahead of pace', on_pace: 'on pace', behind: 'behind pace', no_steps: 'no steps planned for it yet' };
 const DAY_LETTER = ['', 'M', 'T', 'W', 'T', 'F', 'S', 'S'];
 

@@ -1,2 +1,2 @@
 /** Bump when the MCP surface changes; test/surface.test.ts holds the lock. */
-export const VERSION = '0.13.1';
+export const VERSION = '0.13.2';

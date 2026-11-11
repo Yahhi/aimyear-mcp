@@ -2,11 +2,12 @@
  * Week and month insights, computed the way the AimYear app computed them on the device
  * (aimyear-v2 lib/domain/insights.dart and comebacks.dart), so moving the numbers to the
  * server changes nothing the user sees:
- *  - minutes are wall minutes of finished sessions, counted on the local date the session
- *    started (as list_sessions reports them); the attention split is not used;
+ *  - minutes are attention minutes (docs/metrics.md), the same as summarize_day: a row is
+ *    one session on one local day, cut at midnight, running sessions counted up to now;
+ *    sums are exact and every number is rounded once, on the way out;
  *  - aim = main_step, goal_hard, goal_comfortable; life = life; everything else is other;
  *  - a goal minute is hard when its lever is hard; without a known lever, when it is
- *    main_step or goal_hard;
+ *    main_step or goal_hard (isHardWork, domain/numbers.ts);
  *  - the heatmap has weekdays Mon..Sun and hours 6:00..23:00; a session's minutes fill
  *    the hours from its start and stop at midnight;
  *  - an active day has 10+ goal minutes or a main_step session finished as done; a
@@ -14,12 +15,16 @@
  */
 import { addDays, daysBetween } from '../dates.js';
 import type { Area, LeverKind } from '../types.js';
+import { isHardWork, minutes as roundMin, share } from './numbers.js';
 
 export interface InsightRow {
   date: string;
-  /** HH:MM local start. */
+  /** HH:MM local start (00:00 for the part after midnight). */
   from: string;
+  /** Wall minutes of this session on this day. */
   wall_min: number | null;
+  /** Attention minutes of this session on this day (exact, not rounded). */
+  attention_min?: number | null;
   classification: string;
   area: Area;
   lever_id?: string;
@@ -37,10 +42,11 @@ const isGoal = (c: string) => c === 'main_step' || c === 'goal_hard' || c === 'g
 const weekdayOf = (date: string) => { const [y, m, d] = date.split('-').map(Number); return ((new Date(Date.UTC(y, m - 1, d)).getUTCDay() + 6) % 7) + 1; };
 
 export function isHard(r: InsightRow, leverKind: (id: string | undefined) => LeverKind | undefined): boolean {
-  const k = leverKind(r.lever_id);
-  if (k) return k === 'hard';
-  return r.classification === 'goal_hard' || r.classification === 'main_step';
+  return isHardWork(r, leverKind);
 }
+
+/** The minutes a row counts: attention when known, else wall (rows from before 2026-11-11). */
+export const rowMinutes = (r: InsightRow) => r.attention_min ?? r.wall_min ?? 0;
 
 export function computeInsights(input: { from: string; to: string; rows: InsightRow[]; leverKind: (id: string | undefined) => LeverKind | undefined; mainStepDays: Set<string> }) {
   const { from, to, rows, leverKind, mainStepDays } = input;
@@ -52,7 +58,7 @@ export function computeInsights(input: { from: string; to: string; rows: Insight
   const goalHard = Array.from({ length: 7 }, () => new Array<number>(HOURS).fill(0));
   for (const r of rows) {
     const day = days.get(r.date);
-    const m = r.wall_min ?? 0;
+    const m = rowMinutes(r);
     if (!day || m <= 0) continue;
     if (isGoal(r.classification)) {
       day.aim_min += m;
@@ -68,28 +74,33 @@ export function computeInsights(input: { from: string; to: string; rows: Insight
   for (let d = 0; d < 7; d++) for (let h = 0; h < HOURS; h++) if (goalHard[d][h] > (peak?.minutes ?? 0)) peak = { weekday: d + 1, hour: h + FIRST_HOUR, minutes: goalHard[d][h] };
   const list = [...days.values()];
   const sum = (k: 'aim_min' | 'other_min' | 'life_min' | 'total_min') => list.reduce((s, d) => s + d[k], 0);
+  // Rounded once, here: each figure from its exact sum (the parts may not add up exactly).
+  const grid = (g: number[][]) => g.map(row => row.map(roundMin));
   return {
-    days: list,
-    totals: { aim_min: sum('aim_min'), other_min: sum('other_min'), life_min: sum('life_min'), total_min: sum('total_min') },
-    hard_min: hard, comfortable_min: comfortable,
-    hard_share: hard + comfortable ? Math.round((hard / (hard + comfortable)) * 100) / 100 : 0,
-    by_area: byArea,
+    days: list.map(d => ({ ...d, aim_min: roundMin(d.aim_min), other_min: roundMin(d.other_min), life_min: roundMin(d.life_min), total_min: roundMin(d.total_min) })),
+    totals: { aim_min: roundMin(sum('aim_min')), other_min: roundMin(sum('other_min')), life_min: roundMin(sum('life_min')), total_min: roundMin(sum('total_min')) },
+    hard_min: roundMin(hard), comfortable_min: roundMin(comfortable),
+    hard_share: share(hard, hard + comfortable),
+    by_area: Object.fromEntries(Object.entries(byArea).map(([k, v]) => [k, roundMin(v)])) as Partial<Record<Area, number>>,
     main_step_days: list.filter(d => d.main_step_done).length,
-    heatmap: { first_hour: FIRST_HOUR, hours: HOURS, weekdays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], goal_min: goal, hard_min: goalHard },
-    peak_hard: peak,
+    heatmap: { first_hour: FIRST_HOUR, hours: HOURS, weekdays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'], goal_min: grid(goal), hard_min: grid(goalHard) },
+    peak_hard: peak && { ...peak, minutes: roundMin(peak.minutes) },
   };
 }
 
+/** Spreads a row's minutes over the clock hours its wall time covers, in proportion. */
 function spread(goal: number[][], goalHard: number[][], r: InsightRow, minutes: number, hard: boolean) {
   const wd = weekdayOf(r.date) - 1;
   const [hh, mm] = r.from.split(':').map(Number);
   let start = (hh || 0) * 60 + (mm || 0);
-  let left = minutes;
+  const wallMin = r.wall_min && r.wall_min > 0 ? r.wall_min : minutes;
+  const per = minutes / wallMin;
+  let left = wallMin;
   while (left > 0) {
     const hour = Math.floor(start / 60);
     const inHour = Math.min(left, 60 - (start % 60));
     const idx = hour - FIRST_HOUR;
-    if (idx >= 0 && idx < HOURS) { goal[wd][idx] += inHour; if (hard) goalHard[wd][idx] += inHour; }
+    if (idx >= 0 && idx < HOURS) { goal[wd][idx] += inHour * per; if (hard) goalHard[wd][idx] += inHour * per; }
     left -= inHour; start += inHour;
     if (start >= 24 * 60) break;
   }
@@ -101,7 +112,7 @@ export function computeComebacks(today: string, rows: InsightRow[], minGap = COM
   const active = new Set<string>();
   for (const r of rows) {
     if (!isGoal(r.classification)) continue;
-    goalMin.set(r.date, (goalMin.get(r.date) ?? 0) + (r.wall_min ?? 0));
+    goalMin.set(r.date, (goalMin.get(r.date) ?? 0) + rowMinutes(r));
     if (r.classification === 'main_step' && r.outcome === 'done') active.add(r.date);
   }
   for (const [d, m] of goalMin) if (m >= COMEBACK_MIN_GOAL_MIN) active.add(d);

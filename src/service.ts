@@ -8,12 +8,17 @@ import { nextTag } from './domain/wip-tags.js';
 import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, Track, PlanItem, Profile, Project, Routine, Session, Step, Stop, Workplace, Network, Move, Tracking, WipTag } from './types.js';
 import { NETWORKS, TRACKINGS } from './types.js';
 import { nextReviewDue, reviewPendingId } from './review/schedule.js';
+import { amount, hours, isGoalClass, isHardWork, percent, roundHalf, share } from './domain/numbers.js';
+
+/** The exact attention sums of a day, kept on daySummary's result under this key for pooling a week. */
+export const RAW = Symbol('day-raw');
+export interface DayRaw { total: number; work: number; goal: number; hard: number; byArea: Record<string, number> }
 
 export class AimError extends Error {}
 /** A Pro-only feature refused for lack of Pro. Clients key on `code`, never on the wording. */
 export class ProRequiredError extends AimError { readonly code = 'pro_required'; }
 
-const round = (n: number) => Math.round(n);
+const round = (n: number) => roundHalf(n);
 
 /** Days a week toward the aim when the person set no weekly target (docs/moves.md). */
 export const DEFAULT_WEEKLY_TARGET = 4;
@@ -167,13 +172,13 @@ export class AimService {
       const reached = latest.value >= 1;
       progress = reached ? 1 : stages.total ? stages.done / stages.total : 0;
       state = reached ? 'done' : `not done yet, ${stages.done} of ${stages.total} stages done`;
-    } else state = `${goal.metric}: ${latest.value} of ${goal.target} (started at ${goal.baseline})`;
+    } else state = `${goal.metric}: ${amount(latest.value)} of ${amount(goal.target)} (started at ${amount(goal.baseline)})`;
     const totalDays = daysBetween(goal.createdAt.slice(0, 10), goal.deadline) || 1;
     const elapsed = Math.min(1, Math.max(0, daysBetween(goal.createdAt.slice(0, 10), today) / totalDays));
     // A project saved before 0.13 has no public flag: it is not public.
     const view = { ...goal, projects: goal.projects.map(p => ({ ...p, public: p.public ?? false })) };
     return {
-      goal: view, kind, current_value: latest.value, ...(stages ? { stages } : {}), days_left: daysLeft, progress_fraction: Math.round(progress * 100) / 100, time_elapsed_fraction: Math.round(elapsed * 100) / 100,
+      goal: view, kind, current_value: latest.value, ...(stages ? { stages } : {}), days_left: daysLeft, progress_fraction: roundHalf(progress, 2), time_elapsed_fraction: roundHalf(elapsed, 2),
       speak: `Goal [${goal.area ?? 'money'}]: "${goal.title}". ${state}, ${daysLeft} days left. Levers: ${goal.levers.map(l => `${l.name} (${l.kind})`).join(', ') || 'none yet'}.`,
     };
   }
@@ -236,7 +241,7 @@ export class AimService {
     const current = kind === 'count' ? (m.progress?.[m.progress.length - 1]?.value ?? 0) : null;
     const frac = kind === 'count' ? (m.target > 0 ? Math.min(1, current! / m.target) : 0) : mine.length ? done / mine.length : 0;
     const status = m.status === 'done' || m.status === 'retired' ? m.status : kind === 'steps' && mine.length === 0 ? 'no_steps' : frac >= elapsed + 0.1 ? 'ahead' : frac < elapsed - 0.15 ? 'behind' : 'on_pace';
-    return { kind, ...(kind === 'count' ? { current } : {}), progress_fraction: Math.round(frac * 100) / 100, steps_total: mine.length, steps_done: done, days_left: daysBetween(today, m.due), time_elapsed_fraction: Math.round(elapsed * 100) / 100, pace: status };
+    return { kind, ...(kind === 'count' ? { current } : {}), progress_fraction: roundHalf(frac, 2), steps_total: mine.length, steps_done: done, days_left: daysBetween(today, m.due), time_elapsed_fraction: roundHalf(elapsed, 2), pace: status };
   }
 
   async getPath() {
@@ -561,12 +566,12 @@ export class AimService {
       const min = occ(c) * c.minutes;
       if (c.assumed) assumedList.push(`${c.title} (${Math.round(c.minutes)} min)`);
       if (c.kind === 'overhead') { overhead += min; continue; }
-      if (c.kind === 'window') { windows += min; windowList.push(`${c.title}: ${describeWhen(c)}, ${Math.round((min / 60) * 10) / 10} h/week`); continue; }
+      if (c.kind === 'window') { windows += min; windowList.push(`${c.title}: ${describeWhen(c)}, ${hours(min)} h/week`); continue; }
       perArea[c.area ?? 'work'] = (perArea[c.area ?? 'work'] ?? 0) + min;
       committed += min;
       if (c.usableForWork) windows += min;
     }
-    const h = (m: number) => Math.round((m / 60) * 10) / 10;
+    const h = hours;
     const weekMin = 7 * 24 * 60;
     // Commitments carved out of a declared window must not be counted twice.
     const carved = items.filter(c => c.insideWindowId && c.kind === 'commitment').reduce((sum, c) => sum + occ(c) * c.minutes, 0);
@@ -578,7 +583,7 @@ export class AimService {
       focus_window_hours_gross: h(windows), carved_out_of_windows_hours: h(carved), focus_window_hours_net: h(netWindows), carved_out_by: carvedList,
       unaccounted_hours: h(unaccounted), by_area_hours: Object.fromEntries(Object.entries(perArea).map(([k, v]) => [k, h(v)])),
       focus_windows: windowList, assumed_entries: assumedList,
-      speak: `Per week: ${h(overhead)} h overhead (sleep, meals, hygiene, moving), ${h(committed)} h committed to areas (${Object.entries(perArea).map(([k, v]) => `${k} ${h(v)}h`).join(', ') || 'none'}), ${h(windows)} h of focus windows minus ${h(carved)} h carved out of them (${carvedList.join(', ') || 'nothing'}) = ${h(netWindows)} h genuinely free for the goal, ${h(unaccounted)} h not yet accounted for.${windowList.length ? ` Windows: ${windowList.join('; ')}.` : ' No focus windows recorded yet, so the planner has nowhere to put the main step.'}${assumedList.length ? ` Assumed by Claude, please confirm: ${assumedList.join(', ')}.` : ''}`,
+      speak: `Per week: ${h(overhead)} h overhead (sleep, meals, hygiene, moving), ${h(committed)} h committed to areas (${Object.entries(perArea).map(([k, v]) => `${k} ${h(v)}h`).join(', ') || 'none'}), ${h(windows)} h of focus windows minus ${h(carved)} h carved out of them (${carvedList.join(', ') || 'nothing'}) ≈ ${h(netWindows)} h genuinely free for the goal (each figure rounded on its own), ${h(unaccounted)} h not yet accounted for.${windowList.length ? ` Windows: ${windowList.join('; ')}.` : ' No focus windows recorded yet, so the planner has nowhere to put the main step.'}${assumedList.length ? ` Assumed by Claude, please confirm: ${assumedList.join(', ')}.` : ''}`,
     };
   }
 
@@ -867,7 +872,7 @@ export class AimService {
       yesterday: { date: yesterday, main_step_done: ySum.main_step.done, goal_attention_min: ySum.goal_attention_min, by_area: ySum.by_area, undone_items: undone },
       week: { main_step_days: week.main_step_days, goal_share: week.goal_share, hard_share: week.hard_share, by_area: week.by_area },
       days_since_hard_lever: daysSinceHard, existing_plan: existing?.plan ?? [], routines,
-      speak: `Planning ${d}. ${windowMinutes === 0 ? 'NO focus window that day: do not plan goal work, and do not ask for a main step. ' : `Focus window: ${Math.round(windowMinutes / 6) / 10} h. `}Fixed that day: ${commitments.length ? commitments.map(c => `${c.title} ${c.minutes}min${c.usableForWork ? ' (usable)' : ''}`).join(', ') : 'nothing recorded'} = ${Math.round(committedToday / 6) / 10} h. ${goal.speak} Days since a hard lever: ${daysSinceHard ?? 'never'}. Yesterday main step ${ySum.main_step.done ? 'done' : 'NOT done'}${undone.length ? `, ${undone.length} items left undone` : ''}. ${carryOver ? `The main step of ${carryOver.date} is not done: "${carryOver.title}". Plan it again as the main step unless the user says otherwise.` : 'Pick the main step from next_steps: the first open step of a track, in path order.'} Then fit paid work, family, workout.${routines.length ? ` Routines that day (already in the plan, set_plan keeps them): ${routines.map(r => r.title).join('; ')}.` : ''}`,
+      speak: `Planning ${d}. ${windowMinutes === 0 ? 'NO focus window that day: do not plan goal work, and do not ask for a main step. ' : `Focus window: ${hours(windowMinutes)} h. `}Fixed that day: ${commitments.length ? commitments.map(c => `${c.title} ${c.minutes}min${c.usableForWork ? ' (usable)' : ''}`).join(', ') : 'nothing recorded'} = ${hours(committedToday)} h. ${goal.speak} Days since a hard lever: ${daysSinceHard ?? 'never'}. Yesterday main step ${ySum.main_step.done ? 'done' : 'NOT done'}${undone.length ? `, ${undone.length} items left undone` : ''}. ${carryOver ? `The main step of ${carryOver.date} is not done: "${carryOver.title}". Plan it again as the main step unless the user says otherwise.` : 'Pick the main step from next_steps: the first open step of a track, in path order.'} Then fit paid work, family, workout.${routines.length ? ` Routines that day (already in the plan, set_plan keeps them): ${routines.map(r => r.title).join('; ')}.` : ''}`,
     };
   }
 
@@ -980,7 +985,7 @@ export class AimService {
     const stored = (await this.store.getRunningSessions()).filter(s => !extra.some(e => e.id === s.id));
     const running = [...stored, ...extra];
     const total = running.reduce((s, x) => s + (x.weight ?? 1), 0) || 1;
-    return running.map(s => ({ id: s.id, task: s.task, classification: s.classification, started: s.start, share: Math.round(((s.weight ?? 1) / total) * 100) / 100, mine: s.clientSessionId === this.clientSessionId, agent: s.agent ?? null }));
+    return running.map(s => ({ id: s.id, task: s.task, classification: s.classification, started: s.start, share: share(s.weight ?? 1, total), weight: s.weight ?? 1, mine: s.clientSessionId === this.clientSessionId, agent: s.agent ?? null }));
   }
 
   /**
@@ -1090,7 +1095,7 @@ export class AimService {
       await this.store.saveSession(s);
     }
     const view = await this.runningView();
-    return { ok: true, running_sessions: view, applies_to: fromNow ? 'from now on' : 'whole session (retroactive)', speak: `Attention${fromNow ? ' from now' : ''}: ${view.map(v => `${Math.round(v.share * 100)}% ${v.task}`).join(', ')}.` };
+    return { ok: true, running_sessions: view, applies_to: fromNow ? 'from now on' : 'whole session (retroactive)', speak: `Attention${fromNow ? ' from now' : ''}: ${view.map(v => `${roundHalf(100 * v.share)}% ${v.task}`).join(', ')}.` };
   }
 
   async addNote(note: string, sessionId?: string, opId?: string) {
@@ -1410,7 +1415,7 @@ export class AimService {
     const today = await this.today();
     const day = await this.store.getDay(today);
     const main = day?.plan.find(p => p.isMainStep);
-    return { running_sessions: running, block: this.blockView(block), mode: day?.mode ?? 'full', main_step: main ? { item_id: main.id, step_id: main.stepId ?? null, title: main.title, done: main.done } : null, speak: `${running.length ? `Running: ${running.map(r => `[${r.id}] ${r.task} (${Math.round(r.share * 100)}%${r.agent ? `, started by ${r.agent === 'app' ? 'the app' : r.agent}` : ''})`).join(', ')}.` : 'Nothing running.'} ${block ? `Timer: ${this.blockView(block)?.minutes_left} min left.` : 'No timer.'} ${main ? `Main step today: "${main.title}" ${main.done ? 'done' : 'pending'}.` : 'No main step planned today.'}` };
+    return { running_sessions: running, block: this.blockView(block), mode: day?.mode ?? 'full', main_step: main ? { item_id: main.id, step_id: main.stepId ?? null, title: main.title, done: main.done } : null, speak: `${running.length ? `Running: ${running.map(r => `[${r.id}] ${r.task} (${roundHalf(100 * r.share)}%${r.agent ? `, started by ${r.agent === 'app' ? 'the app' : r.agent}` : ''})`).join(', ')}.` : 'Nothing running.'} ${block ? `Timer: ${this.blockView(block)?.minutes_left} min left.` : 'No timer.'} ${main ? `Main step today: "${main.title}" ${main.done ? 'done' : 'pending'}.` : 'No main step planned today.'}` };
   }
 
   async getGaps(date?: string) {
@@ -1438,7 +1443,10 @@ export class AimService {
     for (const s of sessions) { add(byArea, s.area, s); add(byClass, s.classification, s); if (s.leverId) { add(byLever, s.leverId, s); byLever[s.leverId].kind = goal?.levers.find(l => l.id === s.leverId)?.kind; } }
     const r = (m: Record<string, { wall_min: number; attention_min: number }>) => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, { ...v, wall_min: round(v.wall_min), attention_min: round(v.attention_min) }]));
     const goalAtt = ['main_step', 'goal_hard', 'goal_comfortable'].reduce((s, k) => s + (byClass[k]?.attention_min ?? 0), 0);
-    const hardAtt = ['main_step', 'goal_hard'].reduce((s, k) => s + (byClass[k]?.attention_min ?? 0), 0);
+    const leverKind = (id: string | undefined) => (id ? goal?.levers.find(l => l.id === id)?.kind : undefined);
+    const attOf = (s: Session) => (s.attentionShareOverride !== undefined ? (att.wall.get(s.id) ?? 0) * s.attentionShareOverride : att.attention.get(s.id) ?? 0);
+    // docs/metrics.md: the lever decides what is hard, the same rule as insights and the app.
+    const hardAtt = sessions.filter(s => isGoalClass(s.classification) && isHardWork({ classification: s.classification, lever_id: s.leverId }, leverKind)).reduce((n, s) => n + attOf(s), 0);
     // Work is aim work plus other projects, whatever area they are filed in: aim work on a
     // money aim sits in "money", so the work area alone made the share go over 100%.
     const workAtt = goalAtt + (byClass['other_project']?.attention_min ?? 0);
@@ -1447,20 +1455,23 @@ export class AimService {
     const routines = await this.routineStatus(day);
     const moves = (await this.store.getMovesInRange(d, d)).sort((a, b) => a.at.localeCompare(b.at)).map(m => this.moveView(m, goal));
     const aimMoves = moves.filter(m => m.toward_aim).length, hardMoves = moves.filter(m => m.hard).length;
-    const hardTouched = hardMoves > 0 || sessions.some(s => (s.classification === 'goal_hard' || (s.classification === 'main_step' && goal?.levers.find(l => l.id === s.leverId)?.kind === 'hard')) && (att.attention.get(s.id) ?? 0) >= 10);
+    const hardTouched = hardMoves > 0 || sessions.some(s => isGoalClass(s.classification) && isHardWork({ classification: s.classification, lever_id: s.leverId }, leverKind) && attOf(s) >= 10);
     const quiet = await this.quietNumbers();
     const overrides = sessions.filter(s => s.override).length;
     const list = sessions.sort((a, b) => a.start.localeCompare(b.start)).map(s => ({ id: s.id, from: localTime(new Date(s.start), tz), to: s.end ? localTime(new Date(s.end), tz) : 'running', task: s.task, area: s.area, classification: s.classification, lever_id: s.leverId, project_id: s.projectId, wall_min: round(att.wall.get(s.id) ?? 0), attention_min: round(s.attentionShareOverride !== undefined ? (att.wall.get(s.id) ?? 0) * s.attentionShareOverride : att.attention.get(s.id) ?? 0), override: s.override ?? false, outcome: s.outcome, summary: s.summary }));
     const gaps = findGaps(sessions, start, end).map(g => ({ from: localTime(new Date(g.start), tz), to: localTime(new Date(g.end), tz), minutes: g.minutes }));
-    return {
+    const out = {
       date: d, mode: day?.mode ?? 'full', main_step: { title: main?.title ?? null, done: !!main?.done, planned: !!main }, routines,
-      total_attention_min: round(totalAtt), work_attention_min: round(workAtt), goal_attention_min: round(goalAtt), goal_share_of_work: workAtt ? Math.round((goalAtt / workAtt) * 100) / 100 : 0, hard_share_of_goal: goalAtt ? Math.round((hardAtt / goalAtt) * 100) / 100 : 0,
+      total_attention_min: round(totalAtt), work_attention_min: round(workAtt), goal_attention_min: round(goalAtt), hard_attention_min: round(hardAtt), goal_share_of_work: share(goalAtt, workAtt), hard_share_of_goal: share(hardAtt, goalAtt),
       hard_lever_touched: hardTouched, overrides, by_area: r(byArea), by_classification: r(byClass), by_lever: r(byLever), overlaps: att.overlaps.map(o => ({ from: localTime(new Date(o.start), tz), to: localTime(new Date(o.end), tz), count: o.count })), gaps, sessions: list,
       moves, aim_moves: aimMoves, hard_moves: hardMoves, quiet_numbers: quiet,
       speak: quiet
         ? `${d}: ${aimMoves ? `${aimMoves} move(s) toward the aim${hardMoves ? `, ${hardMoves} on the hard part` : ''}` : 'no moves toward the aim'}${goalAtt >= AIM_DAY_MIN ? `, ${aimMoves ? 'and ' : 'but '}focused time on the aim` : ''}. Main step ${main ? (main.done ? 'done' : `not done ("${main.title}")`) : 'not planned'}. Hard lever ${hardTouched ? 'touched' : 'not touched'}.${routines.total || routines.skipped ? ` Routines ${routineText(routines)}.` : ''}`
-        : `${d}: ${round(totalAtt)} min tracked, ${round(goalAtt)} min on the goal (${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work), hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%. Main step ${main ? (main.done ? 'done' : `NOT done ("${main.title}")`) : 'not planned'}. Hard lever ${hardTouched ? 'touched' : 'not touched'}.${aimMoves ? ` ${aimMoves} move(s) toward the aim.` : ''}${routines.total || routines.skipped ? ` Routines ${routineText(routines)}.` : ''} ${overrides ? `${overrides} override(s). ` : ''}${gaps.length ? `${gaps.length} gap(s).` : ''}`,
+        : `${d}: ${round(totalAtt)} min tracked, ${round(goalAtt)} min on the goal (${percent(goalAtt, workAtt)}% of work), hard share ${percent(hardAtt, goalAtt)}%. Main step ${main ? (main.done ? 'done' : `NOT done ("${main.title}")`) : 'not planned'}. Hard lever ${hardTouched ? 'touched' : 'not touched'}.${aimMoves ? ` ${aimMoves} move(s) toward the aim.` : ''}${routines.total || routines.skipped ? ` Routines ${routineText(routines)}.` : ''} ${overrides ? `${overrides} override(s). ` : ''}${gaps.length ? `${gaps.length} gap(s).` : ''}`,
     };
+    // The exact sums, for pooling a week (weekSummary, the weekly email). A symbol key, so
+    // JSON leaves it out of tool results.
+    return Object.assign(out, { [RAW]: { total: totalAtt, work: workAtt, goal: goalAtt, hard: hardAtt, byArea: Object.fromEntries(Object.entries(byArea).map(([k, v]) => [k, v.attention_min])) } as DayRaw });
   }
 
   async weekSummary(date?: string) {
@@ -1471,10 +1482,11 @@ export class AimService {
     const through = addDays(from, 6) < today ? addDays(from, 6) : today;
     for (let i = 0; i < 7; i++) { const day = addDays(from, i); if (day > through) break; days.push(await this.daySummary(day)); }
     const sum = (f: (x: typeof days[number]) => number) => days.reduce((s, x) => s + f(x), 0);
+    // docs/metrics.md: pool the exact daily sums, round once; never rebuild from rounded days.
     const byArea: Record<string, number> = {};
-    for (const x of days) for (const [k, v] of Object.entries(x.by_area)) byArea[k] = (byArea[k] ?? 0) + v.attention_min;
-    const goalAtt = sum(x => x.goal_attention_min), workAtt = sum(x => x.work_attention_min);
-    const hardAtt = sum(x => Math.round(x.goal_attention_min * x.hard_share_of_goal));
+    for (const x of days) for (const [k, v] of Object.entries(x[RAW].byArea)) byArea[k] = (byArea[k] ?? 0) + v;
+    const goalAtt = sum(x => x[RAW].goal), workAtt = sum(x => x[RAW].work);
+    const hardAtt = sum(x => x[RAW].hard);
     const path = await this.getPath();
     const current = path.milestones.find(m => m.id === path.current_milestone_id);
     const st = await this.streak();
@@ -1491,12 +1503,12 @@ export class AimService {
       week_of: from, through, days: days.map(x => ({ date: x.date, toward_aim: week.dates.includes(x.date), aim_moves: x.aim_moves, main_step_done: x.main_step.done, routines_done: x.routines.done, routines_full: x.routines.full, routines_minimum: x.routines.minimum, routines_skipped: x.routines.skipped, routines_total: x.routines.total, goal_attention_min: x.goal_attention_min, total_attention_min: x.total_attention_min, hard_lever_touched: x.hard_lever_touched, overrides: x.overrides })),
       main_step_days: days.filter(x => x.main_step.done).length, days_counted: days.length,
       routines: { days_with_routines: routineDays.length, days_all_done: routineDays.filter(x => x.routines.done === x.routines.total).length, done: sum(x => x.routines.done), full: sum(x => x.routines.full), minimum: sum(x => x.routines.minimum), skipped: sum(x => x.routines.skipped), total: sum(x => x.routines.total), weekly },
-      goal_share: workAtt ? Math.round((goalAtt / workAtt) * 100) / 100 : 0, hard_share: goalAtt ? Math.round((hardAtt / goalAtt) * 100) / 100 : 0,
+      goal_attention_min: round(goalAtt), hard_attention_min: round(hardAtt), goal_share: share(goalAtt, workAtt), hard_share: share(hardAtt, goalAtt),
       by_area: Object.fromEntries(Object.entries(byArea).map(([k, v]) => [k, round(v)])), overrides: sum(x => x.overrides),
       milestone: current ? { title: current.title, kind: current.kind, ...(current.kind === 'count' ? { current: current.current, target: current.target, metric: current.metric } : {}), due: current.due, steps_done: current.steps_done, steps_total: current.steps_total, pace: current.pace } : null,
       speak: quiet
         ? `Week of ${from}: ${week.speak} Main step done on ${days.filter(x => x.main_step.done).length} of ${days.length} days. ${aimMoves ? `${aimMoves} move(s) toward the aim${hardMoves ? `, ${hardMoves} on the hard part` : ''}.` : 'No moves toward the aim.'}${routinesText}${weeklyText} ${milestoneText}`
-        : `Week of ${from}: ${week.speak} Main step done ${days.filter(x => x.main_step.done).length}/${days.length} days, goal share ${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work, hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%, ${sum(x => x.overrides)} overrides.${aimMoves ? ` ${aimMoves} move(s) toward the aim.` : ''}${routinesText}${weeklyText} ${milestoneText}`,
+        : `Week of ${from}: ${week.speak} Main step done ${days.filter(x => x.main_step.done).length}/${days.length} days, goal share ${percent(goalAtt, workAtt)}% of work, hard share ${percent(hardAtt, goalAtt)}%, ${sum(x => x.overrides)} overrides.${aimMoves ? ` ${aimMoves} move(s) toward the aim.` : ''}${routinesText}${weeklyText} ${milestoneText}`,
     };
   }
 
@@ -1565,6 +1577,30 @@ export class AimService {
 
   // ---------- insights ----------
   /**
+   * docs/metrics.md: one row per session per local day, with that day's attention minutes
+   * (the split summarize_day uses, cut at midnight, a running session counted up to now).
+   */
+  async insightRows(from: string, to: string): Promise<InsightRow[]> {
+    const tz = await this.tz();
+    const all = await this.store.getSessionsOverlapping(startOfDay(from, tz).toISOString(), endOfDay(to, tz).toISOString());
+    const rows: InsightRow[] = [];
+    for (let d = from; d <= to; d = addDays(d, 1)) {
+      const ws = startOfDay(d, tz), we = endOfDay(d, tz);
+      const day = all.filter(s => Date.parse(s.start) < we.getTime() && (!s.end || Date.parse(s.end) > ws.getTime()));
+      if (!day.length) continue;
+      const att = computeAttention(day, ws, we);
+      for (const s of day.sort((a, b) => a.start.localeCompare(b.start))) {
+        const wall = att.wall.get(s.id) ?? 0;
+        if (wall <= 0) continue;
+        const a = s.attentionShareOverride !== undefined ? wall * s.attentionShareOverride : att.attention.get(s.id) ?? 0;
+        const from = new Date(Math.max(Date.parse(s.start), ws.getTime()));
+        rows.push({ date: d, from: localTime(from, tz), wall_min: wall, attention_min: a, classification: s.classification, area: s.area, lever_id: s.leverId, outcome: s.outcome });
+      }
+    }
+    return rows;
+  }
+
+  /**
    * A week (the last 7 days) or month (the last 30 days) ending on `to` (default today):
    * minutes per day split aim / other / life, hard vs comfortable, the hour × weekday
    * heatmap and comebacks. The same numbers the app used to compute on the device.
@@ -1573,8 +1609,7 @@ export class AimService {
     const today = await this.today();
     const t = to ?? today; this.assertDate(t);
     const f = addDays(t, range === 'month' ? -29 : -6);
-    const history = await this.history(addDays(t, -(COMEBACK_HISTORY_DAYS - 1)), t);
-    const rows: InsightRow[] = history.sessions.map(x => ({ date: x.date, from: x.from, wall_min: x.wall_min, classification: x.classification, area: x.area, lever_id: x.lever_id, outcome: x.outcome }));
+    const rows = await this.insightRows(addDays(t, -(COMEBACK_HISTORY_DAYS - 1)), t);
     const goal = await this.store.getGoal();
     const kinds = new Map((goal?.levers ?? []).map(l => [l.id, l.kind]));
     const mainStepDays = new Set((await this.store.getDaysInRange(f, t)).filter(d => d.plan.some(p => p.isMainStep && p.done)).map(d => d.date));
@@ -1598,7 +1633,7 @@ export class AimService {
       comebacks: { ...cb, in_range: inRange, history_days: COMEBACK_HISTORY_DAYS },
       speak: quiet
         ? `${Span}: ${aimDays} day(s) toward the aim, ${aimMoves ? `${aimMoves} move(s) toward the aim${hardMoves ? `, ${hardMoves} on the hard part` : ''}` : 'no moves recorded'}. Main step done on ${ins.main_step_days} day(s).${peakText} ${comebackText}`
-        : `${Span}: ${aimDays} day(s) toward the aim${aimMoves ? `, ${aimMoves} move(s)` : ''}. ${ins.totals.aim_min} min on the aim, ${ins.totals.other_min} on other work, ${ins.totals.life_min} on life. Hard share ${Math.round(ins.hard_share * 100)}% of aim time. Main step done on ${ins.main_step_days} day(s).${peakText} ${cb.count ? `${cb.count} comeback(s) in ${COMEBACK_HISTORY_DAYS} days${inRange ? `, ${inRange} in this range` : ''}.` : 'No comebacks counted yet.'}`,
+        : `${Span}: ${aimDays} day(s) toward the aim${aimMoves ? `, ${aimMoves} move(s)` : ''}. ${ins.totals.aim_min} min on the aim, ${ins.totals.other_min} on other work, ${ins.totals.life_min} on life. Hard share ${roundHalf(100 * ins.hard_share)}% of aim time. Main step done on ${ins.main_step_days} day(s).${peakText} ${cb.count ? `${cb.count} comeback(s) in ${COMEBACK_HISTORY_DAYS} days${inRange ? `, ${inRange} in this range` : ''}.` : 'No comebacks counted yet.'}`,
     };
   }
 
@@ -1741,7 +1776,7 @@ export function mergeStop(s: Session, stop: Stop, tz: string): { applied: 'ended
 const milestoneKind = (m: Milestone) => m.kind ?? 'steps';
 
 const milestoneProgressText = (m: { kind: string; current?: number | null; target: number; metric: string; steps_done: number; steps_total: number }) =>
-  m.kind === 'count' ? `${m.current ?? 0}/${m.target} ${m.metric}` : `${m.steps_done}/${m.steps_total} steps done`;
+  m.kind === 'count' ? `${amount(m.current)}/${amount(m.target)} ${m.metric}` : `${m.steps_done}/${m.steps_total} steps done`;
 
 /** A milestone still to work on: not finished and not retired. */
 const isOpen = (m: Milestone) => m.status !== 'done' && m.status !== 'retired';
