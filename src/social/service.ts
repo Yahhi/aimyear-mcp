@@ -69,6 +69,8 @@ export const autoPendingId = (uid: string, id: string) => `auto-post-${uid}-${id
 const autoKey = (id: string) => `auto-${id}`;
 /** States in which an automatic todo is (or is about to be) the project's todo for the day. */
 const LIVE: AutoPost['state'][] = ['queued', 'posting', 'posted'];
+/** Two texts that say the same (case, punctuation and spacing aside): a summary that only repeats the task title. */
+const sameText = (a: string, b: string) => a.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim() === b.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 
 /** What the tools and the app routes show of an automatic todo. */
 export function autoPostView(a: AutoPost) {
@@ -82,7 +84,7 @@ export type AutoPostView = ReturnType<typeof autoPostView>;
 
 /** What one session or move did about WIP once it ended (absent: nothing to do with WIP). */
 export type AutoOutcome =
-  | { status: 'queued' | 'joined' | 'already_posted' | 'offered'; auto_post: AutoPostView; speak: string }
+  | { status: 'queued' | 'joined' | 'already_posted' | 'offered' | 'waiting'; auto_post: AutoPostView; speak: string }
   | { status: 'skipped'; reason: string; project: string | null; speak: string };
 
 /** Only messages we wrote ourselves pass through: they never contain a credential. */
@@ -266,14 +268,21 @@ export class SocialService {
     const hardMin = s.hard_attention_min;
     const r = s.routines;
     // What moved, in the user's words and in the order it happened: the summary of each
-    // session toward the aim (else its task), and each move toward the aim.
+    // session toward the aim that ended done (else its task), and each move toward the aim.
+    // Unfinished work (docs/public-posting.md, "The agent writes the post, finished work
+    // only") is never shown as done: it comes in only on a day with nothing finished toward
+    // the aim, and only by what its summary says was done, never by its task title.
     const tz = await this.tz();
     const at = new Map((await this.store.getMovesInRange(date, date)).map(m => [m.id, localTime(new Date(m.at), tz)]));
     const main = (await this.store.getDay(date))?.plan.find(p => p.isMainStep);
-    const work = [
-      ...s.sessions.filter(x => x.wall_min > 0).map(x => ({ at: x.from, text: x.summary?.trim() || x.task, aim: isGoalWork(x.classification), onMain: x.classification === 'main_step', projectId: x.project_id, leverId: x.lever_id })),
+    const ran = s.sessions.filter(x => x.wall_min > 0);
+    const sessionWork = (x: typeof ran[number], text: string) => ({ at: x.from, text, aim: isGoalWork(x.classification), onMain: x.classification === 'main_step', projectId: x.project_id, leverId: x.lever_id });
+    const finished = [
+      ...ran.filter(x => x.outcome === 'done').map(x => sessionWork(x, x.summary?.trim() && !isPlaceholder(x.summary) ? x.summary.trim() : x.task)),
       ...s.moves.map(m => ({ at: at.get(m.id) ?? '', text: m.task, aim: m.toward_aim, onMain: m.classification === 'main_step' || (!!main && m.item_id === main.id), projectId: m.project_id ?? undefined, leverId: m.lever_id ?? undefined })),
-    ].sort((a, b) => a.at.localeCompare(b.at));
+    ];
+    const unfinished = ran.filter(x => x.outcome !== 'done' && !isPlaceholder(x.summary) && sameText(x.summary!, x.task) === false).map(x => sessionWork(x, x.summary!.trim()));
+    const work = (finished.some(x => x.aim) ? finished : [...finished, ...unfinished]).sort((a, b) => a.at.localeCompare(b.at));
     const done = work.filter(x => x.aim).map(x => x.text);
     // A project that already got its automatic WIP todo that day is left out of the WIP part.
     const autoDone = new Set((await this.store.getAutoPostsOn(date)).filter(a => LIVE.includes(a.state)).map(a => a.projectId));
@@ -448,6 +457,8 @@ export class SocialService {
         : r.status === 'skipped_you_posted' ? 'skipped, you already posted there today'
           : r.status === 'in_progress' ? 'another attempt is posting it right now'
             : r.status === 'too_long' ? `not posted, too long (${r.graphemes}/${r.max})` : `not posted (${r.error})`}`;
+    // The day's WIP post carried the work of todos still waiting for the agent: they are done with.
+    if (results.some(r => r.network === 'wip' && r.status === 'posted' && !r.key?.startsWith('auto-'))) await this.dropWaiting(d, 'the work went out with the day\'s WIP post');
     return { ok: results.some(r => r.status === 'posted' || r.status === 'already_posted'), date: d, text: text ?? made.draft?.text ?? null, results, speak: `${results.map(line).join('. ')}.` };
   }
 
@@ -464,7 +475,7 @@ export class SocialService {
   private async postOne(conn: Connection, n: Network, date: string, item: Item): Promise<PostOutcome> {
     // The Post button of a short summary's offer: that automatic todo, with the text as shown.
     if (n === 'wip' && item.key?.startsWith('auto-')) {
-      const r = await this.sendAuto(item.key.slice(5), { text: item.text, by: 'user', from: ['offered', 'queued', 'failed', 'cancelled', 'skipped'], conn });
+      const r = await this.sendAuto(item.key.slice(5), { text: item.text, by: 'user', from: ['offered', 'queued', 'failed', 'cancelled', 'skipped', 'waiting'], conn });
       return r.status === 'posted' ? { status: 'posted', url: r.auto_post.url ?? undefined }
         : r.status === 'already_posted' ? { status: 'already_posted', url: r.auto_post?.url ?? undefined }
           : r.status === 'busy' ? { status: 'in_progress' } : r.status === 'skipped' ? { status: 'skipped_you_posted' } : { status: 'failed', error: r.error };
@@ -565,6 +576,12 @@ export class SocialService {
    *    post_at to the new end + 10 minutes, with a fresh push, so the undo always covers the
    *    text that will go out. A posted one posts nothing new. Either way the session or move
    *    is recorded on it: one piece of work is in at most one todo.
+   *  - Finished work only (docs/public-posting.md, "The agent writes the post, finished work
+   *    only"): a session that ended partial, abandoned or with no outcome makes no todo; it
+   *    can still be in the evening draft. A move is finished work by itself.
+   *  - Stopped from the app: no agent is there to write the words, so the todo waits for one
+   *    (state waiting, no push, nothing goes out): the agent's next answers carry
+   *    post_waiting, and edit_auto_post with the text it wrote with the user posts it.
    */
   async afterWork(input: { sessions?: string[]; moves?: string[]; wipText?: string }): Promise<AutoOutcome[]> {
     const out: AutoOutcome[] = [];
@@ -579,23 +596,26 @@ export class SocialService {
 
   private async autoOne(kind: 'session' | 'move', id: string, wipText?: string): Promise<AutoOutcome | null> {
     const goal = await this.store.getGoal();
-    let work: { task: string; text: string; start: string; end: string; projectId?: string; itemId?: string; stepId?: string; real: boolean; quiet: boolean };
+    let work: { task: string; text: string; start: string; end: string; projectId?: string; itemId?: string; stepId?: string; real: boolean; quiet: boolean; finished: boolean };
     if (kind === 'session') {
       const s = await this.store.getSession(id);
       if (!s?.end) return null;
       const summary = s.summary?.trim() ?? '';
-      work = { task: s.task, text: summary || s.task, start: s.start, end: s.end, projectId: s.projectId, itemId: s.itemId, stepId: s.stepId, real: isRealSummary(summary, s.task), quiet: isPlaceholder(summary) };
+      work = { task: s.task, text: summary || s.task, start: s.start, end: s.end, projectId: s.projectId, itemId: s.itemId, stepId: s.stepId, real: isRealSummary(summary, s.task), quiet: isPlaceholder(summary), finished: s.outcome === 'done' };
     } else {
       const m = await this.store.getMove(id);
       if (!m) return null;
-      work = { task: m.task, text: m.task, start: m.at, end: m.at, projectId: m.projectId, itemId: m.itemId, stepId: m.stepId, real: isRealSummary(m.task, ''), quiet: false };
+      work = { task: m.task, text: m.task, start: m.at, end: m.at, projectId: m.projectId, itemId: m.itemId, stepId: m.stepId, real: isRealSummary(m.task, ''), quiet: false, finished: true };
     }
     const agentText = wipText?.trim() || undefined;
     const project = goal?.projects.find(p => p.id === work.projectId);
     const skip = (reason: string): AutoOutcome => ({ status: 'skipped', reason, project: project?.name ?? null, speak: agentText ? `wip_text not used: ${reason}.` : '' });
     if (!project?.public) return agentText ? skip(project ? `${project.name} is not marked public` : 'this work is on no AimYear project marked public') : null;
+    // Unfinished work gets no todo of its own; the evening draft may still carry it.
+    if (!work.finished) return agentText ? skip('the session did not end done, so it gets no WIP todo of its own; it can go in the evening draft, or out with add_post when the user asks') : null;
     // A summary the server wrote says nothing: that work waits for the evening draft.
     if (!agentText && work.quiet) return null;
+    const fromApp = !agentText && (await this.aim.callerAgent()) === 'app';
     if (await this.store.findAutoPostFor(kind, id)) return null;
     if (!(await this.deps.isPro(this.uid))) return skip('automatic WIP posts are part of AimYear Pro');
     if (!(await this.store.getSocialAccount('wip'))) return skip('WIP is not connected');
@@ -603,12 +623,13 @@ export class SocialService {
     const now = this.now();
     const date = localDate(new Date(work.end), tz);
     if (date < addDays(localDate(now, tz), -1)) return skip('the work is older than yesterday');
-    const piece = agentText ?? (work.real ? work.text : null);
+    // From the app the summary is a stand-in until the agent writes the words: it never goes out by itself.
+    const piece = agentText ?? (work.real && !fromApp ? work.text : null);
     const by: AutoPost['textBy'] = agentText ? 'agent' : 'summary';
 
     // Joining a todo of the same project and task, today or yesterday.
     const near = [...await this.store.getAutoPostsOn(date), ...(await this.store.getAutoPostsOn(addDays(date, -1)))]
-      .filter(a => a.projectId === project.id && a.state !== 'cancelled' && a.state !== 'failed' && (piece ? a.state !== 'offered' : true)
+      .filter(a => a.projectId === project.id && a.state !== 'cancelled' && a.state !== 'failed' && (piece ? a.state !== 'offered' && a.state !== 'waiting' : true)
         && sameTask(a, work) && Date.parse(work.start) - Date.parse(a.endedAt) <= JOIN_MS)
       .sort((a, b) => b.endedAt.localeCompare(a.endedAt));
     if (near[0]) return this.join(near[0], kind, id, work.end, piece, by, tz);
@@ -618,9 +639,10 @@ export class SocialService {
       id: newId(), date, projectId: project.id, project: project.name, hashtag: project.wipHashtag ?? null,
       text: todoText([piece ?? work.text], project.wipHashtag ?? null), task: work.task, ...(work.itemId ? { itemId: work.itemId } : {}), ...(work.stepId ? { stepId: work.stepId } : {}),
       sessionIds: kind === 'session' ? [id] : [], moveIds: kind === 'move' ? [id] : [], endedAt: work.end, postAt,
-      state: piece ? 'queued' : 'offered', textBy: by, createdAt: now.toISOString(), updatedAt: now.toISOString(),
+      state: piece ? 'queued' : fromApp ? 'waiting' : 'offered', textBy: by, createdAt: now.toISOString(), updatedAt: now.toISOString(),
     };
     await this.store.saveAutoPost(a);
+    if (a.state === 'waiting') return { status: 'waiting', auto_post: autoPostView(a), speak: `Nothing goes to WIP yet: the next time your agent opens AimYear it is asked to write this ${a.project} todo with you. If it doesn't by the evening, the work is in the evening draft.` };
     if (a.state === 'queued') {
       await this.armAuto(a);
       await this.pushAuto(a);
@@ -651,7 +673,7 @@ export class SocialService {
       return { status: 'joined', auto_post: autoPostView(a), speak: `Added to the ${a.project} todo waiting for WIP: "${a.text}". It now posts at ${localTime(new Date(a.postAt), tz)} unless cancelled.` };
     }
     if (a.state === 'posted' || a.state === 'posting') return { status: 'already_posted', auto_post: autoPostView(a), speak: `Part of the ${a.project} todo already on WIP${a.url ? ` (${a.url})` : ''}; nothing new is posted.` };
-    return { status: 'joined', auto_post: autoPostView(a), speak: a.state === 'queued' ? `Counted in the ${a.project} todo waiting for WIP (posts at ${localTime(new Date(a.postAt), tz)}).` : `Counted with the ${a.project} todo offered on the phone.` };
+    return { status: 'joined', auto_post: autoPostView(a), speak: a.state === 'queued' ? `Counted in the ${a.project} todo waiting for WIP (posts at ${localTime(new Date(a.postAt), tz)}).` : a.state === 'waiting' ? `Counted with the ${a.project} todo waiting for your agent's words.` : `Counted with the ${a.project} todo offered on the phone.` };
   }
 
   private queuedText(a: AutoPost, tz: string) {
@@ -779,19 +801,43 @@ export class SocialService {
     return r.status === 'posted' ? { sent: 1, failed: 0 } : { sent: 0, failed: r.status === 'failed' ? 1 : 0, reason: r.error };
   }
 
-  /** The automatic todos of a day (default today): queued, posted, cancelled, offered or failed. Not Pro-gated: it only reads. */
+  /**
+   * Todos waiting for the agent's words (work stopped from the app), today and yesterday, for
+   * the agent's answers: null from the app itself, or when there are none.
+   */
+  async waitingForAgent(): Promise<{ post_waiting: AutoPostView[]; speak: string } | null> {
+    if ((await this.aim.callerAgent()) === 'app') return null;
+    const today = localDate(this.now(), await this.tz());
+    const list = [...await this.store.getAutoPostsOn(addDays(today, -1)), ...await this.store.getAutoPostsOn(today)].filter(a => a.state === 'waiting');
+    if (!list.length) return null;
+    const what = list.map(a => `${a.project}: "${todoBody(a.text, a.hashtag)}" [${a.id}]`).join('; ');
+    return {
+      post_waiting: list.map(autoPostView),
+      speak: `Stopped from the app, waiting for your words on WIP: ${what}. Ask the user what was done and what they are proud of, write the todo with them (their project's hashtag at the end), and post it with edit_auto_post once they agree; delete_auto_post if they don't want it.`,
+    };
+  }
+
+  /** Waiting todos of a day are cancelled: their work went out another way. */
+  private async dropWaiting(date: string, why: string) {
+    const now = this.now().toISOString();
+    for (const a of (await this.store.getAutoPostsOn(date)).filter(x => x.state === 'waiting')) {
+      await this.store.updateAutoPost(a.id, x => x.state === 'waiting' ? { ...x, state: 'cancelled', cancelledAt: now, error: why, updatedAt: now } : null).catch(e => console.error('[auto-post] drop waiting', (e as Error).message));
+    }
+  }
+
+  /** The automatic todos of a day (default today): queued, posted, cancelled, offered, waiting or failed. Not Pro-gated: it only reads. */
   async listAutoPosts(date?: string) {
     const d = await this.dateArg(date, false);
     const tz = await this.tz();
     const list = (await this.store.getAutoPostsOn(d)).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).map(autoPostView);
-    const line = (a: AutoPostView) => `[${a.id}] ${a.project}: "${a.text}" — ${a.state === 'queued' ? `posts at ${localTime(new Date(a.post_at), tz)}` : a.state === 'posted' ? `posted${a.url ? ` (${a.url})` : ''}` : a.state === 'offered' ? 'offered with a Post button, not posted' : a.state === 'failed' ? `failed (${a.error})` : a.state === 'skipped' ? `not posted: ${a.error}` : a.state}`;
+    const line = (a: AutoPostView) => `[${a.id}] ${a.project}: "${a.text}" — ${a.state === 'queued' ? `posts at ${localTime(new Date(a.post_at), tz)}` : a.state === 'posted' ? `posted${a.url ? ` (${a.url})` : ''}` : a.state === 'offered' ? 'offered with a Post button, not posted' : a.state === 'waiting' ? 'waiting for your words (edit_auto_post posts them)' : a.state === 'failed' ? `failed (${a.error})` : a.state === 'skipped' ? `not posted: ${a.error}` : a.state}`;
     return { date: d, auto_posts: list, speak: list.length ? `Automatic WIP todos for ${d}: ${list.map(line).join('; ')}.` : `No automatic WIP todos for ${d}. They come from sessions and moves on projects marked public (set_projects public).` };
   }
 
   /** Cancel: the todo does not go out. Never Pro-gated, like disconnecting: stopping a post is always possible. */
   async cancelAutoPost(id: string) {
     const now = this.now().toISOString();
-    const r = await this.store.updateAutoPost(id, a => ['queued', 'offered', 'failed', 'skipped'].includes(a.state) ? { ...a, state: 'cancelled', cancelledAt: now, updatedAt: now } : null);
+    const r = await this.store.updateAutoPost(id, a => ['queued', 'offered', 'failed', 'skipped', 'waiting'].includes(a.state) ? { ...a, state: 'cancelled', cancelledAt: now, updatedAt: now } : null);
     if (!r.current) throw new NotFoundError(`No automatic WIP todo "${id}"; list_auto_posts shows the day's.`);
     const a = r.current;
     if (a.state === 'posted' || a.state === 'posting') throw new ConflictError(`Too late to cancel: the ${a.project} todo is ${a.state === 'posted' ? `already on WIP${a.url ? ` (${a.url})` : ''}; delete it there` : 'being posted right now'}.`);
@@ -805,7 +851,7 @@ export class SocialService {
     const t = String(text ?? '').trim();
     if (!t) throw new AimError('The todo needs some text.');
     if (t.length > 4000) throw new AimError('The todo is too long.');
-    const r = await this.sendAuto(id, { text: t, by: 'user', from: ['queued', 'offered', 'failed', 'cancelled', 'skipped'] });
+    const r = await this.sendAuto(id, { text: t, by: 'user', from: ['queued', 'offered', 'failed', 'cancelled', 'skipped', 'waiting'] });
     await this.store.removePending(autoPendingId(this.uid, id));
     if (r.status === 'posted') return { ok: true, auto_post: r.auto_post, speak: `Posted to WIP: "${r.auto_post.text}"${r.auto_post.url ? ` (${r.auto_post.url})` : ''}.` };
     if (r.status === 'already_posted' || r.status === 'busy') throw new ConflictError(`Not changed: the ${r.auto_post?.project} todo is ${r.error}.`);

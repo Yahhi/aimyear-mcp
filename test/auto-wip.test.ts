@@ -491,3 +491,89 @@ test('the email\'s "what moved": a thin summary gives way to the task title; whe
   assert.equal(sessionText('Stood up for a break.', 'demo video'), 'demo video');
   assert.equal(sessionText(undefined, 'demo video'), 'demo video');
 });
+
+// ---------- docs/public-posting.md, "The agent writes the post, finished work only" (2026-11-13) ----------
+
+test('unfinished work makes no WIP todo, and wip_text on it says why', async () => {
+  const ctx = setup();
+  const { at } = await withAim(ctx);
+  ctx.now = at(12, 1);
+  const partial = session(ctx.store, at(11), 60, { projectId: 'aimyear', leverId: 'build', summary: REAL, outcome: 'partial' });
+  assert.deepEqual(await ctx.social.afterWork({ sessions: [partial] }), []);
+  const none = session(ctx.store, at(9), 60, { projectId: 'aimyear', leverId: 'build', summary: REAL2, outcome: undefined });
+  assert.deepEqual(await ctx.social.afterWork({ sessions: [none] }), [], 'no outcome is not done');
+  const [r] = await ctx.social.afterWork({ sessions: [partial], wipText: 'Half of the store review is ready' });
+  assert.equal(r.status, 'skipped');
+  assert.match(r.speak, /did not end done/);
+  assert.equal(ctx.store.autoPosts.size, 0);
+  assert.equal(ctx.push.sent.length, 0);
+});
+
+test('stopped from the app: the todo waits for the agent, with no push; the agent is asked and its words post once', async () => {
+  const store = new FakeStore();
+  const app = setup({ store });
+  const { at, today } = await withAim(app);
+  app.now = at(12, 15);
+  // The app's own connection.
+  const appSvc = new AimService(store as any, 'app-1', 'mobile', async () => 'app');
+  const appSocial = new SocialService(store as any, appSvc, app.deps);
+  const id = session(store, at(11, 18), 55, { projectId: 'aimyear', leverId: 'out', summary: 'Created the AimYear LinkedIn page and wrote the first post about the pivot' });
+  const [r] = await appSocial.afterWork({ sessions: [id] });
+  assert.equal(r.status, 'waiting');
+  if (r.status !== 'waiting') return;
+  assert.equal(r.auto_post.state, 'waiting');
+  assert.equal(app.push.sent.length, 0, 'no push: nothing is about to go out');
+  assert.equal(store.pendings.get(autoPendingId('fake', r.auto_post.id)), undefined, 'the tick has nothing to send');
+  assert.equal(await appSocial.waitingForAgent(), null, 'the app itself is not asked');
+  // The agent's next answer carries it.
+  const w = await app.social.waitingForAgent();
+  assert.ok(w);
+  assert.equal(w!.post_waiting[0].id, r.auto_post.id);
+  assert.match(w!.speak, /waiting for your words on WIP: AimYear/);
+  assert.match(w!.speak, /edit_auto_post/);
+  // The agent writes it with the user; it posts at once, once.
+  const text = 'AimYear is on LinkedIn now: the page, and the story of why it moved into the agent. #aimyear';
+  const e = await app.social.editAutoPost(r.auto_post.id, text);
+  assert.equal(e.ok, true);
+  assert.deepEqual(app.wip.posted, [text]);
+  assert.equal(await app.social.waitingForAgent(), null, 'asked no more');
+  void today;
+});
+
+test('a waiting todo nobody wrote: its work is in the evening draft, and the day\'s WIP post drops it', async () => {
+  const store = new FakeStore();
+  const app = setup({ store });
+  const { at, today } = await withAim(app);
+  app.now = at(12, 15);
+  const appSocial = new SocialService(store as any, new AimService(store as any, 'app-1', 'mobile', async () => 'app'), app.deps);
+  const id = session(store, at(11), 60, { projectId: 'aimyear', leverId: 'out', classification: 'goal_hard', summary: 'Created the AimYear LinkedIn page and wrote the first post' });
+  const [r] = await appSocial.afterWork({ sessions: [id] });
+  assert.equal(r.status, 'waiting');
+  const d = await app.social.draft(today);
+  assert.ok(!('reason' in d) && d.wip_todos.some((x: { text: string }) => /LinkedIn page/.test(x.text)), 'not left out of the evening WIP draft');
+  app.now = at(20);
+  const posted = await app.social.post({ date: today, networks: ['wip'] });
+  assert.equal(posted.ok, true);
+  assert.equal(store.autoPosts.get(r.status === 'waiting' ? r.auto_post.id : '')!.state, 'cancelled');
+  assert.equal(await app.social.waitingForAgent(), null);
+  assert.equal(app.wip.posted.length, 1, 'the work went out once, with the day');
+});
+
+test('the draft never shows unfinished work as done: it comes only on a day with nothing finished, by its summary, never by its title', async () => {
+  const ctx = setup();
+  const { at, today } = await withAim(ctx, { wip: false });
+  await ctx.social.connect({ network: 'wip', api_key: WIP_KEY });
+  ctx.now = at(18);
+  session(ctx.store, at(11), 55, { projectId: 'aimyear', leverId: 'out', classification: 'goal_hard', task: 'Submit AimYear v2 to App Store and Google Play review', summary: 'prepared linkedin page for it', outcome: 'partial' });
+  session(ctx.store, at(13), 30, { projectId: 'aimyear', leverId: 'out', classification: 'goal_hard', task: 'Send the store build', outcome: 'partial' });
+  let d = await ctx.social.draft(today);
+  assert.ok(!('reason' in d));
+  if ('reason' in d) return;
+  assert.match(d.text, /prepared linkedin page for it/i, 'nothing finished: the unfinished work by its summary');
+  assert.doesNotMatch(d.text, /Submit AimYear v2|Send the store build/, 'never by its task title');
+  await ctx.svc.addMove({ task: 'Published the first LinkedIn post about AimYear', projectId: 'aimyear', leverId: 'out' });
+  d = await ctx.social.draft(today);
+  if ('reason' in d) return assert.fail(d.reason);
+  assert.match(d.text, /Published the first LinkedIn post/);
+  assert.doesNotMatch(d.text, /prepared linkedin page/i, 'something finished: the unfinished work stays out');
+});

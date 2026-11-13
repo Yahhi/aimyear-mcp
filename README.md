@@ -88,8 +88,8 @@ docs/notifications.md and docs/calendar-sync.md in the AimYear project, 2026-11-
   for what is left (Workload Identity Federation, no API key).
 - **Work posts to WIP, automatic with undo (Pro, WIP connected).** `set_projects` takes
   `public` (default false, kept when a call leaves it out). A session on a public project that
-  ends with a real summary (60 characters or more, and more than the task title again), from
-  `stop_session`, `stop_timer` or the app, or a move on one (`add_move`), is queued as a WIP
+  ends done with a real summary (60 characters or more, and more than the task title again),
+  from `stop_session` or `stop_timer`, or a move on one (`add_move`), is queued as a WIP
   todo: the summary trimmed, with the project's #hashtag, no AI model; `wip_text` on
   `stop_session` and `add_move` gives the agent's own text. It posts 10 minutes after the work
   ended (never sooner than 10 minutes after it was queued), sent by `/tick`; a push to every
@@ -102,6 +102,14 @@ docs/notifications.md and docs/calendar-sync.md in the AimYear project, 2026-11-
   todo. The evening WIP draft leaves out projects that already got their automatic todo, and
   the "already posted today" check never takes AimYear's own todos for the user's. Agents use
   `list_auto_posts`, `delete_auto_post` (cancel) and `edit_auto_post`.
+  **Finished work only, the agent writes it** (2026-11-13): a session that ends partial,
+  abandoned or with no outcome makes no todo; the evening draft shows unfinished work only on
+  a day with nothing finished toward the aim, by its summary, never by the task title. Work
+  stopped in the app (no agent present) makes a `waiting` todo: no push, nothing goes out.
+  The agent's next answers (`get_now`, `start_session`, `stop_session`, `get_post_draft` and
+  a few more) carry `post_waiting`, and `edit_auto_post` posts the text the agent wrote with
+  the user. Waiting todos of a day are cancelled once the day's WIP post goes out; until then
+  their work is in the evening draft.
 - **The weekly review email's "what moved" says something.** A session summary too thin to
   mean anything to a reader (under 4 words or under 20 characters: "ready", "posted some
   replies") gives way to the session's task title; when both are thin, the longer one.

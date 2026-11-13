@@ -56,7 +56,7 @@ export const INSTRUCTIONS = `AimYear keeps one person's big aim for the year, th
 
 Names: get_ reads one thing, list_ reads several, find_ looks for problems, set_ replaces a whole list, add_ / edit_ / delete_ change one entry. A session is one piece of work; the timer runs while sessions run. A move (add_move) is one action toward the aim with no duration, for work that had no timer. The weekly target (days a week toward the aim, set_settings weekly_target) is what AimYear leads with, not a daily streak. When a result has quiet_numbers: true, the user chose not to hear minutes or percentages: speak in words, moves and days only.
 
-Typical flow: get_goal (or check_goal_draft → set_goal), get_path (a path can have up to 3 tracks, set_tracks: different ways to the same aim, each with its own current milestone; the main step can come from any of them), get_planning_context → set_plan with one main step (routines from set_routines are added to each day's plan by the server), start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Hard first: the first step of each stage and each day's main step should be on a hard lever (the work the user puts off: outreach, applications, selling, publishing). Preparation (CV, profile, research, polishing) comes only when it blocks the hard step, and only as much as it blocks; do the hard step with what exists now and improve after the replies. set_plan, add_steps and set_levers warn when this is broken: fix it before moving on. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine. Posting progress in public (WIP, Bluesky; Pro): get_post_draft shows the day's draft from the record; add_post publishes it only when the user explicitly asks, with their edits. The one automatic post: on a project the user marked public (set_projects public), stop_session with a real summary (or add_move) queues a WIP todo that posts 10 minutes later unless cancelled; list_auto_posts, delete_auto_post (cancel) and edit_auto_post (the user's words, posted at once) handle it. get_insights gives the week or month at a glance (aim/other/life minutes, hard share, when hard work happens, comebacks). list_agents shows the agents connected to the account; delete_agent disconnects one, only when the user asks.
+Typical flow: get_goal (or check_goal_draft → set_goal), get_path (a path can have up to 3 tracks, set_tracks: different ways to the same aim, each with its own current milestone; the main step can come from any of them), get_planning_context → set_plan with one main step (routines from set_routines are added to each day's plan by the server), start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Hard first: the first step of each stage and each day's main step should be on a hard lever (the work the user puts off: outreach, applications, selling, publishing). Preparation (CV, profile, research, polishing) comes only when it blocks the hard step, and only as much as it blocks; do the hard step with what exists now and improve after the replies. set_plan, add_steps and set_levers warn when this is broken: fix it before moving on. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine. Posting progress in public (WIP, Bluesky; Pro): get_post_draft shows the day's draft from the record; add_post publishes it only when the user explicitly asks, with their edits. The one automatic post: on a project the user marked public (set_projects public), finished work (stop_session with outcome done and a real summary, or add_move) queues a WIP todo that posts 10 minutes later unless cancelled; partial work posts nothing by itself. Work stopped in the app waits for you: when an answer carries post_waiting, ask the user what was done, write the todo with them and post it with edit_auto_post. list_auto_posts, delete_auto_post (cancel) and edit_auto_post (the user's words, posted at once) handle it. get_insights gives the week or month at a glance (aim/other/life minutes, hard share, when hard work happens, comebacks). list_agents shows the agents connected to the account; delete_agent disconnects one, only when the user asks.
 
 The method behind these tools (setting a countable aim, stages by readiness, hard first, an honest record, a weekly target) is the prompt "aim", also the resource aimyear://skill/aim. If the client has no /aim skill installed, read it before setting an aim or planning.`;
 
@@ -80,6 +80,8 @@ function wrap(name: string, fn: Handler, signedIn: boolean) {
 
 /** Tools that start, stop or change a running session: the phone's Live Activity follows them (src/live.ts). */
 export const TIMER_TOOLS = ['start_session', 'stop_session', 'stop_timer', 'delete_session', 'edit_session'];
+/** The tools whose answers carry post_waiting: what an agent calls first in a conversation, and when work starts or ends. */
+export const WAITING_TOOLS = ['get_now', 'get_goal', 'get_planning_context', 'next_steps', 'start_session', 'stop_session', 'stop_timer', 'add_move', 'add_session', 'summarize_day', 'get_post_draft'];
 
 /**
  * svc is null for an anonymous caller: the tools are listed, and every call is refused.
@@ -96,8 +98,21 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
     if (Array.isArray(sent) && sent.length) console.log(`[live] after ${name}: ${sent.map((r: { device: string; event: string; ok: boolean; error?: string }) => `${r.event} ${r.ok ? 'ok' : `failed (${r.error})`} ${r.device}`).join(', ')}`);
     return result;
   };
+  /**
+   * A WIP todo stopped from the app waits for the agent's words (docs/public-posting.md, "The
+   * agent writes the post, finished work only"): the answers an agent sees first in a
+   * conversation carry it as post_waiting, until it is posted or cancelled.
+   */
+  const asksForWords = (name: string, fn: Handler): Handler => !social || !WAITING_TOOLS.includes(name) ? fn : async args => {
+    const result = await fn(args);
+    if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
+    const w = await social.waitingForAgent().catch(e => { console.error('[auto-post] waiting', (e as Error).message); return null; });
+    if (!w) return result;
+    const r = result as { speak?: string };
+    return { ...r, post_waiting: w.post_waiting, speak: `${r.speak ?? ''} ${w.speak}`.trim() };
+  };
   const t = (name: string, description: string, shape: Record<string, z.ZodTypeAny>, fn: Handler) =>
-    server.registerTool(name, { title: title(name), description, inputSchema: shape, annotations: annotationsFor(name) }, wrap(name, after(name, fn), maybeSvc !== null));
+    server.registerTool(name, { title: title(name), description, inputSchema: shape, annotations: annotationsFor(name) }, wrap(name, after(name, asksForWords(name, fn)), maybeSvc !== null));
 
   /** Work on a project marked public may become an automatic WIP todo: the answer says what happened (docs/public-posting.md). */
   const withAuto = async <R extends { speak?: string }>(r: R, work: { sessions?: string[]; moves?: string[]; wipText?: string }) => {
@@ -107,7 +122,7 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
     const said = auto.map(x => x.speak).filter(Boolean).join(' ');
     return { ...r, auto_posts: auto, speak: said ? `${r.speak ?? ''} ${said}`.trim() : r.speak };
   };
-  const wipText = z.string().trim().min(1).max(1000).optional().describe('your own WIP todo text for this work, when the summary would not read well on WIP. Used only on a project marked public; still posted 10 minutes later unless the user cancels');
+  const wipText = z.string().trim().min(1).max(1000).optional().describe('your own WIP todo text for this work, when the summary would not read well on WIP. Used only on a project marked public and for finished work (a session ending done, or a move); still posted 10 minutes later unless the user cancels');
   const outcome = z.enum(['done', 'partial', 'abandoned']);
   const network = z.enum(NETWORKS);
   const opId = z.string().min(8).max(128).optional().describe('for apps replaying queued requests: an id the app minted before its first attempt and reuses on retries, so the write is applied once and a retry gets the first answer back. Do not invent one; an agent calling interactively leaves it out');
@@ -276,7 +291,7 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
     wip_todos: z.array(z.object({ key: z.string().max(80).optional(), text: z.string().max(4000) })).max(20).optional(),
   }, a => social.post(a));
   t('list_auto_posts', 'The automatic WIP todos of a day (default today), each from a session or move on a project marked public: queued (post_at, still cancellable), posted (url), cancelled, offered (the summary was short, so the phone offered it with a Post button and nothing went out) or failed. Posts nothing.', { date: date.optional() }, a => social.listAutoPosts(a.date));
-  t('edit_auto_post', 'Change the text of an automatic WIP todo and post it now. Only when the user asked, with their words as they want them on WIP. Also posts an offered, failed or cancelled one when the user says to post it. One todo posts once: a retry never posts twice. Pro.', {
+  t('edit_auto_post', 'Change the text of an automatic WIP todo and post it now. Only when the user asked, with their words as they want them on WIP. Also posts an offered, waiting (stopped in the app, waiting for your words), failed or cancelled one when the user says to post it. One todo posts once: a retry never posts twice. Pro.', {
     id: z.string().min(1).max(64).describe('from list_auto_posts or the stop_session answer'), text: z.string().trim().min(1).max(4000).describe('the todo as it goes to WIP, hashtag included'),
   }, a => social.editAutoPost(a.id, a.text));
   t('delete_auto_post', 'Cancel an automatic WIP todo before it posts (the user said not to post it). A todo already on WIP stays there: the answer says so, with its link.', { id: z.string().min(1).max(64).describe('from list_auto_posts or the stop_session answer') }, a => social.cancelAutoPost(a.id));

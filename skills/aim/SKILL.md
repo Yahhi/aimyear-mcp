@@ -309,6 +309,13 @@ draft as a notification with a Post button after the day's last window.
   as you would post it. `add_move` on a public project works the same.
 - The first time in a conversation, tell the user it will post and how to cancel: Cancel on
   the notification, or ask you (`delete_auto_post`). After that, don't repeat it.
+- Only finished work posts: a session that ends `partial` or `abandoned` makes no WIP todo,
+  so don't pass `wip_text` for it. It can still go in the evening draft.
+- Work stopped in the app waits for you. When an answer carries `post_waiting`, tell the user
+  once, ask what was done and what they are proud of, write the todo with them (the
+  project's hashtag at the end) and post it with `edit_auto_post` when they agree;
+  `delete_auto_post` if they don't want it. If nobody writes it, the work goes into the
+  evening draft.
 - `list_auto_posts` shows the day's; `edit_auto_post` posts the user's own words at once,
   only when they ask.
 

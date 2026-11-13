@@ -434,6 +434,10 @@ export interface PostRecord {
  *    "No double posts"), so AimYear did not.
  *  - offered: the summary was too short for an automatic post; the push offered it with a
  *    Post button instead (the evening offer's mechanism), and nothing goes out without it.
+ *  - waiting: the work was stopped from the app, where no agent is present. Nothing goes out
+ *    by itself: the user's agent is asked for the text (post_waiting on its next answers),
+ *    and edit_auto_post posts it. Not written by the evening, the work is in the evening
+ *    draft instead, and the todo is cancelled once the day's WIP post goes out.
  */
 export interface AutoPost {
   id: string;
@@ -455,7 +459,7 @@ export interface AutoPost {
   /** When the latest of that work ended. */
   endedAt: string;
   postAt: string;
-  state: 'queued' | 'posting' | 'posted' | 'cancelled' | 'failed' | 'offered' | 'skipped';
+  state: 'queued' | 'posting' | 'posted' | 'cancelled' | 'failed' | 'offered' | 'skipped' | 'waiting';
   /** Where the text came from: the session summary or move, the agent's wip_text, or the user's Edit. */
   textBy: 'summary' | 'agent' | 'user';
   /** Send attempts so far; a tick retries a failed send a few times. */

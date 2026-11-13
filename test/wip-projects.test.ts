@@ -84,7 +84,7 @@ function session(store: FakeStore, start: Date, minutes: number, s: Partial<Sess
   const id = `s${++n}`;
   store.sessions.set(id, {
     id, start: start.toISOString(), end: new Date(start.getTime() + minutes * 60000).toISOString(), source: 'agent', weight: 1, workplace: 'desktop',
-    area: 'work', task: 'work', notes: [], classification: 'goal_comfortable', verdictAtStart: 'ok', ...s,
+    area: 'work', task: 'work', notes: [], classification: 'goal_comfortable', verdictAtStart: 'ok', outcome: 'done', ...s,
   });
 }
 
