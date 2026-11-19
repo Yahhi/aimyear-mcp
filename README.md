@@ -1,5 +1,7 @@
 # AimYear MCP server
 
+[![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/yahhi/aimyear-mcp)
+
 **An accountability partner inside the AI agent you already use.** Connect AimYear to
 Claude, Claude Code, ChatGPT or any MCP client, and your agent keeps one big aim for your
 year, plans one main step a day toward it, runs the timer while you work and writes down
