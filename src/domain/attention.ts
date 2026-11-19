@@ -9,6 +9,12 @@ export interface AttentionResult {
   overlaps: { start: string; end: string; count: number }[];
 }
 
+/** The session's weight at instant t (ms): the history entry that still held then, else the current weight. */
+export function weightAt(s: Session, t: number): number {
+  for (const h of s.weightHistory ?? []) if (t < Date.parse(h.until)) return Math.max(0, h.weight);
+  return Math.max(0, s.weight ?? 1);
+}
+
 /**
  * Splits attention among overlapping sessions.
  * At every instant, the running sessions share attention in proportion to their weights,
@@ -30,7 +36,9 @@ export function computeAttention(sessions: Session[], windowStart: Date, windowE
 
   for (const { s, start, end } of clipped) wall.set(s.id, (end - start) / 60000);
 
-  const bounds = Array.from(new Set(clipped.flatMap(x => [x.start, x.end]))).sort((a, b) => a - b);
+  // A weight change is a boundary too: the split before it stays as it was.
+  const changes = clipped.flatMap(x => (x.s.weightHistory ?? []).map(h => Date.parse(h.until)).filter(t => t > x.start && t < x.end));
+  const bounds = Array.from(new Set([...clipped.flatMap(x => [x.start, x.end]), ...changes])).sort((a, b) => a - b);
   let overlapRun: { start: number; end: number; count: number } | null = null;
 
   for (let i = 0; i < bounds.length - 1; i++) {
@@ -40,10 +48,10 @@ export function computeAttention(sessions: Session[], windowStart: Date, windowE
     if (active.length === 0) continue;
     const exclusive = active.filter(x => x.s.exclusive);
     if (exclusive.length > 0) active = exclusive;
-    const total = active.reduce((sum, x) => sum + Math.max(0, x.s.weight ?? 1), 0) || active.length;
+    const total = active.reduce((sum, x) => sum + weightAt(x.s, a), 0) || active.length;
     const minutes = (b - a) / 60000;
     for (const x of active) {
-      const w = total > 0 ? Math.max(0, x.s.weight ?? 1) / total : 1 / active.length;
+      const w = total > 0 ? weightAt(x.s, a) / total : 1 / active.length;
       attention.set(x.s.id, (attention.get(x.s.id) ?? 0) + minutes * w);
     }
     if (active.length > overlapThreshold) {

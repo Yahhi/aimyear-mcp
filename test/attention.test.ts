@@ -50,3 +50,14 @@ test('gaps between sessions of at least 20 minutes are found', () => {
   assert.equal(g.length, 1);
   assert.equal(g[0].minutes, 90);
 });
+
+test('a switch from a moment on: the time before keeps its split (docs/apps.md, "Two timers at once")', () => {
+  // Equal for the first 30 minutes, then switched to 70/30 towards a.
+  const r = computeAttention([
+    base('a', '2026-09-21T10:00:00Z', '2026-09-21T11:00:00Z', { weight: 0.7, weightHistory: [{ until: '2026-09-21T10:30:00Z', weight: 1 }] }),
+    base('b', '2026-09-21T10:00:00Z', '2026-09-21T11:00:00Z', { weight: 0.3, weightHistory: [{ until: '2026-09-21T10:30:00Z', weight: 1 }] }),
+  ], W0, W1);
+  assert.equal(Math.round(r.attention.get('a')!), 15 + 21);
+  assert.equal(Math.round(r.attention.get('b')!), 15 + 9);
+  assert.equal(Math.round(r.wall.get('a')!), 60);
+});

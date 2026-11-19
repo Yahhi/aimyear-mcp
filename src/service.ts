@@ -1,13 +1,43 @@
 import { Store, newId, OP_TTL_DAYS, type Tx } from './store.js';
 import { addDays, daysBetween, endOfDay, isValidDate, localDate, localTime, minutesBetween, startOfDay, weekStart } from './dates.js';
 import { computeAttention, findGaps } from './domain/attention.js';
+import { computeComebacks, computeInsights, COMEBACK_HISTORY_DAYS, type InsightRow } from './domain/insights.js';
 import { checkGoal, checkStepTitle, type GoalDraft } from './domain/goal.js';
-import { classify, decideVerdict, isGoalWork, leverFor } from './domain/classify.js';
-import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, PlanItem, Profile, Project, Routine, Session, Step, Stop, Workplace } from './types.js';
+import { classify, decideVerdict, isGoalWork, leverFor, linkedPlanItem, withPlanItem } from './domain/classify.js';
+import { nextTag } from './domain/wip-tags.js';
+import type { Area, Block, Classification, Commitment, CommitmentKind, Day, Device, Direction, Pending, Goal, Lever, Milestone, MilestoneStatus, Mode, Path, Track, PlanItem, Profile, Project, Routine, Session, Step, Stop, Workplace, Network, Move, Tracking, WipTag } from './types.js';
+import { NETWORKS, TRACKINGS } from './types.js';
+import { nextReviewDue, reviewPendingId } from './review/schedule.js';
+import { amount, hours, isGoalClass, isHardWork, percent, roundHalf, share } from './domain/numbers.js';
+
+/** The exact attention sums of a day, kept on daySummary's result under this key for pooling a week. */
+export const RAW = Symbol('day-raw');
+export interface DayRaw { total: number; work: number; goal: number; hard: number; byArea: Record<string, number> }
 
 export class AimError extends Error {}
+/** A Pro-only feature refused for lack of Pro. Clients key on `code`, never on the wording. */
+export class ProRequiredError extends AimError { readonly code = 'pro_required'; }
 
-const round = (n: number) => Math.round(n);
+const round = (n: number) => roundHalf(n);
+
+/** Days a week toward the aim when the person set no weekly target (docs/moves.md). */
+export const DEFAULT_WEEKLY_TARGET = 4;
+/**
+ * Days toward the aim against the weekly target, said the same way everywhere (weekProgress,
+ * the weekly review email): "3 of 4 days toward the aim" below the target, "6 days toward the
+ * aim, target of 4 met" at or above it, never "6 of 4". `what` is what the days were toward.
+ */
+export const daysTowardAim = (days: number, target: number, what = ' toward the aim') =>
+  days >= target ? `${days} day${days === 1 ? '' : 's'}${what}, target of ${target} met` : `${days} of ${target} days${what}`;
+/** Minutes of sessions on the aim that make a day count toward the weekly target. */
+export const AIM_DAY_MIN = 10;
+/** Said instead of a session start or log when the person records moves, not time. */
+const TRACKING_TEXT: Record<Tracking, string> = {
+  time: 'Tracking: time and moves.',
+  moves: 'Tracking: moves only, no timer and no minutes.',
+  quiet: 'Tracking: quiet numbers, the record is kept but spoken in words and days.',
+};
+const MOVES_ONLY = 'You record moves, not time (tracking: moves), so there is no timer. Log what changed with add_move, or switch to time with set_settings tracking "time".';
 
 export interface SessionInput {
   direction?: Direction;
@@ -23,15 +53,35 @@ const CLOCK_SLACK_MS = 2 * 60000;
 const OP_ID = /^[A-Za-z0-9_.:-]{8,128}$/;
 const CLIENT_SESSION_ID = /^[A-Za-z0-9_.:-]{6,64}$/;
 
+/** A project's or lever's WIP hashtag after a list call (domain/wip-tags.ts); a bad one is the caller's error. */
+function tagOf(given: string | null | undefined, prev: WipTag | undefined, what: string): WipTag {
+  try { return nextTag(given, prev, what); } catch (e) { throw new AimError((e as Error).message); }
+}
+
+/** A commitment as the tools show it: the calendar event id under the name set_commitments takes. */
+function commitmentView({ calendarEventId, ...c }: Commitment) {
+  return calendarEventId ? { ...c, calendar_event_id: calendarEventId } : c;
+}
+
 export class AimService {
   private profileCache: Profile | null = null;
-  constructor(private store: Store, private clientSessionId: string, private clientWorkplace: Workplace = 'desktop') {}
+  private agentCache: Promise<string | undefined> | null = null;
+  /**
+   * agent: who is calling, recorded on the sessions it starts or logs ("app", "Claude Code",
+   * "ChatGPT"…). A function, so the OAuth client name is looked up only when a session needs it.
+   */
+  constructor(private store: Store, private clientSessionId: string, private clientWorkplace: Workplace = 'desktop', private agentOf: () => Promise<string | undefined> = async () => undefined) {}
+  private agent() { return (this.agentCache ??= this.agentOf().catch(() => undefined)); }
+  /** Who is calling ("app" for the AimYear app, else the agent's name), for what only the app gets. */
+  callerAgent() { return this.agent(); }
 
   // ---------- helpers ----------
   private async profile(): Promise<Profile> {
     if (!this.profileCache) this.profileCache = await this.store.getProfile();
     return this.profileCache;
   }
+  /** Another service saved the profile (e.g. the networks for posts): read it again next time. */
+  forgetProfile() { this.profileCache = null; }
   private async tz() { return (await this.profile()).timezone; }
   async today() { return localDate(new Date(), await this.tz()); }
   private async dayWindow(date: string) { const tz = await this.tz(); return { start: startOfDay(date, tz), end: endOfDay(date, tz) }; }
@@ -122,11 +172,13 @@ export class AimService {
       const reached = latest.value >= 1;
       progress = reached ? 1 : stages.total ? stages.done / stages.total : 0;
       state = reached ? 'done' : `not done yet, ${stages.done} of ${stages.total} stages done`;
-    } else state = `${goal.metric}: ${latest.value} of ${goal.target} (started at ${goal.baseline})`;
+    } else state = `${goal.metric}: ${amount(latest.value)} of ${amount(goal.target)} (started at ${amount(goal.baseline)})`;
     const totalDays = daysBetween(goal.createdAt.slice(0, 10), goal.deadline) || 1;
     const elapsed = Math.min(1, Math.max(0, daysBetween(goal.createdAt.slice(0, 10), today) / totalDays));
+    // A project saved before 0.13 has no public flag: it is not public.
+    const view = { ...goal, projects: goal.projects.map(p => ({ ...p, public: p.public ?? false })) };
     return {
-      goal, kind, current_value: latest.value, ...(stages ? { stages } : {}), days_left: daysLeft, progress_fraction: Math.round(progress * 100) / 100, time_elapsed_fraction: Math.round(elapsed * 100) / 100,
+      goal: view, kind, current_value: latest.value, ...(stages ? { stages } : {}), days_left: daysLeft, progress_fraction: roundHalf(progress, 2), time_elapsed_fraction: roundHalf(elapsed, 2),
       speak: `Goal [${goal.area ?? 'money'}]: "${goal.title}". ${state}, ${daysLeft} days left. Levers: ${goal.levers.map(l => `${l.name} (${l.kind})`).join(', ') || 'none yet'}.`,
     };
   }
@@ -146,24 +198,35 @@ export class AimService {
     return { ok: true, history: goal.baselineHistory, goal_reached: reached, speak: `${recorded} ${reached ? `Target ${goal.target} reached: the goal is done. Set the next aim with set_goal when ready.` : `Target ${goal.target} by ${goal.deadline}.`}` };
   }
 
-  async setLevers(levers: { id?: string; name: string; kind: 'hard' | 'comfortable'; examples?: string[]; keywords?: string[]; repos?: string[] }[]) {
+  async setLevers(levers: { id?: string; name: string; kind: 'hard' | 'comfortable'; examples?: string[]; keywords?: string[]; repos?: string[]; wip_hashtag?: string | null }[]) {
     const goal = await this.requireGoal();
-    goal.levers = levers.map(l => ({ id: l.id ?? slug(l.name), name: l.name.trim(), kind: l.kind, examples: l.examples ?? [], match: { keywords: l.keywords ?? [], repos: l.repos ?? [] } }));
+    const prev = new Map(goal.levers.map(l => [l.id, l]));
+    goal.levers = levers.map(l => { const id = l.id ?? slug(l.name); return { id, name: l.name.trim(), kind: l.kind, examples: l.examples ?? [], match: { keywords: l.keywords ?? [], repos: l.repos ?? [] }, ...tagOf(l.wip_hashtag, prev.get(id), l.name) }; });
     if (!goal.levers.some(l => l.kind === 'hard')) return { ok: false, speak: 'At least one lever must be marked hard: the kind of work you admit to avoiding. Which one is it?' };
     goal.updatedAt = new Date().toISOString();
     await this.store.saveGoal(goal);
     const path = await this.store.getPath();
     const current = path.milestones.find(m => m.status !== 'done' && m.status !== 'retired');
     const warning = current ? this.prepFirstWarning(goal, path, current.id) : null;
-    return { ok: true, levers: goal.levers, warnings: warning ? [warning] : [], speak: `Levers saved: ${goal.levers.map(l => `${l.name} [${l.kind}]`).join(', ')}.${warning ? ` ${warning}` : ''}` };
+    return { ok: true, levers: goal.levers, warnings: warning ? [warning] : [], speak: `Levers saved: ${goal.levers.map(l => `${l.name} [${l.kind}]${l.wipHashtag ? ` #${l.wipHashtag}` : ''}`).join(', ')}.${warning ? ` ${warning}` : ''}` };
   }
 
-  async setProjects(projects: { id?: string; name: string; area: Area; keywords?: string[]; repos?: string[] }[]) {
+  /**
+   * public (docs/public-posting.md): the user built this project in public, so its work goes
+   * to WIP automatically with undo. Like wip_hashtag, a call that leaves it out keeps the
+   * one on record for that id; a new project is not public.
+   */
+  async setProjects(projects: { id?: string; name: string; area: Area; keywords?: string[]; repos?: string[]; wip_hashtag?: string | null; public?: boolean }[]) {
     const goal = await this.requireGoal();
-    goal.projects = projects.map(p => ({ id: p.id ?? slug(p.name), name: p.name.trim(), area: p.area, match: { keywords: p.keywords ?? [], repos: p.repos ?? [] } }));
+    const prev = new Map(goal.projects.map(p => [p.id, p]));
+    goal.projects = projects.map(p => { const id = p.id ?? slug(p.name); return { id, name: p.name.trim(), area: p.area, match: { keywords: p.keywords ?? [], repos: p.repos ?? [] }, ...tagOf(p.wip_hashtag, prev.get(id), p.name), public: p.public ?? prev.get(id)?.public ?? false }; });
     goal.updatedAt = new Date().toISOString();
     await this.store.saveGoal(goal);
-    return { ok: true, projects: goal.projects, speak: `Projects saved: ${goal.projects.map(p => `${p.name} [${p.area}]`).join(', ') || 'none'}. Their sessions count as other work or life, not goal work.` };
+    const open = goal.projects.filter(p => p.public);
+    return {
+      ok: true, projects: goal.projects,
+      speak: `Projects saved: ${goal.projects.map(p => `${p.name} [${p.area}]${p.wipHashtag ? ` #${p.wipHashtag}` : ''}${p.public ? ', public' : ''}`).join(', ') || 'none'}. Their sessions count as other work or life, not goal work.${open.length ? ` Public: work on ${open.map(p => p.name).join(', ')} that ends with a real summary goes to WIP as a todo 10 minutes later, unless cancelled (Pro, WIP connected).` : ''}`,
+    };
   }
 
   // ---------- path ----------
@@ -178,27 +241,34 @@ export class AimService {
     const current = kind === 'count' ? (m.progress?.[m.progress.length - 1]?.value ?? 0) : null;
     const frac = kind === 'count' ? (m.target > 0 ? Math.min(1, current! / m.target) : 0) : mine.length ? done / mine.length : 0;
     const status = m.status === 'done' || m.status === 'retired' ? m.status : kind === 'steps' && mine.length === 0 ? 'no_steps' : frac >= elapsed + 0.1 ? 'ahead' : frac < elapsed - 0.15 ? 'behind' : 'on_pace';
-    return { kind, ...(kind === 'count' ? { current } : {}), progress_fraction: Math.round(frac * 100) / 100, steps_total: mine.length, steps_done: done, days_left: daysBetween(today, m.due), time_elapsed_fraction: Math.round(elapsed * 100) / 100, pace: status };
+    return { kind, ...(kind === 'count' ? { current } : {}), progress_fraction: roundHalf(frac, 2), steps_total: mine.length, steps_done: done, days_left: daysBetween(today, m.due), time_elapsed_fraction: roundHalf(elapsed, 2), pace: status };
   }
 
   async getPath() {
     const path = await this.store.getPath();
     const today = await this.today();
-    const milestones = path.milestones.map((m, i) => ({ ...m, ...this.milestonePace(m, path.milestones[i - 1], path.steps, today), steps: path.steps.filter(s => s.milestoneId === m.id).sort((a, b) => a.order - b.order) }));
+    // A stage's pace counts from the previous stage of its own track (docs/path-tracks.md).
+    const milestones = path.milestones.map(m => { const own = sameTrack(path, m); return { ...m, ...this.milestonePace(m, own[own.indexOf(m) - 1], path.steps, today), steps: path.steps.filter(s => s.milestoneId === m.id).sort((a, b) => a.order - b.order) }; });
     const current = milestones.find(isOpen);
-    return { milestones, current_milestone_id: current?.id ?? null, speak: current ? `Current milestone: "${current.title}" due ${current.due}, ${milestoneProgressText(current)}, ${current.pace}.` : 'No open milestones.' };
+    const tracks = (path.tracks ?? []).map(t => ({ ...t, milestone_ids: milestones.filter(m => m.trackId === t.id).map(m => m.id), current_milestone_id: milestones.find(m => m.trackId === t.id && isOpen(m))?.id ?? null }));
+    const said = (m: (typeof milestones)[number]) => `"${m.title}" due ${m.due}, ${milestoneProgressText(m)}, ${m.pace}`;
+    const speak = tracks.length
+      ? `${tracks.length} tracks to the aim, each able to reach it alone. ${tracks.map(t => { const c = milestones.find(m => m.id === t.current_milestone_id); return `${t.title}${t.reach ? ` (${t.reach})` : ''}: ${c ? `now ${said(c)}` : 'every stage closed'}`; }).join('; ')}.`
+      : current ? `Current milestone: ${said(current)}.` : 'No open milestones.';
+    return { tracks, milestones, current_milestone_id: current?.id ?? null, speak };
   }
 
-  async setMilestones(items: { id?: string; title: string; kind?: 'count' | 'steps'; metric?: string; target?: number; due: string }[]) {
+  async setMilestones(items: { id?: string; title: string; kind?: 'count' | 'steps'; metric?: string; target?: number; due: string; trackId?: string }[]) {
     const goal = await this.requireGoal();
     const path = await this.store.getPath();
     const problems: string[] = [];
-    if (items.length < 2 || items.length > 6) problems.push('use 2 to 6 milestones');
-    let lastDue = '';
+    const tracked = !!path.tracks?.length;
+    if (items.length < 2 || items.length > (tracked ? 6 * path.tracks!.length + 6 : 6)) problems.push(tracked ? 'use 2 milestones or more, up to 6 per track' : 'use 2 to 6 milestones');
     for (const it of items) {
       if (!isValidDate(it.due)) problems.push(`milestone "${it.title}": due must be YYYY-MM-DD`);
-      else { if (it.due > goal.deadline) problems.push(`milestone "${it.title}" is due after the goal deadline ${goal.deadline}`); if (lastDue && it.due < lastDue) problems.push(`milestone "${it.title}" is due before the previous one`); lastDue = it.due; }
+      else if (it.due > goal.deadline) problems.push(`milestone "${it.title}" is due after the goal deadline ${goal.deadline}`);
       if (it.kind === 'count' && (!it.metric?.trim() || !(it.target! > 0))) problems.push(`milestone "${it.title}" is countable: it needs a metric and a target above 0`);
+      if (it.trackId && !tracked) problems.push(`milestone "${it.title}" names track "${it.trackId}", but the path has no tracks: set_tracks first`);
     }
     if (problems.length) return { ok: false, problems, speak: problems.join('; ') };
     const now = new Date().toISOString();
@@ -207,12 +277,44 @@ export class AimService {
       const id = it.id ?? slug(it.title); const prev = byId.get(id);
       // Unsaid kind: an existing milestone keeps its own; a new one is countable when it names a number.
       const kind = it.kind ?? (prev ? milestoneKind(prev) : it.metric?.trim() && it.target! > 0 ? 'count' : 'steps');
-      return { id, title: it.title.trim(), kind, metric: (it.metric ?? '').trim(), target: kind === 'count' ? it.target! : (it.target ?? 0), due: it.due, status: prev?.status ?? 'todo', createdAt: prev?.createdAt ?? now, doneAt: prev?.doneAt, progress: prev?.progress };
+      const trackId = tracked ? it.trackId ?? prev?.trackId : undefined;
+      return { id, title: it.title.trim(), kind, metric: (it.metric ?? '').trim(), target: kind === 'count' ? it.target! : (it.target ?? 0), due: it.due, status: prev?.status ?? 'todo', createdAt: prev?.createdAt ?? now, doneAt: prev?.doneAt, progress: prev?.progress, ...(trackId ? { trackId } : {}) };
     });
+    const invalid = pathProblems(path, { order: true });
+    if (invalid.length) return { ok: false, problems: invalid, speak: invalid.join('; ') };
     const keep = new Set(path.milestones.map(m => m.id));
     path.steps = path.steps.filter(s => keep.has(s.milestoneId));
     await this.store.savePath(path);
-    return { ok: true, milestones: path.milestones, speak: `${path.milestones.length} milestones saved (${path.milestones.map(m => `"${m.title}": ${m.kind === 'count' ? `count to ${m.target} ${m.metric}` : 'steps'}`).join('; ')}). Now add concrete steps for the first one ("${path.milestones[0].title}") with add_steps.${path.milestones.some(m => m.kind === 'count') ? ' Record a countable milestone\'s value with record_progress and its milestoneId.' : ''}` };
+    const now_ = currentStages(path);
+    return { ok: true, milestones: path.milestones, speak: `${path.milestones.length} milestones saved (${path.milestones.map(m => `"${m.title}": ${m.kind === 'count' ? `count to ${m.target} ${m.metric}` : 'steps'}`).join('; ')}).${now_.length ? ` Now add concrete steps for ${now_.map(m => `"${m.title}"`).join(' and ')} with add_steps.` : ''}${path.milestones.some(m => m.kind === 'count') ? ' Record a countable milestone\'s value with record_progress and its milestoneId.' : ''}` };
+  }
+
+  /** docs/path-tracks.md: replace the tracks (0 to 3). milestoneIds moves those stages into the track, in that order. */
+  async setTracks(items: { id?: string; title: string; reach?: string; milestoneIds?: string[] }[]) {
+    await this.requireGoal();
+    const path = await this.store.getPath();
+    const problems: string[] = [];
+    if (items.length > 3) problems.push('use at most 3 tracks: every one of them leads to the same aim');
+    const tracks: Track[] = items.map(it => ({ id: it.id ?? slug(it.title), title: it.title.trim(), reach: (it.reach ?? '').trim() }));
+    if (new Set(tracks.map(t => t.id)).size !== tracks.length) problems.push('two tracks have the same id');
+    const ids = new Set(path.milestones.map(m => m.id));
+    for (const it of items) for (const mid of it.milestoneIds ?? []) if (!ids.has(mid)) problems.push(`milestone "${mid}" not found; ids: ${[...ids].join(', ')}`);
+    if (problems.length) return { ok: false, problems, speak: problems.join('; ') };
+    const known = new Set(tracks.map(t => t.id));
+    for (const m of path.milestones) if (!m.trackId || !known.has(m.trackId)) delete m.trackId;
+    tracks.forEach((t, i) => { for (const mid of items[i].milestoneIds ?? []) path.milestones.find(m => m.id === mid)!.trackId = t.id; });
+    // Each track's stages in the order given; the list keeps the tracks' order, closed stages without a track first.
+    if (tracks.length) {
+      const rank = (m: Milestone) => m.trackId ? tracks.findIndex(t => t.id === m.trackId) : -1;
+      const pos = (m: Milestone) => { const i = tracks.findIndex(t => t.id === m.trackId); const at = (items[i]?.milestoneIds ?? []).indexOf(m.id); return at < 0 ? 1e3 + path.milestones.indexOf(m) : at; };
+      path.milestones.sort((a, b) => rank(a) - rank(b) || pos(a) - pos(b));
+      path.tracks = tracks;
+    } else delete path.tracks;
+    const invalid = pathProblems(path);
+    if (invalid.length) return { ok: false, problems: invalid, speak: invalid.join('; ') };
+    await this.store.savePath(path);
+    const view = await this.getPath();
+    return { ok: true, tracks: view.tracks, speak: tracks.length ? `Tracks saved. ${view.speak}` : `Tracks removed: the path is one list again. ${view.speak}` };
   }
 
   /** Prep-first check: a stage whose first open step is not on a hard lever. Returns a warning or null. */
@@ -248,7 +350,7 @@ export class AimService {
     });
   }
 
-  async editMilestone(milestoneId: string, patch: { title?: string; kind?: 'count' | 'steps'; metric?: string; target?: number; due?: string; status?: MilestoneStatus }) {
+  async editMilestone(milestoneId: string, patch: { title?: string; kind?: 'count' | 'steps'; metric?: string; target?: number; due?: string; status?: MilestoneStatus; trackId?: string }) {
     const path = await this.store.getPath();
     const m = path.milestones.find(x => x.id === milestoneId);
     if (!m) throw new AimError(`milestone "${milestoneId}" not found; ids: ${path.milestones.map(x => x.id).join(', ')}`);
@@ -264,9 +366,14 @@ export class AimService {
     if (patch.kind) m.kind = patch.kind;
     if (milestoneKind(m) === 'count' && (!m.metric || !(m.target > 0))) return { ok: false, problems: ['a countable milestone needs a metric and a target above 0'], speak: `"${m.title}" is countable: give it a metric and a target above 0.` };
     if (patch.status) { m.status = patch.status; m.doneAt = patch.status === 'done' || patch.status === 'retired' ? new Date().toISOString() : undefined; }
+    if (patch.trackId !== undefined) {
+      if (!path.tracks?.some(t => t.id === patch.trackId)) return { ok: false, problems: [`no track "${patch.trackId}"; tracks: ${(path.tracks ?? []).map(t => t.id).join(', ') || 'none (set_tracks first)'}`], speak: `There is no track "${patch.trackId}".` };
+      m.trackId = patch.trackId;
+    }
+    const invalid = pathProblems(path);
+    if (invalid.length) return { ok: false, problems: invalid, speak: invalid.join('; ') };
     await this.store.savePath(path);
-    const next = path.milestones.find(isOpen);
-    return { ok: true, milestone: m, speak: `Milestone "${m.title}": ${m.status}, due ${m.due}.${patch.status && !isOpen(m) ? ` Current milestone is now ${next ? `"${next.title}"` : 'none'}.` : ''}` };
+    return { ok: true, milestone: m, speak: `Milestone "${m.title}": ${m.status}, due ${m.due}.${patch.status && !isOpen(m) ? ` ${nextStageText(path, m)}` : ''}` };
   }
 
   private async recordMilestoneProgress(milestoneId: string, value: number, d: string) {
@@ -280,8 +387,7 @@ export class AimService {
     let closed = false;
     if (reached && isOpen(m)) { m.status = 'done'; m.doneAt = new Date().toISOString(); closed = true; }
     await this.store.savePath(path);
-    const next = path.milestones.find(isOpen);
-    return { ok: true, milestone: m, history: m.progress, milestone_reached: reached, speak: `Recorded ${m.metric} = ${value} of ${m.target} for "${m.title}" on ${d}.${closed ? ` Milestone done. Current milestone is now ${next ? `"${next.title}"` : 'none'}.` : ''}` };
+    return { ok: true, milestone: m, history: m.progress, milestone_reached: reached, speak: `Recorded ${m.metric} = ${value} of ${m.target} for "${m.title}" on ${d}.${closed ? ` Milestone done. ${nextStageText(path, m)}` : ''}` };
   }
 
   async deleteStep(stepId: string) {
@@ -319,34 +425,81 @@ export class AimService {
   async nextSteps(count = 5) {
     const goal = await this.store.getGoal();
     const path = await this.store.getPath();
-    const current = path.milestones.find(isOpen);
-    if (!current) return { steps: [], speak: 'No open milestone. Set milestones first.' };
+    // One current stage per track (docs/path-tracks.md); the main step can come from any of them.
+    const currents = currentStages(path);
+    if (!currents.length) return { steps: [], speak: 'No open milestone. Set milestones first.' };
     const hard = new Set((goal?.levers ?? []).filter(l => l.kind === 'hard').map(l => l.id));
-    const open = path.steps.filter(s => s.milestoneId === current.id && s.status !== 'done').sort((a, b) => (Number(hard.has(b.leverId ?? '')) - Number(hard.has(a.leverId ?? ''))) || a.order - b.order).slice(0, count);
-    return { milestone: { id: current.id, title: current.title, due: current.due }, steps: open.map(s => ({ ...s, hard: hard.has(s.leverId ?? '') })), speak: open.length ? `Candidates for the main step (hard first): ${open.map(s => `[${s.id}] ${s.title}`).join('; ')}.` : `Milestone "${current.title}" has no open steps. Add some with add_steps.` };
+    const trackTitle = (m: Milestone) => path.tracks?.find(t => t.id === m.trackId)?.title ?? null;
+    // Steps keep their path order: a later step waits for the earlier undone one (docs/path-tracks.md).
+    const lists = currents.map(m => path.steps.filter(s => s.milestoneId === m.id && s.status !== 'done').sort((a, b) => a.order - b.order)
+      .map((s, i, all) => ({ ...s, hard: hard.has(s.leverId ?? ''), track: trackTitle(m), ...(i ? { after: all[i - 1].title } : {}) })));
+    // Hard first between tracks: the track whose next step is hard goes first.
+    lists.sort((a, b) => Number(!!b[0]?.hard) - Number(!!a[0]?.hard));
+    // Taken in turns, so one track's long list doesn't hide the others.
+    const open: (typeof lists)[number] = [];
+    for (let i = 0; open.length < count && lists.some(l => l.length > i); i++) for (const l of lists) if (l[i] && open.length < count) open.push(l[i]);
+    const empty = currents.filter(m => !path.steps.some(s => s.milestoneId === m.id && s.status !== 'done'));
+    const current = currents[0];
+    return {
+      milestone: { id: current.id, title: current.title, due: current.due },
+      milestones: currents.map(m => ({ id: m.id, title: m.title, due: m.due, track: trackTitle(m) })),
+      steps: open,
+      speak: (open.length ? `Candidates for the main step (in path order${currents.length > 1 ? ', from every track' : ''}): ${open.map(s => `[${s.id}] ${s.track ? `${s.track}: ` : ''}${s.title}${s.after ? ` (after "${s.after}")` : ''}`).join('; ')}.` : '')
+        + (empty.length ? `${open.length ? ' ' : ''}${empty.map(m => `Milestone "${m.title}"`).join(' and ')} ${empty.length > 1 ? 'have' : 'has'} no open steps. Add some with add_steps.` : ''),
+    };
   }
 
   // ---------- profile ----------
   private settingsView(prof: Profile) {
     const p = prof.pomodoro;
     return {
-      timezone: prof.timezone, workplace: prof.defaultWorkplace, ...p,
-      speak: `Timezone ${prof.timezone}. Reminders go to ${prof.defaultWorkplace}. Stand-up every ${p.workMin} min${p.standup ? '' : ' (stand-up reminders off)'}, ${p.breakMin} min break, a ${p.longBreakMin} min break every ${p.longBreakEvery} blocks.`,
+      timezone: prof.timezone, workplace: prof.defaultWorkplace, ...p, post_to: prof.postTo ?? null,
+      tracking: prof.tracking ?? 'time', weekly_target: prof.weeklyTarget ?? DEFAULT_WEEKLY_TARGET,
+      weekly_review_email: prof.weeklyReviewEmail ?? true,
+      speak: `Timezone ${prof.timezone}. Reminders go to every registered device (default workplace ${prof.defaultWorkplace}). Stand-up every ${p.workMin} min${p.standup ? '' : ' (stand-up reminders off)'}, ${p.breakMin} min break, a ${p.longBreakMin} min break every ${p.longBreakEvery} blocks.${prof.postTo ? ` Progress posts go to: ${prof.postTo.join(', ') || 'no network'}.` : ''} ${TRACKING_TEXT[prof.tracking ?? 'time']} Weekly target: ${prof.weeklyTarget ?? DEFAULT_WEEKLY_TARGET} day(s) toward the aim. Weekly review email on Sunday evening (Pro): ${prof.weeklyReviewEmail === false ? 'off' : 'on'}.`,
     };
   }
   async getSettings() { return this.settingsView(await this.profile()); }
-  async setSettings(s: { timezone?: string; workplace?: Workplace; workMin?: number; breakMin?: number; longBreakEvery?: number; longBreakMin?: number; standup?: boolean }) {
+  async setSettings(s: { timezone?: string; workplace?: Workplace; workMin?: number; breakMin?: number; longBreakEvery?: number; longBreakMin?: number; standup?: boolean; post_to?: Network[]; tracking?: Tracking; weekly_target?: number; weekly_review_email?: boolean }) {
     const prof = await this.profile();
+    if (s.weekly_review_email !== undefined) prof.weeklyReviewEmail = s.weekly_review_email;
+    if (s.tracking !== undefined) {
+      if (!TRACKINGS.includes(s.tracking)) throw new AimError(`tracking must be one of ${TRACKINGS.join(', ')}`);
+      if (s.tracking === 'moves' && (await this.store.getRunningSessions()).length) throw new AimError('A session is running. Stop it first (stop_session), then switch to moves.');
+      prof.tracking = s.tracking;
+    }
+    if (s.weekly_target !== undefined) {
+      if (!(Number.isInteger(s.weekly_target) && s.weekly_target >= 1 && s.weekly_target <= 7)) throw new AimError('weekly_target is the number of days a week, 1 to 7');
+      prof.weeklyTarget = s.weekly_target;
+    }
     if (s.timezone !== undefined) {
       try { new Intl.DateTimeFormat('en', { timeZone: s.timezone }); } catch { throw new AimError(`unknown timezone "${s.timezone}"; use an IANA name such as Europe/Madrid`); }
       prof.timezone = s.timezone;
     }
     if (s.workplace) prof.defaultWorkplace = s.workplace;
-    const { timezone: _t, workplace: _w, ...pom } = s;
+    if (s.post_to) prof.postTo = NETWORKS.filter(n => s.post_to!.includes(n));
+    const { timezone: _t, workplace: _w, post_to: _p, tracking: _k, weekly_target: _g, weekly_review_email: _r, ...pom } = s;
     prof.pomodoro = { ...prof.pomodoro, ...Object.fromEntries(Object.entries(pom).filter(([, v]) => v !== undefined)) };
     await this.store.saveProfile(prof); this.profileCache = prof;
+    // The timezone moves Sunday 19:00; the email setting adds or removes it.
+    await this.armWeeklyReview().catch(e => console.error('[set_settings] weekly review arm failed', (e as Error).message));
     const view = this.settingsView(prof);
     return { ok: true, ...view, speak: `Saved. ${view.speak}` };
+  }
+  /**
+   * docs/weekly-review.md: one pending doc per person for the next Sunday 19:00 local, or
+   * none when the email is off. Pro is checked when it comes due, not here. A review that
+   * is due and not yet sent is left alone, so re-arming never skips this Sunday's email.
+   */
+  async armWeeklyReview(now = new Date()): Promise<{ week_of: string; due_at: string } | null> {
+    const prof = await this.profile();
+    const id = reviewPendingId(this.store.uid);
+    if (prof.weeklyReviewEmail === false) { await this.store.removePending(id); return null; }
+    const cur = await this.store.getPending(id);
+    if (cur && Date.parse(cur.dueAt) <= now.getTime()) return { week_of: cur.date ?? '', due_at: cur.dueAt };
+    const next = nextReviewDue(prof.timezone, now);
+    if (cur?.dueAt !== next.dueAt) await this.store.savePending({ id, uid: this.store.uid, blockId: '', kind: 'weekly_review', date: next.week, dueAt: next.dueAt, workplace: 'mobile', minutes: 0, breakMin: 0 });
+    return { week_of: next.week, due_at: next.dueAt };
   }
   async setDayMode(date: string | undefined, mode: Mode) {
     const d = date ?? await this.today(); this.assertDate(d);
@@ -374,11 +527,13 @@ export class AimService {
   // ---------- commitments & capacity ----------
   async getCommitments() {
     const items = await this.store.getCommitments();
-    return { commitments: items, speak: items.length ? items.map(c => `${c.title} [${c.kind}${c.area ? ' ' + c.area : ''}]: ${describeWhen(c)}, ${c.minutes} min${c.assumed ? ' (assumed)' : ''}`).join('; ') : 'No recurring commitments recorded.' };
+    return { commitments: items.map(commitmentView), speak: items.length ? items.map(c => `${c.title} [${c.kind}${c.area ? ' ' + c.area : ''}]: ${describeWhen(c)}, ${c.minutes} min${c.assumed ? ' (assumed)' : ''}`).join('; ') : 'No recurring commitments recorded.' };
   }
 
-  async setCommitments(items: (Omit<Commitment, 'id' | 'days' | 'kind'> & { id?: string; days?: number[]; kind?: CommitmentKind })[]) {
+  async setCommitments(items: (Omit<Commitment, 'id' | 'days' | 'kind' | 'calendarEventId'> & { id?: string; days?: number[]; kind?: CommitmentKind; calendarEventId?: string | null })[]) {
     const problems: string[] = [];
+    // A calendar event id left out stays on the entry it was on (same id); null or "" removes it.
+    const before = new Map((await this.store.getCommitments()).map(c => [c.id, c.calendarEventId]));
     const out: Commitment[] = items.map(c => {
       if (!c.title?.trim()) problems.push('a commitment has no title');
       if (!c.minutes || c.minutes < 1) problems.push(`"${c.title}" needs minutes per occurrence`);
@@ -386,12 +541,18 @@ export class AimService {
       if (!days.length && !c.timesPerWeek) problems.push(`"${c.title}" needs days (1=Mon..7=Sun) or timesPerWeek`);
       const kind: CommitmentKind = c.kind ?? 'commitment';
       if (kind === 'commitment' && !c.area) problems.push(`"${c.title}" needs an area (or kind overhead/window)`);
-      return { id: c.id ?? slug(c.title), title: c.title.trim(), kind, area: kind === 'commitment' ? c.area : undefined, days, timesPerWeek: c.timesPerWeek, start: c.start, minutes: c.minutes, usableForWork: c.usableForWork, assumed: c.assumed, insideWindowId: c.insideWindowId, projectId: c.projectId, note: c.note };
+      const id = c.id ?? slug(c.title);
+      const calendarEventId = c.calendarEventId === undefined ? before.get(id) : c.calendarEventId?.trim() || undefined;
+      return { id, title: c.title.trim(), kind, area: kind === 'commitment' ? c.area : undefined, days, timesPerWeek: c.timesPerWeek, start: c.start, minutes: c.minutes, usableForWork: c.usableForWork, assumed: c.assumed, insideWindowId: c.insideWindowId, projectId: c.projectId, note: c.note, ...(calendarEventId ? { calendarEventId } : {}) };
     });
+    // One calendar event is one commitment (docs/calendar-sync.md).
+    const byEvent = new Map<string, string[]>();
+    for (const c of out) if (c.calendarEventId) byEvent.set(c.calendarEventId, [...(byEvent.get(c.calendarEventId) ?? []), c.title]);
+    for (const [eventId, titles] of byEvent) if (titles.length > 1) problems.push(`${titles.map(t => `"${t}"`).join(' and ')} have the same calendar_event_id "${eventId}": one calendar event is one commitment`);
     if (problems.length) return { ok: false, problems, speak: problems.join('; ') };
     await this.store.saveCommitments(out);
     const cap = await this.capacity();
-    return { ok: true, commitments: out, capacity: cap, speak: `${out.length} commitments saved. ${cap.speak}` };
+    return { ok: true, commitments: out.map(commitmentView), capacity: cap, speak: `${out.length} commitments saved. ${cap.speak}` };
   }
 
   /** Weekly time budget. Nothing is assumed: only what has been recorded is counted. */
@@ -405,12 +566,12 @@ export class AimService {
       const min = occ(c) * c.minutes;
       if (c.assumed) assumedList.push(`${c.title} (${Math.round(c.minutes)} min)`);
       if (c.kind === 'overhead') { overhead += min; continue; }
-      if (c.kind === 'window') { windows += min; windowList.push(`${c.title}: ${describeWhen(c)}, ${Math.round((min / 60) * 10) / 10} h/week`); continue; }
+      if (c.kind === 'window') { windows += min; windowList.push(`${c.title}: ${describeWhen(c)}, ${hours(min)} h/week`); continue; }
       perArea[c.area ?? 'work'] = (perArea[c.area ?? 'work'] ?? 0) + min;
       committed += min;
       if (c.usableForWork) windows += min;
     }
-    const h = (m: number) => Math.round((m / 60) * 10) / 10;
+    const h = hours;
     const weekMin = 7 * 24 * 60;
     // Commitments carved out of a declared window must not be counted twice.
     const carved = items.filter(c => c.insideWindowId && c.kind === 'commitment').reduce((sum, c) => sum + occ(c) * c.minutes, 0);
@@ -422,12 +583,12 @@ export class AimService {
       focus_window_hours_gross: h(windows), carved_out_of_windows_hours: h(carved), focus_window_hours_net: h(netWindows), carved_out_by: carvedList,
       unaccounted_hours: h(unaccounted), by_area_hours: Object.fromEntries(Object.entries(perArea).map(([k, v]) => [k, h(v)])),
       focus_windows: windowList, assumed_entries: assumedList,
-      speak: `Per week: ${h(overhead)} h overhead (sleep, meals, hygiene, moving), ${h(committed)} h committed to areas (${Object.entries(perArea).map(([k, v]) => `${k} ${h(v)}h`).join(', ') || 'none'}), ${h(windows)} h of focus windows minus ${h(carved)} h carved out of them (${carvedList.join(', ') || 'nothing'}) = ${h(netWindows)} h genuinely free for the goal, ${h(unaccounted)} h not yet accounted for.${windowList.length ? ` Windows: ${windowList.join('; ')}.` : ' No focus windows recorded yet, so the planner has nowhere to put the main step.'}${assumedList.length ? ` Assumed by Claude, please confirm: ${assumedList.join(', ')}.` : ''}`,
+      speak: `Per week: ${h(overhead)} h overhead (sleep, meals, hygiene, moving), ${h(committed)} h committed to areas (${Object.entries(perArea).map(([k, v]) => `${k} ${h(v)}h`).join(', ') || 'none'}), ${h(windows)} h of focus windows minus ${h(carved)} h carved out of them (${carvedList.join(', ') || 'nothing'}) ≈ ${h(netWindows)} h genuinely free for the goal (each figure rounded on its own), ${h(unaccounted)} h not yet accounted for.${windowList.length ? ` Windows: ${windowList.join('; ')}.` : ' No focus windows recorded yet, so the planner has nowhere to put the main step.'}${assumedList.length ? ` Assumed by Claude, please confirm: ${assumedList.join(', ')}.` : ''}`,
     };
   }
 
   /** Minutes of declared focus window on that weekday, net of commitments carved out of them. */
-  private async windowMinutesFor(date: string): Promise<number> {
+  async windowMinutesFor(date: string): Promise<number> {
     const items = await this.store.getCommitments();
     const [y, m, d] = date.split('-').map(Number);
     const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
@@ -580,11 +741,13 @@ export class AimService {
     }
     const path = await this.store.getPath();
     for (const it of items) if (it.stepId && !path.steps.some(s => s.id === it.stepId)) return { ok: false, problems: [`stepId "${it.stepId}" not found in path`], speak: `Step ${it.stepId} is not in the path.` };
+    const skipped = stepOrderWarning(path, mains[0]?.stepId);
+    if (skipped) warnings.push(skipped);
     if (day.mode !== 'off' && windowMin > 0) {
       const goal = await this.store.getGoal();
       const hard = goal?.levers.filter(l => l.kind === 'hard') ?? [];
       if (hard.length && !items.some(it => leverFor(it, goal, path.steps)?.kind === 'hard')) {
-        warnings.push(`Nothing in this plan is on a hard lever (${hard.map(l => l.name).join(', ')}): the day is preparation only. Make the main step a short hard-lever step, done with what exists now (next_steps lists them first), or swap one item for one, then call set_plan again.`);
+        warnings.push(`Nothing in this plan is on a hard lever (${hard.map(l => l.name).join(', ')}): the day is preparation only. Make the main step a short hard-lever step, done with what exists now (see next_steps), or swap one item for one, then call set_plan again.`);
       }
     }
     const prev = new Map(day.plan.map(p => [p.stepId ?? p.title, p]));
@@ -647,6 +810,10 @@ export class AimService {
         notes.push(patch.done ? `Path step done: "${r.step?.title}".` : `Path step "${r.step?.title}" is open again.`);
       }
     }
+    if (item.isMainStep && !item.done && (patch.stepId || patch.isMainStep)) {
+      const skipped = stepOrderWarning(await this.store.getPath(), item.stepId);
+      if (skipped) notes.push(skipped);
+    }
     await this.store.saveDay(day);
     const routine = item.routineId ? (await this.store.getRoutines()).find(r => r.id === item.routineId) : undefined;
     if (routine?.perWeek) {
@@ -667,6 +834,20 @@ export class AimService {
     return { ok: true, plan: day.plan, speak: `Removed "${item.title}" from the plan for ${day.date}.${item.routineId ? ' It is a routine: skipped for this day only.' : ''}${item.isMainStep ? ' That was the main step: set another one with edit_plan_item (isMainStep) or set_plan.' : ''}` };
   }
 
+  /** The last planned main step before d, if it is still not done (looks back a week). */
+  private async undoneMainStep(d: string) {
+    const path = await this.store.getPath();
+    for (let i = 1; i <= 7; i++) {
+      const day = await this.store.getDay(addDays(d, -i));
+      const main = day?.plan.find(p => p.isMainStep);
+      if (!main) continue;
+      const step = main.stepId ? path.steps.find(s => s.id === main.stepId) : undefined;
+      if (main.done || step?.status === 'done') return null;
+      return { date: day!.date, item_id: main.id, title: main.title, step_id: main.stepId ?? null };
+    }
+    return null;
+  }
+
   async getPlanningContext(date?: string) {
     const d = date ?? addDays(await this.today(), 1); this.assertDate(d);
     const goal = await this.getGoal();
@@ -675,6 +856,7 @@ export class AimService {
     const ySum = await this.daySummary(yesterday);
     const yDay = await this.store.getDay(yesterday);
     const undone = (yDay?.plan ?? []).filter(p => !p.done);
+    const carryOver = await this.undoneMainStep(d);
     const week = await this.weekSummary(addDays(d, -1));
     const daysSinceHard = await this.daysSinceHardLever(d);
     const existing = await this.dayWithRoutines(d);
@@ -686,10 +868,11 @@ export class AimService {
     return {
       date: d, commitments, committed_minutes_that_day: committedToday, focus_window_minutes: windowMinutes, capacity: cap, goal: goal.goal ? { title: goal.goal.title, metric: goal.goal.metric, current: goal.current_value, target: goal.goal.target, days_left: goal.days_left, levers: goal.goal.levers, projects: goal.goal.projects } : null,
       milestone: next.milestone ?? null, next_steps: next.steps,
+      carry_over: carryOver,
       yesterday: { date: yesterday, main_step_done: ySum.main_step.done, goal_attention_min: ySum.goal_attention_min, by_area: ySum.by_area, undone_items: undone },
       week: { main_step_days: week.main_step_days, goal_share: week.goal_share, hard_share: week.hard_share, by_area: week.by_area },
       days_since_hard_lever: daysSinceHard, existing_plan: existing?.plan ?? [], routines,
-      speak: `Planning ${d}. ${windowMinutes === 0 ? 'NO focus window that day: do not plan goal work, and do not ask for a main step. ' : `Focus window: ${Math.round(windowMinutes / 6) / 10} h. `}Fixed that day: ${commitments.length ? commitments.map(c => `${c.title} ${c.minutes}min${c.usableForWork ? ' (usable)' : ''}`).join(', ') : 'nothing recorded'} = ${Math.round(committedToday / 6) / 10} h. ${goal.speak} Days since a hard lever: ${daysSinceHard ?? 'never'}. Yesterday main step ${ySum.main_step.done ? 'done' : 'NOT done'}${undone.length ? `, ${undone.length} items left undone` : ''}. Pick the main step from next_steps (hard first), then fit paid work, family, workout.${routines.length ? ` Routines that day (already in the plan, set_plan keeps them): ${routines.map(r => r.title).join('; ')}.` : ''}`,
+      speak: `Planning ${d}. ${windowMinutes === 0 ? 'NO focus window that day: do not plan goal work, and do not ask for a main step. ' : `Focus window: ${hours(windowMinutes)} h. `}Fixed that day: ${commitments.length ? commitments.map(c => `${c.title} ${c.minutes}min${c.usableForWork ? ' (usable)' : ''}`).join(', ') : 'nothing recorded'} = ${hours(committedToday)} h. ${goal.speak} Days since a hard lever: ${daysSinceHard ?? 'never'}. Yesterday main step ${ySum.main_step.done ? 'done' : 'NOT done'}${undone.length ? `, ${undone.length} items left undone` : ''}. ${carryOver ? `The main step of ${carryOver.date} is not done: "${carryOver.title}". Plan it again as the main step unless the user says otherwise.` : 'Pick the main step from next_steps: the first open step of a track, in path order.'} Then fit paid work, family, workout.${routines.length ? ` Routines that day (already in the plan, set_plan keeps them): ${routines.map(r => r.title).join('; ')}.` : ''}`,
     };
   }
 
@@ -793,15 +976,16 @@ export class AimService {
     // The stored copy may be behind `s` (inside a transaction it always is): `s` is the truth.
     const others = (await this.store.getSessionsOverlapping(s.start, end.toISOString())).filter(o => o.id !== s.id);
     const att = computeAttention([...others, s], start, end);
-    return { id: s.id, task: s.task, area: s.area, classification: s.classification, lever_id: s.leverId, project_id: s.projectId, start: s.start, end: s.end, wall_min: round(att.wall.get(s.id) ?? 0), attention_min: round(s.attentionShareOverride !== undefined ? (att.wall.get(s.id) ?? 0) * s.attentionShareOverride : att.attention.get(s.id) ?? 0), weight: s.weight, notes: s.notes, override: s.override ?? false, summary: s.summary, outcome: s.outcome };
+    return { id: s.id, task: s.task, area: s.area, classification: s.classification, lever_id: s.leverId, project_id: s.projectId, start: s.start, end: s.end, wall_min: round(att.wall.get(s.id) ?? 0), attention_min: round(s.attentionShareOverride !== undefined ? (att.wall.get(s.id) ?? 0) * s.attentionShareOverride : att.attention.get(s.id) ?? 0), weight: s.weight, notes: s.notes, override: s.override ?? false, summary: s.summary, outcome: s.outcome, agent: s.agent ?? null, ...(s.calendarEventId ? { calendar_event_id: s.calendarEventId } : {}) };
   }
 
   /** The running sessions; `extra` is one just started whose write has not landed yet. */
-  private async runningView(extra?: Session) {
-    const stored = (await this.store.getRunningSessions()).filter(s => s.id !== extra?.id);
-    const running = extra ? [...stored, extra] : stored;
+  /** extra: sessions just written in a transaction that may not be committed yet. */
+  private async runningView(...extra: Session[]) {
+    const stored = (await this.store.getRunningSessions()).filter(s => !extra.some(e => e.id === s.id));
+    const running = [...stored, ...extra];
     const total = running.reduce((s, x) => s + (x.weight ?? 1), 0) || 1;
-    return running.map(s => ({ id: s.id, task: s.task, classification: s.classification, started: s.start, share: Math.round(((s.weight ?? 1) / total) * 100) / 100, mine: s.clientSessionId === this.clientSessionId }));
+    return running.map(s => ({ id: s.id, task: s.task, classification: s.classification, started: s.start, share: share(s.weight ?? 1, total), weight: s.weight ?? 1, mine: s.clientSessionId === this.clientSessionId, agent: s.agent ?? null }));
   }
 
   /**
@@ -821,13 +1005,16 @@ export class AimService {
 
   private async startFresh(input: SessionInput & { minutes?: number; startAt?: string; sessionId?: string }, op: OpRef | undefined) {
     const prof = await this.profile();
+    if (prof.tracking === 'moves') throw new AimError(MOVES_ONLY);
     const today = await this.today();
     const now = new Date();
     const start = input.startAt !== undefined ? this.deviceTime('start_at', input.startAt, now) : now;
     const day = await this.store.getOrCreateDay(today, prof.defaultMode);
     const goal = await this.store.getGoal();
-    const area = input.area ?? 'work';
-    const cls = classify({ area, projectId: input.projectId, leverId: input.leverId, stepId: input.stepId, itemId: input.itemId, task: input.task }, goal, day);
+    // A non-main plan item's own lever, project, step and area fill what the caller left out.
+    const link = withPlanItem({ area: input.area, projectId: input.projectId, leverId: input.leverId, stepId: input.stepId, itemId: input.itemId }, day);
+    const area = link.area;
+    const cls = classify({ ...link, task: input.task }, goal, day);
     const verdict = decideVerdict(cls.classification, day, goal, !!input.override, (await this.windowMinutesFor(today)) > 0);
     const workplace = input.workplace ?? this.clientWorkplace ?? prof.defaultWorkplace;
 
@@ -844,25 +1031,36 @@ export class AimService {
     const mainItem = day.plan.find(p => p.isMainStep);
     const session: Session = {
       id: input.sessionId ?? newId(), start: start.toISOString(), source: 'agent', clientSessionId: this.clientSessionId, weight: input.weight ?? 1, exclusive: input.exclusive, workplace,
-      area, projectId: cls.projectId ?? input.projectId, leverId: cls.leverId ?? input.leverId, stepId: input.stepId ?? (cls.classification === 'main_step' ? mainItem?.stepId : undefined), itemId: input.itemId ?? (cls.classification === 'main_step' ? mainItem?.id : undefined),
+      area, projectId: cls.projectId ?? link.projectId, leverId: cls.leverId ?? link.leverId, stepId: link.stepId ?? (cls.classification === 'main_step' ? mainItem?.stepId : undefined), itemId: input.itemId ?? (cls.classification === 'main_step' ? mainItem?.id : undefined),
       task: input.task.trim(), notes: [], classification: cls.classification, unclassified: cls.unclassified, verdictAtStart: verdict.verdict, override: !!input.override && verdict.note === 'override',
+      agent: await this.agent(),
     };
     const started = async () => {
-      const running = await this.runningView(session);
+      const running = await this.runningView(session, ...switched);
+      // Reminders go to every device (docs/notifications.md): pushes to the phones, the desktop inbox for the desktop apps.
       const devices = await this.store.getDevices();
-      const reachable = devices.filter(d => (workplace === 'desktop' ? ['macos', 'web'] : ['ios', 'android']).includes(d.platform));
-      const notifyVia = joined ? 'the reminder already set for this block' : devices.length ? `push to ${(reachable.length ? reachable : devices).map(d => d.platform).join(', ')}` : 'no registered device: local hook only';
+      const phones = [...new Set(devices.filter(d => d.platform === 'ios' || d.platform === 'android').map(d => d.platform))];
+      const notifyVia = joined ? 'the reminder already set for this block' : devices.length ? [phones.length ? `push to ${phones.join(', ')}` : '', 'the desktop apps'].filter(Boolean).join(' and ') : 'no registered device: local hook only';
       return {
         verdict: verdict.verdict, message: verdict.message, note: verdict.note, classification: cls.classification, matched_by: cls.matchedBy, unclassified: cls.unclassified,
-        session: { id: session.id, task: session.task, area, lever_id: session.leverId, project_id: session.projectId, step_id: session.stepId, item_id: session.itemId, weight: session.weight },
+        session: { id: session.id, task: session.task, area, lever_id: session.leverId, project_id: session.projectId, step_id: session.stepId, item_id: session.itemId, weight: session.weight, agent: session.agent ?? null },
         block: { ...this.blockView(block), joined }, running_sessions: running, notify_via: notifyVia,
         speak: `${verdict.message} Session [${session.id}] "${session.task}" → ${cls.classification}${cls.unclassified ? ' (unclassified: tell me the lever or project)' : ''}. Timer ${joined ? 'joined' : 'started'}${running.length > 1 ? `; ${running.length} sessions share attention` : ''}.`,
       };
     };
+    // Starting while others run is a switch (docs/apps.md "Two timers at once"): the new
+    // session gets 70% from its start, the others share 30%, the time before keeps its split.
+    const others = input.weight === undefined ? (await this.store.getRunningSessions()).filter(o => o.id !== session.id) : [];
+    if (others.length) session.weight = 0.7;
+    const switched = others.filter(o => (o.weight ?? 1) !== 0.3 / others.length)
+      .map(o => ({ ...o, weightHistory: [...(o.weightHistory ?? []), { until: session.start, weight: o.weight ?? 1 }], weight: 0.3 / others.length }));
     return this.applyOnce(op, async tx => {
       // Two attempts with the same client session_id can race: the first one in wins.
       const existing = input.sessionId ? await tx.getSession(input.sessionId) : null;
-      if (!existing) tx.saveSession(session);
+      if (!existing) {
+        tx.saveSession(session);
+        for (const o of switched) tx.saveSession(o);
+      }
       const result = existing ? await this.alreadyStarted(existing) : await started();
       return { result, sessionId: (existing ?? session).id };
     });
@@ -874,19 +1072,30 @@ export class AimService {
     const block = await this.store.getRunningBlock();
     return {
       verdict: 'ok' as const, message: 'Already started.', note: 'already started', classification: s.classification,
-      session: { id: s.id, task: s.task, area: s.area, lever_id: s.leverId, project_id: s.projectId, step_id: s.stepId, item_id: s.itemId, weight: s.weight },
+      session: { id: s.id, task: s.task, area: s.area, lever_id: s.leverId, project_id: s.projectId, step_id: s.stepId, item_id: s.itemId, weight: s.weight, agent: s.agent ?? null },
       block: this.blockView(block), running_sessions: await this.runningView(),
       speak: `Session [${s.id}] "${s.task}" already started at ${localTime(new Date(s.start), tz)}${s.end ? ` and ended at ${localTime(new Date(s.end), tz)}` : ''}; nothing created.`,
     };
   }
 
-  async splitAttention(shares: Record<string, number>) {
+  /**
+   * fromNow (the app's switch, docs/apps.md "Two timers at once"): the new weights hold from
+   * now on and the time before keeps its split; otherwise they apply to the whole session.
+   */
+  async splitAttention(shares: Record<string, number>, fromNow = false) {
     const running = await this.store.getRunningSessions();
-    const changed: string[] = [];
-    for (const s of running) if (shares[s.id] !== undefined) { s.weight = Math.max(0, shares[s.id]); await this.store.saveSession(s); changed.push(s.id); }
-    if (!changed.length) throw new AimError(`No running session matched. Running: ${running.map(s => s.id).join(', ') || 'none'}`);
+    if (!running.some(s => shares[s.id] !== undefined)) throw new AimError(`No running session matched. Running: ${running.map(s => s.id).join(', ') || 'none'}`);
+    const now = new Date().toISOString();
+    for (const s of running) {
+      if (shares[s.id] === undefined) continue;
+      const next = Math.max(0, shares[s.id]);
+      if (!fromNow) s.weightHistory = undefined;
+      else if (next !== s.weight) s.weightHistory = [...(s.weightHistory ?? []), { until: now, weight: s.weight ?? 1 }];
+      s.weight = next;
+      await this.store.saveSession(s);
+    }
     const view = await this.runningView();
-    return { ok: true, running_sessions: view, applies_to: 'whole session (retroactive)', speak: `Attention: ${view.map(v => `${Math.round(v.share * 100)}% ${v.task}`).join(', ')}.` };
+    return { ok: true, running_sessions: view, applies_to: fromNow ? 'from now on' : 'whole session (retroactive)', speak: `Attention${fromNow ? ' from now' : ''}: ${view.map(v => `${roundHalf(100 * v.share)}% ${v.task}`).join(', ')}.` };
   }
 
   async addNote(note: string, sessionId?: string, opId?: string) {
@@ -925,7 +1134,7 @@ export class AimService {
     if (endAt.getTime() < new Date(first.start).getTime()) throw new AimError(`end_at ${opts.endAt} is before the session start ${first.start} (${localTime(new Date(first.start), tz)})`);
     const stop: Stop = { opId: op?.id, clientSessionId: this.clientSessionId, workplace: this.clientWorkplace, endAt: endAt.toISOString(), summary: summary.trim(), outcome, receivedAt: now.toISOString() };
     const today = await this.today();
-    return this.applyOnce(op, async tx => {
+    const result = await this.applyOnce(op, async tx => {
       const s = await tx.getSession(first.id);
       if (!s) throw new AimError(`session "${first.id}" not found`);
       // An agent stopping "now" a session that already ended would stretch it: that is edit_session's job.
@@ -941,27 +1150,50 @@ export class AimService {
       }
       tx.saveSession(s);
       const view = await this.sessionView(s);
-      const block = await this.store.getRunningBlock();
+      const running = await this.store.getRunningBlock();
+      // The timer runs while sessions run: closing the last one stops it (after the commit, below).
+      const othersRunning = (await this.store.getRunningSessions()).filter(x => x.id !== s.id).length;
+      const timerStops = !!running && !othersRunning;
+      const block = timerStops ? null : running;
       const t = (iso: string) => localTime(new Date(iso), tz);
-      const timer = block ? ` Timer still running, ${this.blockView(block)?.minutes_left} min left.` : '';
+      const timer = timerStops ? ' No session is left, so the timer stopped.' : block ? ` Timer still running for ${othersRunning} other session(s).` : '';
       const noted = m.noted ? ' Your summary went to its notes.' : '';
       const speak = m.applied === 'ended' ? `Ended [${s.id}] "${s.task}": ${view.wall_min} min wall, ${view.attention_min} min attention, ${s.outcome}.${extra}${timer}`
         : m.applied === 'shortened' ? `Already ended at ${t(m.previousEnd!)} (${m.previousBy}); your ${t(stop.endAt)} stop moved the end to ${t(stop.endAt)}: [${s.id}] "${s.task}" is now ${view.wall_min} min wall, ${view.attention_min} min attention, ${s.outcome}.${noted}${extra}`
           : `Already ended at ${t(m.previousEnd!)} (${m.previousBy}); your ${t(stop.endAt)} stop is recorded and the end stays ${t(m.previousEnd!)}: [${s.id}] "${s.task}", ${view.wall_min} min wall, ${s.outcome}.${noted}${extra}`;
-      return { result: { ok: true, applied: m.applied, session: view, block: this.blockView(block), speak }, sessionId: s.id };
+      return { result: { ok: true, applied: m.applied, session: view, block: this.blockView(block), timer_stopped: timerStops, speak }, sessionId: s.id };
     });
+    await this.stopIdleTimer();
+    return result;
+  }
+
+  /**
+   * Ends the running timer when no session is left on it. Reads the state as it is now,
+   * so a replayed stop never ends a timer that a newer session started.
+   */
+  private async stopIdleTimer(): Promise<boolean> {
+    if ((await this.store.getRunningSessions()).length) return false;
+    const b = await this.store.getRunningBlock();
+    if (!b) return false;
+    b.ended = true;
+    await this.store.saveBlock(b);
+    await this.store.clearPendings(b.id);
+    return true;
   }
 
   async deleteSession(sessionId?: string, opId?: string) {
     const op = this.opRef('delete_session', opId);
     const first = await this.runningForConnection(sessionId, { device: !!op });
     const tz = await this.tz();
-    return this.applyOnce(op, async tx => {
+    const result = await this.applyOnce(op, async tx => {
       // Gone meanwhile: deleting it again changes nothing, and the answer is still true.
       const s = (await tx.getSession(first.id)) ?? first;
       tx.deleteSession(s.id);
-      return { result: { ok: true, deleted: s.id, speak: `Deleted [${s.id}] "${s.task}" (${localDate(new Date(s.start), tz)} ${localTime(new Date(s.start), tz)}–${s.end ? localTime(new Date(s.end), tz) : 'running'}). It no longer counts.` }, sessionId: s.id };
+      return { result: { ok: true, deleted: s.id, timer_stopped: false, speak: `Deleted [${s.id}] "${s.task}" (${localDate(new Date(s.start), tz)} ${localTime(new Date(s.start), tz)}–${s.end ? localTime(new Date(s.end), tz) : 'running'}). It no longer counts.` }, sessionId: s.id };
     });
+    // A timer only runs for sessions: deleting the last running one stops it, as stop_session does.
+    if (await this.stopIdleTimer()) return { ...result, timer_stopped: true, speak: `${result.speak} No session is left, so the timer stopped.` };
+    return result;
   }
 
   /** Fix a session after the fact: times, label, what it counts toward, summary, attention. */
@@ -988,10 +1220,16 @@ export class AimService {
     if (patch.task?.trim()) { s.task = patch.task.trim(); changed.push('task'); }
     if (patch.area) { s.area = patch.area; changed.push('area'); }
     for (const k of ['projectId', 'leverId', 'stepId', 'itemId'] as const) if (patch[k] !== undefined) { s[k] = patch[k] || undefined; changed.push(k); }
+    // Linking a session to a plan item (not the main step) says what it was: the item's own area,
+    // project, lever and step replace the stored ones, except those this same edit passes.
+    if (patch.itemId) {
+      const item = linkedPlanItem(patch.itemId, await this.store.getDay(localDate(new Date(s.start), tz)));
+      if (item) for (const k of ['area', 'projectId', 'leverId', 'stepId'] as const) if (patch[k] === undefined && item[k] !== undefined) (s as any)[k] = item[k];
+    }
     if (patch.summary !== undefined) { s.summary = patch.summary.trim(); changed.push('summary'); }
     if (patch.outcome) { s.outcome = patch.outcome; changed.push('outcome'); }
     if (patch.attentionShare !== undefined) { s.attentionShareOverride = Math.min(1, Math.max(0, patch.attentionShare)); changed.push('attention'); }
-    if (patch.weight !== undefined) { s.weight = Math.max(0, patch.weight); changed.push('weight'); }
+    if (patch.weight !== undefined) { s.weight = Math.max(0, patch.weight); s.weightHistory = undefined; changed.push('weight'); }
     if (patch.exclusive !== undefined) { s.exclusive = patch.exclusive; changed.push('exclusive'); }
     if (!changed.length) throw new AimError('nothing to change: pass at least one field');
     // What the session counts toward follows from the label, so classify it again.
@@ -1007,10 +1245,12 @@ export class AimService {
     return { ok: true, session: view, changed, speak: `Fixed [${s.id}] "${s.task}": ${localDate(new Date(s.start), tz)} ${localTime(new Date(s.start), tz)}–${s.end ? localTime(new Date(s.end), tz) : 'running'}, ${view.wall_min} min wall, ${view.attention_min} min attention → ${s.classification}. Changed: ${changed.join(', ')}.` };
   }
 
-  async addSession(input: SessionInput & { minutes?: number; start?: string; end?: string; date?: string; opId?: string }) {
+  async addSession(input: SessionInput & { minutes?: number; start?: string; end?: string; date?: string; opId?: string; calendarEventId?: string }) {
     const op = this.opRef('add_session', input.opId);
+    const calendarEventId = input.calendarEventId?.trim() || undefined;
     const tz = await this.tz();
     const prof = await this.profile();
+    if (prof.tracking === 'moves') throw new AimError(MOVES_ONLY);
     let start: Date, end: Date;
     if (input.start && input.end) {
       const d = input.date ?? await this.today(); this.assertDate(d);
@@ -1022,20 +1262,151 @@ export class AimService {
     const day = await this.store.getOrCreateDay(date, prof.defaultMode);
     if (day.mode === 'off') return { ok: false, speak: `Mode is off for ${date}; nothing stored. Use set_day_mode to turn tracking on for that day.` };
     const goal = await this.store.getGoal();
-    const area = input.area ?? 'work';
-    const cls = classify({ area, projectId: input.projectId, leverId: input.leverId, stepId: input.stepId, itemId: input.itemId, task: input.task }, goal, day);
+    const link = withPlanItem({ area: input.area, projectId: input.projectId, leverId: input.leverId, stepId: input.stepId, itemId: input.itemId }, day);
+    const area = link.area;
+    const cls = classify({ ...link, task: input.task }, goal, day);
     const v = decideVerdict(cls.classification, day, goal, true, (await this.windowMinutesFor(date)) > 0);
     const session: Session = {
       id: newId(), start: start.toISOString(), end: end.toISOString(), source: 'manual', clientSessionId: this.clientSessionId, weight: input.weight ?? 1, exclusive: input.exclusive, workplace: input.workplace ?? prof.defaultWorkplace,
-      area, projectId: cls.projectId ?? input.projectId, leverId: cls.leverId ?? input.leverId,
-      stepId: input.stepId ?? (cls.classification === 'main_step' ? day.plan.find(p => p.isMainStep)?.stepId : undefined), itemId: input.itemId ?? (cls.classification === 'main_step' ? day.plan.find(p => p.isMainStep)?.id : undefined),
+      area, projectId: cls.projectId ?? link.projectId, leverId: cls.leverId ?? link.leverId,
+      stepId: link.stepId ?? (cls.classification === 'main_step' ? day.plan.find(p => p.isMainStep)?.stepId : undefined), itemId: input.itemId ?? (cls.classification === 'main_step' ? day.plan.find(p => p.isMainStep)?.id : undefined),
       task: input.task.trim(), notes: [], classification: cls.classification, unclassified: cls.unclassified, verdictAtStart: v.verdict, outcome: 'done',
+      agent: await this.agent(), ...(calendarEventId ? { calendarEventId } : {}),
     };
+    // docs/calendar-sync.md: one calendar event is logged once. A replayed op_id still gets its first answer.
+    const logged = calendarEventId && !(op && await this.store.getOp(op.id)) ? await this.store.findSessionByCalendarEvent(calendarEventId) : null;
+    if (logged) {
+      const on = localDate(new Date(logged.start), tz);
+      return { ok: false, already_logged: { session_id: logged.id, task: logged.task, date: on }, speak: `This calendar event is already logged: ${logged.task} on ${on}. Use edit_session to change it.` };
+    }
     return this.applyOnce(op, async tx => {
       tx.saveSession(session);
       const view = await this.sessionView(session);
       return { result: { ok: true, session: view, classification: cls.classification, matched_by: cls.matchedBy, speak: `Logged [${session.id}] "${session.task}" ${localTime(start, tz)}–${localTime(end, tz)} on ${date}: ${view.wall_min} min wall, ${view.attention_min} min attention → ${cls.classification}${cls.unclassified ? ' (unclassified)' : ''}.` }, sessionId: session.id };
     });
+  }
+
+  // ---------- moves (docs/moves.md) ----------
+  /** How much time this person records and hears about. */
+  async tracking(): Promise<Tracking> { return (await this.profile()).tracking ?? 'time'; }
+  /** quiet and moves: speak in words and days, never minutes or percentages. */
+  private async quietNumbers() { return (await this.tracking()) !== 'time'; }
+
+  private moveIsHard(m: { classification: Classification; leverId?: string }, goal: Goal | null) {
+    return m.classification === 'goal_hard' || (m.classification === 'main_step' && goal?.levers.find(l => l.id === m.leverId)?.kind === 'hard');
+  }
+
+  private moveView(m: Move, goal: Goal | null) {
+    return { id: m.id, date: m.date, task: m.task, area: m.area, classification: m.classification, toward_aim: isGoalWork(m.classification), hard: this.moveIsHard(m, goal), lever_id: m.leverId ?? null, project_id: m.projectId ?? null, step_id: m.stepId ?? null, item_id: m.itemId ?? null, agent: m.agent ?? null };
+  }
+
+  /**
+   * One action toward the aim with no duration: what changed, classified like a session.
+   * completesItem ticks the plan item (and its path step), so a move can finish the main step.
+   */
+  async addMove(input: { task: string; date?: string; time?: string; area?: Area; projectId?: string; leverId?: string; stepId?: string; itemId?: string; completesItem?: boolean }) {
+    const task = input.task?.trim();
+    if (!task) throw new AimError('say what changed, e.g. "fixed the signup button text on the landing page"');
+    const prof = await this.profile();
+    const tz = prof.timezone;
+    const today = await this.today();
+    const date = input.date ?? today; this.assertDate(date);
+    if (date > today) throw new AimError(`${date} is in the future; a move records something already done`);
+    const at = input.time ? parseLocal(date, input.time, tz) : (date === today ? new Date() : parseLocal(date, '12:00', tz));
+    const day = await this.store.getOrCreateDay(date, prof.defaultMode);
+    if (day.mode === 'off') return { ok: false, speak: `Mode is off for ${date}; nothing stored. Use set_day_mode to turn tracking on for that day.` };
+    if (input.completesItem && !input.itemId) throw new AimError('completes_item needs item_id: the plan item this move finishes');
+    const goal = await this.store.getGoal();
+    const link = withPlanItem({ area: input.area, projectId: input.projectId, leverId: input.leverId, stepId: input.stepId, itemId: input.itemId }, day);
+    const area = link.area;
+    const cls = classify({ ...link, task }, goal, day);
+    const main = day.plan.find(p => p.isMainStep);
+    const move: Move = {
+      id: newId(), date, at: at.toISOString(), task, area,
+      projectId: cls.projectId ?? link.projectId, leverId: cls.leverId ?? link.leverId,
+      stepId: link.stepId ?? (cls.classification === 'main_step' ? main?.stepId : undefined),
+      itemId: input.itemId ?? (cls.classification === 'main_step' ? main?.id : undefined),
+      classification: cls.classification, unclassified: cls.unclassified, source: 'agent', agent: await this.agent(), createdAt: new Date().toISOString(),
+    };
+    await this.store.saveMove(move);
+    const notes: string[] = [];
+    if (input.completesItem && input.itemId) {
+      const r = await this.editPlanItem(input.itemId, date, { done: true });
+      notes.push(r.speak);
+    }
+    const week = await this.weekProgress(date);
+    const view = this.moveView(move, goal);
+    const what = view.toward_aim ? `toward the aim${view.hard ? ', on the hard part' : ''}` : cls.classification === 'life' ? 'for life' : 'on other work';
+    return {
+      ok: true, move: view, classification: cls.classification, matched_by: cls.matchedBy, week,
+      speak: `Move recorded for ${date === today ? 'today' : date}: "${task}", ${what}${cls.unclassified ? ' (unclassified: say which kind of work it was and fix it with delete_move and add_move)' : ''}.${notes.length ? ' ' + notes.join(' ') : ''} ${week.speak}`,
+    };
+  }
+
+  async listMoves(from?: string, to?: string) {
+    const today = await this.today();
+    const t = to ?? today, f = from ?? addDays(t, -6); this.assertDate(f); this.assertDate(t);
+    const goal = await this.store.getGoal();
+    const moves = (await this.store.getMovesInRange(f, t)).sort((a, b) => a.at.localeCompare(b.at)).map(m => this.moveView(m, goal));
+    const aim = moves.filter(m => m.toward_aim).length;
+    return { from: f, to: t, count: moves.length, toward_aim: aim, moves, speak: moves.length ? `${moves.length} move(s) between ${f} and ${t}, ${aim} toward the aim: ${moves.map(m => `[${m.id}] ${m.date} "${m.task}"`).join('; ')}.` : `No moves between ${f} and ${t}.` };
+  }
+
+  async deleteMove(moveId: string) {
+    const m = await this.store.getMove(moveId);
+    if (!m) throw new AimError(`move "${moveId}" not found; list_moves shows the ids`);
+    await this.store.deleteMove(moveId);
+    return { ok: true, deleted: moveId, speak: `Deleted the move "${m.task}" from ${m.date}. A plan item it ticked stays ticked; untick it with edit_plan_item if needed.` };
+  }
+
+  /** Local days in [from, to] that moved toward the aim: main step done, a move toward the aim, or AIM_DAY_MIN minutes of sessions on it. Days switched off never count. */
+  private async aimDays(from: string, to: string): Promise<Set<string>> {
+    const tz = await this.tz();
+    const days = await this.store.getDaysInRange(from, to);
+    const out = new Set<string>();
+    for (const x of days) if (x.plan.some(p => p.isMainStep && p.done)) out.add(x.date);
+    for (const m of await this.store.getMovesInRange(from, to)) if (isGoalWork(m.classification)) out.add(m.date);
+    const now = new Date();
+    const mins = new Map<string, number>();
+    for (const x of await this.store.getSessionsOverlapping(startOfDay(from, tz).toISOString(), endOfDay(to, tz).toISOString())) {
+      if (!isGoalWork(x.classification)) continue;
+      const k = localDate(new Date(x.start), tz);
+      mins.set(k, (mins.get(k) ?? 0) + minutesBetween(new Date(x.start), x.end ? new Date(x.end) : now));
+    }
+    for (const [k, v] of mins) if (v >= AIM_DAY_MIN && k >= from && k <= to) out.add(k);
+    for (const x of days) if (x.mode === 'off') out.delete(x.date);
+    return out;
+  }
+
+  /**
+   * The weekly target (docs/moves.md): days toward the aim this week (Monday to Sunday,
+   * through `date`) against the target, and how many weeks in a row met it.
+   */
+  async weekProgress(date?: string) {
+    const d = date ?? await this.today(); this.assertDate(d);
+    const prof = await this.profile();
+    const target = prof.weeklyTarget ?? DEFAULT_WEEKLY_TARGET;
+    const monday = weekStart(d);
+    const WEEKS_BACK = 12;
+    const aim = await this.aimDays(addDays(monday, -7 * WEEKS_BACK), d);
+    const dates = [...aim].filter(x => x >= monday && x <= d).sort();
+    const met = dates.length >= target;
+    const daysLeft = 6 - daysBetween(monday, d);
+    // Today can still count if it hasn't yet.
+    const reachable = dates.length + daysLeft + (aim.has(d) ? 0 : 1) >= target;
+    let inARow = 0;
+    for (let w = 1; w <= WEEKS_BACK; w++) {
+      const from = addDays(monday, -7 * w), to = addDays(from, 6);
+      if ([...aim].filter(x => x >= from && x <= to).length >= target) inARow++; else break;
+    }
+    if (met) inARow++;
+    const rowText = inARow > 1 ? ` ${inARow} weeks in a row.` : '';
+    const speak = met
+      ? `This week: ${daysTowardAim(dates.length, target)}.${rowText}`
+      : reachable
+        ? `This week: ${daysTowardAim(dates.length, target)}, ${daysLeft} day(s) left after today.${rowText}`
+        : `This week: ${daysTowardAim(dates.length, target)}; the target is out of reach this week, and a new week starts on Monday.${rowText}`;
+    return { week_of: monday, through: d, target, days: dates.length, dates, met, days_left: daysLeft, reachable, weeks_in_a_row: inARow, speak };
   }
 
   async getCurrent() {
@@ -1044,7 +1415,7 @@ export class AimService {
     const today = await this.today();
     const day = await this.store.getDay(today);
     const main = day?.plan.find(p => p.isMainStep);
-    return { running_sessions: running, block: this.blockView(block), mode: day?.mode ?? 'full', main_step: main ? { item_id: main.id, step_id: main.stepId ?? null, title: main.title, done: main.done } : null, speak: `${running.length ? `Running: ${running.map(r => `[${r.id}] ${r.task} (${Math.round(r.share * 100)}%)`).join(', ')}.` : 'Nothing running.'} ${block ? `Timer: ${this.blockView(block)?.minutes_left} min left.` : 'No timer.'} ${main ? `Main step today: "${main.title}" ${main.done ? 'done' : 'pending'}.` : 'No main step planned today.'}` };
+    return { running_sessions: running, block: this.blockView(block), mode: day?.mode ?? 'full', main_step: main ? { item_id: main.id, step_id: main.stepId ?? null, title: main.title, done: main.done } : null, speak: `${running.length ? `Running: ${running.map(r => `[${r.id}] ${r.task} (${roundHalf(100 * r.share)}%${r.agent ? `, started by ${r.agent === 'app' ? 'the app' : r.agent}` : ''})`).join(', ')}.` : 'Nothing running.'} ${block ? `Timer: ${this.blockView(block)?.minutes_left} min left.` : 'No timer.'} ${main ? `Main step today: "${main.title}" ${main.done ? 'done' : 'pending'}.` : 'No main step planned today.'}` };
   }
 
   async getGaps(date?: string) {
@@ -1072,21 +1443,35 @@ export class AimService {
     for (const s of sessions) { add(byArea, s.area, s); add(byClass, s.classification, s); if (s.leverId) { add(byLever, s.leverId, s); byLever[s.leverId].kind = goal?.levers.find(l => l.id === s.leverId)?.kind; } }
     const r = (m: Record<string, { wall_min: number; attention_min: number }>) => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, { ...v, wall_min: round(v.wall_min), attention_min: round(v.attention_min) }]));
     const goalAtt = ['main_step', 'goal_hard', 'goal_comfortable'].reduce((s, k) => s + (byClass[k]?.attention_min ?? 0), 0);
-    const hardAtt = ['main_step', 'goal_hard'].reduce((s, k) => s + (byClass[k]?.attention_min ?? 0), 0);
-    const workAtt = byArea['work']?.attention_min ?? 0;
+    const leverKind = (id: string | undefined) => (id ? goal?.levers.find(l => l.id === id)?.kind : undefined);
+    const attOf = (s: Session) => (s.attentionShareOverride !== undefined ? (att.wall.get(s.id) ?? 0) * s.attentionShareOverride : att.attention.get(s.id) ?? 0);
+    // docs/metrics.md: the lever decides what is hard, the same rule as insights and the app.
+    const hardAtt = sessions.filter(s => isGoalClass(s.classification) && isHardWork({ classification: s.classification, lever_id: s.leverId }, leverKind)).reduce((n, s) => n + attOf(s), 0);
+    // Work is aim work plus other projects, whatever area they are filed in: aim work on a
+    // money aim sits in "money", so the work area alone made the share go over 100%.
+    const workAtt = goalAtt + (byClass['other_project']?.attention_min ?? 0);
     const totalAtt = Object.values(byArea).reduce((s, v) => s + v.attention_min, 0);
     const main = day?.plan.find(p => p.isMainStep);
     const routines = await this.routineStatus(day);
-    const hardTouched = sessions.some(s => (s.classification === 'goal_hard' || (s.classification === 'main_step' && goal?.levers.find(l => l.id === s.leverId)?.kind === 'hard')) && (att.attention.get(s.id) ?? 0) >= 10);
+    const moves = (await this.store.getMovesInRange(d, d)).sort((a, b) => a.at.localeCompare(b.at)).map(m => this.moveView(m, goal));
+    const aimMoves = moves.filter(m => m.toward_aim).length, hardMoves = moves.filter(m => m.hard).length;
+    const hardTouched = hardMoves > 0 || sessions.some(s => isGoalClass(s.classification) && isHardWork({ classification: s.classification, lever_id: s.leverId }, leverKind) && attOf(s) >= 10);
+    const quiet = await this.quietNumbers();
     const overrides = sessions.filter(s => s.override).length;
-    const list = sessions.sort((a, b) => a.start.localeCompare(b.start)).map(s => ({ id: s.id, from: localTime(new Date(s.start), tz), to: s.end ? localTime(new Date(s.end), tz) : 'running', task: s.task, area: s.area, classification: s.classification, lever_id: s.leverId, wall_min: round(att.wall.get(s.id) ?? 0), attention_min: round(s.attentionShareOverride !== undefined ? (att.wall.get(s.id) ?? 0) * s.attentionShareOverride : att.attention.get(s.id) ?? 0), override: s.override ?? false, outcome: s.outcome, summary: s.summary }));
+    const list = sessions.sort((a, b) => a.start.localeCompare(b.start)).map(s => ({ id: s.id, from: localTime(new Date(s.start), tz), to: s.end ? localTime(new Date(s.end), tz) : 'running', task: s.task, area: s.area, classification: s.classification, lever_id: s.leverId, project_id: s.projectId, wall_min: round(att.wall.get(s.id) ?? 0), attention_min: round(s.attentionShareOverride !== undefined ? (att.wall.get(s.id) ?? 0) * s.attentionShareOverride : att.attention.get(s.id) ?? 0), override: s.override ?? false, outcome: s.outcome, summary: s.summary }));
     const gaps = findGaps(sessions, start, end).map(g => ({ from: localTime(new Date(g.start), tz), to: localTime(new Date(g.end), tz), minutes: g.minutes }));
-    return {
+    const out = {
       date: d, mode: day?.mode ?? 'full', main_step: { title: main?.title ?? null, done: !!main?.done, planned: !!main }, routines,
-      total_attention_min: round(totalAtt), goal_attention_min: round(goalAtt), goal_share_of_work: workAtt ? Math.round((goalAtt / workAtt) * 100) / 100 : 0, hard_share_of_goal: goalAtt ? Math.round((hardAtt / goalAtt) * 100) / 100 : 0,
+      total_attention_min: round(totalAtt), work_attention_min: round(workAtt), goal_attention_min: round(goalAtt), hard_attention_min: round(hardAtt), goal_share_of_work: share(goalAtt, workAtt), hard_share_of_goal: share(hardAtt, goalAtt),
       hard_lever_touched: hardTouched, overrides, by_area: r(byArea), by_classification: r(byClass), by_lever: r(byLever), overlaps: att.overlaps.map(o => ({ from: localTime(new Date(o.start), tz), to: localTime(new Date(o.end), tz), count: o.count })), gaps, sessions: list,
-      speak: `${d}: ${round(totalAtt)} min tracked, ${round(goalAtt)} min on the goal (${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work), hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%. Main step ${main ? (main.done ? 'done' : `NOT done ("${main.title}")`) : 'not planned'}. Hard lever ${hardTouched ? 'touched' : 'not touched'}.${routines.total || routines.skipped ? ` Routines ${routineText(routines)}.` : ''} ${overrides ? `${overrides} override(s). ` : ''}${gaps.length ? `${gaps.length} gap(s).` : ''}`,
+      moves, aim_moves: aimMoves, hard_moves: hardMoves, quiet_numbers: quiet,
+      speak: quiet
+        ? `${d}: ${aimMoves ? `${aimMoves} move(s) toward the aim${hardMoves ? `, ${hardMoves} on the hard part` : ''}` : 'no moves toward the aim'}${goalAtt >= AIM_DAY_MIN ? `, ${aimMoves ? 'and ' : 'but '}focused time on the aim` : ''}. Main step ${main ? (main.done ? 'done' : `not done ("${main.title}")`) : 'not planned'}. Hard lever ${hardTouched ? 'touched' : 'not touched'}.${routines.total || routines.skipped ? ` Routines ${routineText(routines)}.` : ''}`
+        : `${d}: ${round(totalAtt)} min tracked, ${round(goalAtt)} min on the goal (${percent(goalAtt, workAtt)}% of work), hard share ${percent(hardAtt, goalAtt)}%. Main step ${main ? (main.done ? 'done' : `NOT done ("${main.title}")`) : 'not planned'}. Hard lever ${hardTouched ? 'touched' : 'not touched'}.${aimMoves ? ` ${aimMoves} move(s) toward the aim.` : ''}${routines.total || routines.skipped ? ` Routines ${routineText(routines)}.` : ''} ${overrides ? `${overrides} override(s). ` : ''}${gaps.length ? `${gaps.length} gap(s).` : ''}`,
     };
+    // The exact sums, for pooling a week (weekSummary, the weekly email). A symbol key, so
+    // JSON leaves it out of tool results.
+    return Object.assign(out, { [RAW]: { total: totalAtt, work: workAtt, goal: goalAtt, hard: hardAtt, byArea: Object.fromEntries(Object.entries(byArea).map(([k, v]) => [k, v.attention_min])) } as DayRaw });
   }
 
   async weekSummary(date?: string) {
@@ -1097,24 +1482,33 @@ export class AimService {
     const through = addDays(from, 6) < today ? addDays(from, 6) : today;
     for (let i = 0; i < 7; i++) { const day = addDays(from, i); if (day > through) break; days.push(await this.daySummary(day)); }
     const sum = (f: (x: typeof days[number]) => number) => days.reduce((s, x) => s + f(x), 0);
+    // docs/metrics.md: pool the exact daily sums, round once; never rebuild from rounded days.
     const byArea: Record<string, number> = {};
-    for (const x of days) for (const [k, v] of Object.entries(x.by_area)) byArea[k] = (byArea[k] ?? 0) + v.attention_min;
-    const goalAtt = sum(x => x.goal_attention_min), workAtt = byArea['work'] ?? 0;
-    const hardAtt = sum(x => Math.round(x.goal_attention_min * x.hard_share_of_goal));
+    for (const x of days) for (const [k, v] of Object.entries(x[RAW].byArea)) byArea[k] = (byArea[k] ?? 0) + v;
+    const goalAtt = sum(x => x[RAW].goal), workAtt = sum(x => x[RAW].work);
+    const hardAtt = sum(x => x[RAW].hard);
     const path = await this.getPath();
     const current = path.milestones.find(m => m.id === path.current_milestone_id);
     const st = await this.streak();
     const routineDays = days.filter(x => x.routines.total > 0);
     const weekly = await this.routineWeeks(through);
+    const week = await this.weekProgress(through);
+    const quiet = await this.quietNumbers();
+    const aimMoves = sum(x => x.aim_moves), hardMoves = sum(x => x.hard_moves);
+    const routinesText = routineDays.length ? ` Routines all done on ${routineDays.filter(x => x.routines.done === x.routines.total).length}/${routineDays.length} days (${sum(x => x.routines.done)}/${sum(x => x.routines.total)} checks: ${routineText({ full: sum(x => x.routines.full), minimum: sum(x => x.routines.minimum), skipped: sum(x => x.routines.skipped), total: sum(x => x.routines.total) })}).` : '';
+    const weeklyText = weekly.length ? ` Weekly counts: ${weekly.map(w => `"${w.title}" ${w.done_this_week}/${w.per_week}${w.met ? ' ✓' : ''}`).join(', ')}.` : '';
+    const milestoneText = current ? `Milestone "${current.title}": ${milestoneProgressText(current)}, ${current.pace}, due ${current.due}.` : '';
     return {
-      streak_days: st.streak_days,
-      week_of: from, through, days: days.map(x => ({ date: x.date, main_step_done: x.main_step.done, routines_done: x.routines.done, routines_full: x.routines.full, routines_minimum: x.routines.minimum, routines_skipped: x.routines.skipped, routines_total: x.routines.total, goal_attention_min: x.goal_attention_min, total_attention_min: x.total_attention_min, hard_lever_touched: x.hard_lever_touched, overrides: x.overrides })),
+      streak_days: st.streak_days, week, aim_moves: aimMoves, hard_moves: hardMoves, quiet_numbers: quiet,
+      week_of: from, through, days: days.map(x => ({ date: x.date, toward_aim: week.dates.includes(x.date), aim_moves: x.aim_moves, main_step_done: x.main_step.done, routines_done: x.routines.done, routines_full: x.routines.full, routines_minimum: x.routines.minimum, routines_skipped: x.routines.skipped, routines_total: x.routines.total, goal_attention_min: x.goal_attention_min, total_attention_min: x.total_attention_min, hard_lever_touched: x.hard_lever_touched, overrides: x.overrides })),
       main_step_days: days.filter(x => x.main_step.done).length, days_counted: days.length,
       routines: { days_with_routines: routineDays.length, days_all_done: routineDays.filter(x => x.routines.done === x.routines.total).length, done: sum(x => x.routines.done), full: sum(x => x.routines.full), minimum: sum(x => x.routines.minimum), skipped: sum(x => x.routines.skipped), total: sum(x => x.routines.total), weekly },
-      goal_share: workAtt ? Math.round((goalAtt / workAtt) * 100) / 100 : 0, hard_share: goalAtt ? Math.round((hardAtt / goalAtt) * 100) / 100 : 0,
+      goal_attention_min: round(goalAtt), hard_attention_min: round(hardAtt), goal_share: share(goalAtt, workAtt), hard_share: share(hardAtt, goalAtt),
       by_area: Object.fromEntries(Object.entries(byArea).map(([k, v]) => [k, round(v)])), overrides: sum(x => x.overrides),
       milestone: current ? { title: current.title, kind: current.kind, ...(current.kind === 'count' ? { current: current.current, target: current.target, metric: current.metric } : {}), due: current.due, steps_done: current.steps_done, steps_total: current.steps_total, pace: current.pace } : null,
-      speak: `Week of ${from}: main step done ${days.filter(x => x.main_step.done).length}/${days.length} days, goal share ${Math.round((workAtt ? goalAtt / workAtt : 0) * 100)}% of work, hard share ${Math.round((goalAtt ? hardAtt / goalAtt : 0) * 100)}%, ${sum(x => x.overrides)} overrides.${routineDays.length ? ` Routines all done on ${routineDays.filter(x => x.routines.done === x.routines.total).length}/${routineDays.length} days (${sum(x => x.routines.done)}/${sum(x => x.routines.total)} checks: ${routineText({ full: sum(x => x.routines.full), minimum: sum(x => x.routines.minimum), skipped: sum(x => x.routines.skipped), total: sum(x => x.routines.total) })}).` : ''}${weekly.length ? ` Weekly counts: ${weekly.map(w => `"${w.title}" ${w.done_this_week}/${w.per_week}${w.met ? ' ✓' : ''}`).join(', ')}.` : ''} Streak ${st.streak_days} day(s). ${current ? `Milestone "${current.title}": ${milestoneProgressText(current)}, ${current.pace}, due ${current.due}.` : ''}`,
+      speak: quiet
+        ? `Week of ${from}: ${week.speak} Main step done on ${days.filter(x => x.main_step.done).length} of ${days.length} days. ${aimMoves ? `${aimMoves} move(s) toward the aim${hardMoves ? `, ${hardMoves} on the hard part` : ''}.` : 'No moves toward the aim.'}${routinesText}${weeklyText} ${milestoneText}`
+        : `Week of ${from}: ${week.speak} Main step done ${days.filter(x => x.main_step.done).length}/${days.length} days, goal share ${percent(goalAtt, workAtt)}% of work, hard share ${percent(hardAtt, goalAtt)}%, ${sum(x => x.overrides)} overrides.${aimMoves ? ` ${aimMoves} move(s) toward the aim.` : ''}${routinesText}${weeklyText} ${milestoneText}`,
     };
   }
 
@@ -1147,12 +1541,30 @@ export class AimService {
 
   async streak() {
     const today = await this.today();
-    const days = await this.store.getDaysInRange(addDays(today, -90), today);
-    const done = new Set(days.filter(d => d.plan.some(p => p.isMainStep && p.done)).map(d => d.date));
-    const off = new Set(days.filter(d => d.mode === 'off').map(d => d.date));
-    let n = 0; let cursor = done.has(today) ? today : addDays(today, -1);
-    while (done.has(cursor) || off.has(cursor)) { if (done.has(cursor)) n++; cursor = addDays(cursor, -1); }
-    return { streak_days: n, today_done: done.has(today), speak: `${n} consecutive day(s) with a main step done${done.has(today) ? ', including today' : ', today still pending'}.` };
+    // Most streaks are short: two weeks of days first, all 90 only when the streak reaches past them.
+    for (const span of [14, 90]) {
+      const from = addDays(today, -span);
+      const days = await this.store.getDaysInRange(from, today);
+      const done = new Set(days.filter(d => d.plan.some(p => p.isMainStep && p.done)).map(d => d.date));
+      const off = new Set(days.filter(d => d.mode === 'off').map(d => d.date));
+      let n = 0; let cursor = done.has(today) ? today : addDays(today, -1);
+      while (done.has(cursor) || off.has(cursor)) { if (done.has(cursor)) n++; cursor = addDays(cursor, -1); }
+      if (span === 90 || cursor >= from) return { streak_days: n, today_done: done.has(today), speak: `${n} consecutive day(s) with a main step done${done.has(today) ? ', including today' : ', today still pending'}.` };
+    }
+    throw new Error('unreachable');
+  }
+
+  /**
+   * The app reads the user's data from Firestore and writes through the server
+   * (docs/app-data.md). Before it reads today, the server completes it: the profile
+   * exists and today's plan has its routines, as get_plan would make it.
+   */
+  async openDay() {
+    const today = await this.today();
+    await this.profile();
+    const day = await this.dayWithRoutines(today);
+    await this.armWeeklyReview().catch(e => console.error('[open-day] weekly review arm failed', (e as Error).message));
+    return { ok: true, date: today, plan_items: day?.plan.length ?? 0, speak: `Opened ${today}${day ? ` with ${day.plan.length} plan item(s)` : ''}.` };
   }
 
   async history(from?: string, to?: string, area?: Area, projectId?: string) {
@@ -1160,7 +1572,103 @@ export class AimService {
     const t = to ?? today, f = from ?? addDays(t, -6); this.assertDate(f); this.assertDate(t);
     const tz = await this.tz();
     const sessions = (await this.store.getSessionsOverlapping(startOfDay(f, tz).toISOString(), endOfDay(t, tz).toISOString())).filter(s => (!area || s.area === area) && (!projectId || s.projectId === projectId)).sort((a, b) => a.start.localeCompare(b.start));
-    return { from: f, to: t, count: sessions.length, sessions: sessions.map(s => ({ id: s.id, date: localDate(new Date(s.start), tz), from: localTime(new Date(s.start), tz), to: s.end ? localTime(new Date(s.end), tz) : 'running', task: s.task, area: s.area, classification: s.classification, lever_id: s.leverId, project_id: s.projectId, wall_min: s.end ? minutesBetween(new Date(s.start), new Date(s.end)) : null, summary: s.summary, outcome: s.outcome })), speak: `${sessions.length} sessions between ${f} and ${t}.` };
+    return { from: f, to: t, count: sessions.length, sessions: sessions.map(s => ({ id: s.id, date: localDate(new Date(s.start), tz), from: localTime(new Date(s.start), tz), to: s.end ? localTime(new Date(s.end), tz) : 'running', task: s.task, area: s.area, classification: s.classification, lever_id: s.leverId, project_id: s.projectId, wall_min: s.end ? minutesBetween(new Date(s.start), new Date(s.end)) : null, summary: s.summary, outcome: s.outcome, agent: s.agent ?? null })), speak: `${sessions.length} sessions between ${f} and ${t}.` };
+  }
+
+  // ---------- insights ----------
+  /**
+   * docs/metrics.md: one row per session per local day, with that day's attention minutes
+   * (the split summarize_day uses, cut at midnight, a running session counted up to now).
+   */
+  async insightRows(from: string, to: string): Promise<InsightRow[]> {
+    const tz = await this.tz();
+    const all = await this.store.getSessionsOverlapping(startOfDay(from, tz).toISOString(), endOfDay(to, tz).toISOString());
+    const rows: InsightRow[] = [];
+    for (let d = from; d <= to; d = addDays(d, 1)) {
+      const ws = startOfDay(d, tz), we = endOfDay(d, tz);
+      const day = all.filter(s => Date.parse(s.start) < we.getTime() && (!s.end || Date.parse(s.end) > ws.getTime()));
+      if (!day.length) continue;
+      const att = computeAttention(day, ws, we);
+      for (const s of day.sort((a, b) => a.start.localeCompare(b.start))) {
+        const wall = att.wall.get(s.id) ?? 0;
+        if (wall <= 0) continue;
+        const a = s.attentionShareOverride !== undefined ? wall * s.attentionShareOverride : att.attention.get(s.id) ?? 0;
+        const from = new Date(Math.max(Date.parse(s.start), ws.getTime()));
+        rows.push({ date: d, from: localTime(from, tz), wall_min: wall, attention_min: a, classification: s.classification, area: s.area, lever_id: s.leverId, outcome: s.outcome });
+      }
+    }
+    return rows;
+  }
+
+  /**
+   * A week (the last 7 days) or month (the last 30 days) ending on `to` (default today):
+   * minutes per day split aim / other / life, hard vs comfortable, the hour × weekday
+   * heatmap and comebacks. The same numbers the app used to compute on the device.
+   */
+  async getInsights(range: 'week' | 'month' = 'week', to?: string) {
+    const today = await this.today();
+    const t = to ?? today; this.assertDate(t);
+    const f = addDays(t, range === 'month' ? -29 : -6);
+    const rows = await this.insightRows(addDays(t, -(COMEBACK_HISTORY_DAYS - 1)), t);
+    const goal = await this.store.getGoal();
+    const kinds = new Map((goal?.levers ?? []).map(l => [l.id, l.kind]));
+    const mainStepDays = new Set((await this.store.getDaysInRange(f, t)).filter(d => d.plan.some(p => p.isMainStep && p.done)).map(d => d.date));
+    const ins = computeInsights({ from: f, to: t, rows: rows.filter(r => r.date >= f), leverKind: id => (id ? kinds.get(id) : undefined), mainStepDays });
+    const cb = computeComebacks(t, rows);
+    const inRange = cb.days.filter(d => d >= f).length;
+    const WD = ['', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+    const p = ins.peak_hard;
+    const peakText = p ? ` Hard work happens most on ${WD[p.weekday]} ${p.hour < 12 ? 'mornings' : p.hour < 17 ? 'afternoons' : 'evenings'}, around ${p.hour}:00.` : '';
+    const span = range === 'month' ? 'the last 30 days' : 'the last 7 days';
+    const goalNow = goal;
+    const moves = (await this.store.getMovesInRange(f, t)).map(m => this.moveView(m, goalNow));
+    const aimMoves = moves.filter(m => m.toward_aim).length, hardMoves = moves.filter(m => m.hard).length;
+    const aimDays = [...await this.aimDays(f, t)].length;
+    const quiet = await this.quietNumbers();
+    const Span = `${span[0].toUpperCase()}${span.slice(1)}`;
+    const comebackText = cb.count ? `${cb.count} comeback(s) in ${COMEBACK_HISTORY_DAYS} days${inRange ? `, ${inRange} in this range` : ''}.` : 'No comebacks counted yet.';
+    return {
+      range, from: f, to: t, ...ins,
+      days_toward_aim: aimDays, aim_moves: aimMoves, hard_moves: hardMoves, quiet_numbers: quiet,
+      comebacks: { ...cb, in_range: inRange, history_days: COMEBACK_HISTORY_DAYS },
+      speak: quiet
+        ? `${Span}: ${aimDays} day(s) toward the aim, ${aimMoves ? `${aimMoves} move(s) toward the aim${hardMoves ? `, ${hardMoves} on the hard part` : ''}` : 'no moves recorded'}. Main step done on ${ins.main_step_days} day(s).${peakText} ${comebackText}`
+        : `${Span}: ${aimDays} day(s) toward the aim${aimMoves ? `, ${aimMoves} move(s)` : ''}. ${ins.totals.aim_min} min on the aim, ${ins.totals.other_min} on other work, ${ins.totals.life_min} on life. Hard share ${roundHalf(100 * ins.hard_share)}% of aim time. Main step done on ${ins.main_step_days} day(s).${peakText} ${cb.count ? `${cb.count} comeback(s) in ${COMEBACK_HISTORY_DAYS} days${inRange ? `, ${inRange} in this range` : ''}.` : 'No comebacks counted yet.'}`,
+    };
+  }
+
+  // ---------- the stand-up reminder's actions ----------
+  /**
+   * Break: stand up now. Stops the timer and every running session (there is no paused
+   * state; resuming starts a new session) and says when the break is over.
+   */
+  async takeBreak(minutes?: number) {
+    const prof = await this.profile();
+    const breakMin = Math.max(1, Math.min(60, Math.round(minutes ?? prof.pomodoro.breakMin)));
+    const block = await this.store.getRunningBlock();
+    const running = await this.store.getRunningSessions();
+    const paused = running.map(x => ({ session_id: x.id, task: x.task, area: x.area, project_id: x.projectId ?? null, lever_id: x.leverId ?? null, step_id: x.stepId ?? null, item_id: x.itemId ?? null }));
+    const stopped = await this.stopTimer('Stood up for a break.', 'partial');
+    const endsAt = new Date(Date.now() + breakMin * 60000).toISOString();
+    const id = `${block?.id ?? 'nb'}-break-${Date.now()}`;
+    await this.store.savePending({ id, uid: this.store.uid, blockId: block?.id ?? '', workplace: block?.workplace ?? this.clientWorkplace, minutes: block?.minutes ?? prof.pomodoro.workMin, breakMin, kind: 'break_end', dueAt: endsAt });
+    return {
+      ok: true, break_min: breakMin, break_ends_at: endsAt, paused, closed_sessions: stopped.closed_sessions,
+      speak: `Break for ${breakMin} minutes.${paused.length ? ` Stopped ${paused.map(x => `"${x.task}"`).join(', ')}; starting again begins a new session.` : ''} I will say when the break is over.`,
+    };
+  }
+
+  /** Snooze: ask again in `minutes` (default 10). The timer keeps running. */
+  async snoozeStandup(minutes = 10) {
+    const mins = Math.max(1, Math.min(60, Math.round(minutes)));
+    const b = await this.store.getRunningBlock();
+    if (!b || b.kind !== 'work') throw new AimError('No timer is running, so there is no stand-up to snooze.');
+    const prof = await this.profile();
+    await this.store.clearPendings(b.id);
+    const due = new Date(Date.now() + mins * 60000);
+    const elapsed = minutesBetween(new Date(b.start), due);
+    await this.store.savePending({ id: `${b.id}-standup-${Date.now()}`, uid: this.store.uid, blockId: b.id, workplace: b.workplace, minutes: prof.pomodoro.workMin, breakMin: prof.pomodoro.breakMin, kind: 'standup', elapsedMin: elapsed, final: false, dueAt: due.toISOString() });
+    return { ok: true, snoozed_min: mins, next_standup_at: due.toISOString(), speak: `Snoozed. I will ask you to stand up again in ${mins} minutes; the timer keeps running.` };
   }
 
   async getNow() {
@@ -1174,7 +1682,7 @@ export class AimService {
     const windowMin = await this.windowMinutesFor(s.date);
     if (s.mode !== 'off' && windowMin > 0) {
       if (!s.main_step.planned) nudge = 'No main step planned today. Set one with set_plan.';
-      else if (!s.main_step.done && hour >= 14) nudge = `Main step still pending: "${s.main_step.title}". Do 25 minutes on it next.`;
+      else if (!s.main_step.done && hour >= 14) nudge = `Main step still pending: "${s.main_step.title}". ${(await this.tracking()) === 'moves' ? 'Make one move on it next.' : 'Do 25 minutes on it next.'}`;
       else if (s.main_step.done && !s.hard_lever_touched) nudge = 'Main step done. A hard lever has not been touched today.';
     } else if (windowMin === 0 && s.mode !== 'off') {
       nudge = 'No focus window today. Nothing is expected of you toward the goal.';
@@ -1182,7 +1690,8 @@ export class AimService {
     const open = s.routines.open.length ? ` Routines still open today: ${s.routines.open.map(o => `"${o.title}"${o.minimum ? ` (bad day? the minimum: ${o.minimum})` : ''}`).join(', ')}.` : s.routines.total ? ` Routines all done today${s.routines.minimum ? `, ${s.routines.minimum} as the minimum` : ''}.` : '';
     const weekly = await this.routineWeeks(s.date);
     const weeklyText = weekly.length ? ` This week: ${weekly.map(w => `"${w.title}" ${w.done_this_week}/${w.per_week}`).join(', ')}.` : '';
-    return { ...cur, focus_window_minutes_today: windowMin, today: { date: s.date, main_step: s.main_step, routines: s.routines, weekly_routines: weekly, total_attention_min: s.total_attention_min, goal_attention_min: s.goal_attention_min, goal_share_of_work: s.goal_share_of_work, hard_share_of_goal: s.hard_share_of_goal, by_area: s.by_area, overrides: s.overrides }, streak_days: st.streak_days, nudge, speak: `${s.speak} ${cur.speak} Streak ${st.streak_days}. ${nudge}${open}${weeklyText}` };
+    const week = await this.weekProgress(s.date);
+    return { ...cur, focus_window_minutes_today: windowMin, today: { date: s.date, main_step: s.main_step, routines: s.routines, weekly_routines: weekly, total_attention_min: s.total_attention_min, goal_attention_min: s.goal_attention_min, goal_share_of_work: s.goal_share_of_work, hard_share_of_goal: s.hard_share_of_goal, by_area: s.by_area, overrides: s.overrides, moves: s.moves, aim_moves: s.aim_moves }, week, streak_days: st.streak_days, quiet_numbers: s.quiet_numbers, tracking: await this.tracking(), nudge, speak: `${s.speak} ${cur.speak} ${week.speak} ${nudge}${open}${weeklyText}` };
   }
 }
 
@@ -1267,14 +1776,54 @@ export function mergeStop(s: Session, stop: Stop, tz: string): { applied: 'ended
 const milestoneKind = (m: Milestone) => m.kind ?? 'steps';
 
 const milestoneProgressText = (m: { kind: string; current?: number | null; target: number; metric: string; steps_done: number; steps_total: number }) =>
-  m.kind === 'count' ? `${m.current ?? 0}/${m.target} ${m.metric}` : `${m.steps_done}/${m.steps_total} steps done`;
+  m.kind === 'count' ? `${amount(m.current)}/${amount(m.target)} ${m.metric}` : `${m.steps_done}/${m.steps_total} steps done`;
 
 /** A milestone still to work on: not finished and not retired. */
 const isOpen = (m: Milestone) => m.status !== 'done' && m.status !== 'retired';
+/** docs/path-tracks.md: the stages of m's track in path order; a path without tracks is one track. */
+const sameTrack = (path: Path, m: Milestone) => path.tracks?.length ? path.milestones.filter(x => x.trackId === m.trackId) : path.milestones;
+/** The current stage of each track: one entry on a path without tracks. */
+function currentStages(path: Path): Milestone[] {
+  if (!path.tracks?.length) { const c = path.milestones.find(isOpen); return c ? [c] : []; }
+  return path.tracks.map(t => path.milestones.find(m => m.trackId === t.id && isOpen(m))).filter((m): m is Milestone => !!m);
+}
+/** A main step that skips undone earlier steps of its stage, or a stage that is not yet current (docs/path-tracks.md). */
+function stepOrderWarning(path: Path, stepId?: string): string | undefined {
+  const step = stepId ? path.steps.find(s => s.id === stepId) : undefined;
+  if (!step || step.status === 'done') return undefined;
+  const m = path.milestones.find(x => x.id === step.milestoneId);
+  if (!m) return undefined;
+  const current = currentStages(path).find(c => (c.trackId ?? null) === (m.trackId ?? null));
+  if (current && current.id !== m.id) return `The main step "${step.title}" is in stage "${m.title}", but the current stage${m.trackId ? ' of its track' : ''} is "${current.title}". Plan a step of the current stage unless the user says this one doesn't wait for it.`;
+  const before = path.steps.filter(s => s.milestoneId === m.id && s.id !== step.id && s.status !== 'done' && s.order < step.order).sort((a, b) => a.order - b.order);
+  if (!before.length) return undefined;
+  return `The main step "${step.title}" comes after ${before.length} undone step(s) of its stage: ${before.map(s => `"${s.title}" [${s.id}]`).join(', ')}. Plan "${before[0].title}" first unless the user says this one doesn't depend on it.`;
+}
+/** What comes after m closes, in its own track. */
+function nextStageText(path: Path, m: Milestone) {
+  const next = sameTrack(path, m).find(isOpen);
+  const track = path.tracks?.find(t => t.id === m.trackId);
+  return track ? `Next in ${track.title}: ${next ? `"${next.title}"` : 'none, every stage of this track is closed'}.` : `Current milestone is now ${next ? `"${next.title}"` : 'none'}.`;
+}
+/** The rules of docs/path-tracks.md that a saved path must keep. */
+function pathProblems(path: Path, opts: { order?: boolean } = {}): string[] {
+  const tracks = path.tracks ?? [];
+  // One list: due dates in order are checked where the whole list is set (older paths may not keep it).
+  if (!tracks.length) return opts.order ? path.milestones.flatMap((m, i) => i && m.due < path.milestones[i - 1].due ? [`milestone "${m.title}" is due before the previous one`] : []) : [];
+  const problems: string[] = [];
+  const loose = path.milestones.filter(m => isOpen(m) && !tracks.some(t => t.id === m.trackId));
+  if (loose.length) problems.push(`every open milestone needs a track: ${loose.map(m => `"${m.title}"`).join(', ')} (trackId in set_milestones, edit_milestone or milestoneIds in set_tracks)`);
+  for (const t of tracks) {
+    const own = path.milestones.filter(m => m.trackId === t.id);
+    if (own.length > 6) problems.push(`track "${t.title}" has ${own.length} milestones: use up to 6 per track`);
+    own.forEach((m, i) => { if (i && m.due < own[i - 1].due) problems.push(`milestone "${m.title}" is due before the previous one in track "${t.title}"`); });
+  }
+  return problems;
+}
 
 function slug(s: string) { return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32) || newId(); }
 
-function parseLocal(date: string, hhmm: string, tz: string): Date {
+export function parseLocal(date: string, hhmm: string, tz: string): Date {
   const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
   if (!m) throw new AimError(`time must be HH:MM, got "${hhmm}"`);
   const start = startOfDay(date, tz);

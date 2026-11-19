@@ -46,6 +46,23 @@ export function startOfDay(date: string, tz: string): Date {
   return new Date(t);
 }
 
+/** Instant of HH:MM local time on the given YYYY-MM-DD in tz, right across a DST change that day. */
+export function atLocal(date: string, hhmm: string, tz: string): Date {
+  const [y, m, d] = date.split('-').map(Number);
+  const [hh, mm] = hhmm.split(':').map(Number);
+  const guess = Date.UTC(y, m - 1, d, hh, mm, 0);
+  const off1 = tzOffsetMinutes(new Date(guess), tz);
+  let t = guess - off1 * 60000;
+  const off2 = tzOffsetMinutes(new Date(t), tz);
+  if (off2 !== off1) t = guess - off2 * 60000;
+  return new Date(t);
+}
+
+/** ISO weekday of a YYYY-MM-DD: 1 = Monday … 7 = Sunday. */
+export function isoWeekday(date: string): number {
+  return new Date(`${date}T12:00:00Z`).getUTCDay() || 7;
+}
+
 export function endOfDay(date: string, tz: string): Date {
   return startOfDay(addDays(date, 1), tz);
 }

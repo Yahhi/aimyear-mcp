@@ -3,8 +3,20 @@ export type Area = (typeof AREAS)[number];
 
 export type LeverKind = 'hard' | 'comfortable';
 export interface MatchHints { repos: string[]; keywords: string[] }
-export interface Lever { id: string; name: string; kind: LeverKind; examples: string[]; match: MatchHints }
-export interface Project { id: string; name: string; area: Area; match: MatchHints }
+/**
+ * The user's WIP (wip.co) project hashtag, without '#', on a project or on a lever whose
+ * work belongs to one product (docs/public-posting.md): WIP todos about that work carry
+ * it. wipHashtagBy says who set it: the user or their agent ('user'), or AimYear's
+ * matching at connect time ('auto'), which never replaces one set by the user.
+ */
+export interface WipTag { wipHashtag?: string; wipHashtagBy?: 'user' | 'auto' }
+export interface Lever extends WipTag { id: string; name: string; kind: LeverKind; examples: string[]; match: MatchHints }
+/**
+ * public: the user marked this project as built in public (docs/public-posting.md, "Work
+ * posts to WIP, automatic with undo"): a session on it that ends with a real summary, or a
+ * move on it, becomes a WIP todo 10 minutes later unless cancelled. Off unless set.
+ */
+export interface Project extends WipTag { id: string; name: string; area: Area; match: MatchHints; public?: boolean }
 
 /**
  * count: a number moves from baseline to target ("15 paying customers").
@@ -42,9 +54,13 @@ export interface Milestone {
   id: string; title: string; kind?: MilestoneKind; metric: string; target: number; due: string; status: MilestoneStatus; createdAt: string; doneAt?: string;
   /** count milestones: recorded values, one per date, oldest first. */
   progress?: { value: number; date: string }[];
+  /** The track this stage belongs to (docs/path-tracks.md); none on a path without tracks. */
+  trackId?: string;
 }
+/** One way to reach the aim. Every track leads to the same aim; reach says how this one alone would get there. */
+export interface Track { id: string; title: string; reach: string }
 export interface Step { id: string; milestoneId: string; title: string; leverId?: string; estimateMin: number; order: number; status: ItemStatus; doneAt?: string }
-export interface Path { milestones: Milestone[]; steps: Step[] }
+export interface Path { milestones: Milestone[]; steps: Step[]; tracks?: Track[] }
 
 /** A recurring weekly commitment: fixed time that is already spoken for. */
 export type CommitmentKind =
@@ -72,6 +88,11 @@ export interface Commitment {
   insideWindowId?: string;
   projectId?: string;
   note?: string;
+  /**
+   * The calendar event this commitment was taken from, as the user's own agent read it
+   * (docs/calendar-sync.md): for a recurring event, the series id. One event is one entry.
+   */
+  calendarEventId?: string;
 }
 
 export type Mode = 'full' | 'focus' | 'off';
@@ -122,6 +143,50 @@ export interface Profile {
   pomodoro: { workMin: number; breakMin: number; longBreakEvery: number; longBreakMin: number; standup: boolean };
   defaultMode: Mode;
   defaultWorkplace: Workplace;
+  /**
+   * Which connected networks get the day's progress post, chosen in the app. Unset means
+   * every connected network. A network that is not connected is ignored.
+   */
+  postTo?: Network[];
+  /**
+   * How much time this person records and hears about (docs/moves.md). time: sessions with
+   * minutes, plus moves. moves: no timer, no minutes stored. quiet: the record is kept, but
+   * what AimYear says uses words and days, never minutes or percentages. Unset is time.
+   */
+  tracking?: Tracking;
+  /** Days a week this person wants to move toward the aim, 1 to 7. Unset is 4. */
+  weeklyTarget?: number;
+  /**
+   * The weekly review email on Sunday at 19:00 local (docs/weekly-review.md, Pro). Unset
+   * is on; the one-click unsubscribe link sets it to false.
+   */
+  weeklyReviewEmail?: boolean;
+}
+
+export const TRACKINGS = ['time', 'moves', 'quiet'] as const;
+export type Tracking = (typeof TRACKINGS)[number];
+
+/**
+ * One action toward the aim with no duration ("fixed the signup button text"), at
+ * users/{uid}/moves/{id}. Classified like a session; `date` is the local day it counts for.
+ */
+export interface Move {
+  id: string;
+  date: string;
+  /** When it was recorded, or the time the user gave for a past move. */
+  at: string;
+  /** What changed, in the user's words. */
+  task: string;
+  area: Area;
+  projectId?: string;
+  leverId?: string;
+  stepId?: string;
+  itemId?: string;
+  classification: Classification;
+  unclassified?: boolean;
+  source: Source;
+  agent?: string;
+  createdAt: string;
 }
 
 export type Direction = 'up' | 'down';
@@ -145,7 +210,15 @@ export interface Session {
   end?: string;
   source: Source;
   clientSessionId?: string;
+  /** The attention weight now (docs/apps.md, "Two timers at once"). */
   weight: number;
+  /**
+   * Earlier weights, oldest first: each held from the previous entry's `until` (or the
+   * start) until its own `until`; `weight` holds after the last one. Written when attention
+   * is switched from a moment on (split_attention from_now, the app's switch); a change for
+   * the whole session clears it.
+   */
+  weightHistory?: { until: string; weight: number }[];
   exclusive?: boolean;
   workplace: Workplace;
   area: Area;
@@ -165,11 +238,22 @@ export interface Session {
   /** Closed by the server because the timer was forgotten, not by the user. */
   autoClosed?: boolean;
   /**
+   * Who started or logged it: "app" for the AimYear app, else the agent's name (the OAuth
+   * client name, e.g. "Claude Code", "ChatGPT", or one read from the user agent). Absent
+   * on sessions recorded before 0.9.
+   */
+  agent?: string;
+  /**
    * Every stop that reached the server for this session, in arrival order. Two devices
    * can stop the same session (a phone offline at 14:05, a Mac at 14:20): the earliest
    * end wins, done wins over any other outcome, the first summary stays.
    */
   stops?: Stop[];
+  /**
+   * The calendar event this session was logged from, as the user's own agent read it
+   * (docs/calendar-sync.md). The same event is never logged twice for one user.
+   */
+  calendarEventId?: string;
 }
 
 /** One stop request as it arrived: what the device said and when the server heard it. */
@@ -203,10 +287,23 @@ export type Verdict = 'ok' | 'stop' | 'plan_first';
 
 export interface Device {
   token: string;
-  platform: 'ios' | 'android' | 'macos' | 'web';
+  platform: 'ios' | 'android' | 'macos' | 'windows' | 'web';
   lastSeen: string;
   foregroundAt?: string;
   label?: string;
+  /**
+   * iPhone, iOS 17.2+: ActivityKit's push-to-start token, so the server can start the
+   * running-timer Live Activity while the app is closed (docs/notifications.md). src/live.ts.
+   */
+  liveStartToken?: string | null;
+  /** The push token of the Live Activity showing on this iPhone now; updates and ends it. */
+  liveToken?: string | null;
+  /**
+   * When the server last started the Live Activity by push. One start per timer run: set
+   * until no session runs, so a phone that never reported the new activity's token does
+   * not get a second activity for the same timer.
+   */
+  liveStartedAt?: string | null;
 }
 
 /** A reminder the server owes a user at a point in time. Polled by /tick. */
@@ -215,7 +312,12 @@ export interface Pending {
   uid: string;
   blockId: string;
   dueAt: string;
-  kind: 'block_end' | 'break_end' | 'standup';
+  /**
+   * post_offer: the evening draft of the day's progress post, with a Post action (Pro).
+   * weekly_review: the weekly review email, Sunday 19:00 local (Pro). auto_post: an
+   * automatic WIP todo whose 10 minutes of undo are over (autoPostId). blockId is '' for these.
+   */
+  kind: 'block_end' | 'break_end' | 'standup' | 'post_offer' | 'weekly_review' | 'auto_post';
   workplace: Workplace;
   minutes: number;
   breakMin: number;
@@ -223,4 +325,150 @@ export interface Pending {
   elapsedMin?: number;
   /** The last reminder this timer will send: it looks forgotten. */
   final?: boolean;
+  /** post_offer: the local day the post is about. weekly_review: the Monday of the week it reviews. */
+  date?: string;
+  /** auto_post: the AutoPost to send. */
+  autoPostId?: string;
+}
+
+/**
+ * The timer's own reminders (stand-up, stop, break over): what every device gets, and the
+ * only kinds a desktop app's poll may claim. The evening post offer and the weekly review
+ * email are sent by /tick alone.
+ */
+export const TIMER_REMINDERS: readonly Pending['kind'][] = ['block_end', 'break_end', 'standup'];
+
+/**
+ * One week's review email, at users/{uid}/weekly_reviews/{monday}. Claimed in a
+ * transaction before the email goes out, so a retried tick never sends a week twice.
+ */
+export interface WeeklyReviewRecord {
+  /** The Monday of the week, YYYY-MM-DD in the person's timezone. */
+  week: string;
+  /**
+   * sending: claimed, the email is on its way (or the server died mid-way: it is never
+   * sent again, a missed review is better than a double one). failed: SES refused it,
+   * a later tick on the same Sunday may try again.
+   */
+  status: 'sending' | 'sent' | 'failed';
+  attemptAt: string;
+  sentAt?: string;
+  messageId?: string;
+  error?: string;
+}
+
+/**
+ * A reminder ready for a desktop app to show, at desktop_reminders/{id}. /tick (or the
+ * pull itself) turns a due desktop Pending into one; POST /desktop/reminders takes it.
+ */
+export interface DesktopReminder {
+  id: string;
+  uid: string;
+  kind: Pending['kind'];
+  title: string;
+  body: string;
+  blockId: string;
+  dueAt: string;
+  createdAt: string;
+  /** The stand-up offers Break (stop the timer for a break) and Snooze (ask again later). */
+  actions: ('break' | 'snooze')[];
+}
+
+// ---------- posting progress in public (docs/public-posting.md) ----------
+
+export const NETWORKS = ['wip', 'bluesky'] as const;
+export type Network = (typeof NETWORKS)[number];
+
+/** AES-256-GCM output, base64. The plaintext is the network's credentials as JSON. */
+export interface SealedSecret { v: 1; iv: string; tag: string; data: string }
+
+/**
+ * One connected network, at users/{uid}/social/{network}. `secret` is the only place
+ * the credentials live, sealed; nothing else in the doc is secret.
+ */
+export interface SocialAccount {
+  network: Network;
+  /** The public account name: WIP username, Bluesky handle. */
+  handle: string;
+  connectedAt: string;
+  secret: SealedSecret;
+}
+
+/**
+ * The post AimYear made (or is making) for one day on one network, at
+ * users/{uid}/posts/{date}_{network}. Its id tells AimYear's own posts apart from the
+ * ones the user wrote on the site, and its status makes a retry post nothing twice.
+ */
+export interface PostRecord {
+  id: string;
+  date: string;
+  network: Network;
+  /** posting: claimed, the network call is under way (or crashed mid-way). */
+  status: 'posting' | 'posted' | 'failed';
+  text: string;
+  attemptAt: string;
+  /** The network's id: WIP todo id, Bluesky at:// uri. */
+  postId?: string;
+  url?: string;
+  postedAt?: string;
+  error?: string;
+  /**
+   * An automatic WIP todo about one project's work (AutoPost), not the day's post. The
+   * "already posted today" check never takes it for the user's own, and the evening
+   * draft leaves its project out of WIP.
+   */
+  auto?: boolean;
+  projectId?: string;
+}
+
+/**
+ * One automatic WIP todo about work on a public project (docs/public-posting.md, "Work posts
+ * to WIP, automatic with undo"), at users/{uid}/auto_posts/{id}.
+ *
+ *  - queued: waits for postAt (10 minutes after the work ended); the push to every device
+ *    has Cancel and Edit. A pending doc (kind auto_post) brings it to /tick.
+ *  - posting: claimed by one sender (a tick, or an Edit that posts at once). A sender that
+ *    died here leaves it so: never posted twice, at worst not at all.
+ *  - posted / cancelled / failed: done. A failed one can still be posted with Edit.
+ *  - skipped: the user already posted on WIP that day themselves (docs/public-posting.md,
+ *    "No double posts"), so AimYear did not.
+ *  - offered: the summary was too short for an automatic post; the push offered it with a
+ *    Post button instead (the evening offer's mechanism), and nothing goes out without it.
+ *  - waiting: the work was stopped from the app, where no agent is present. Nothing goes out
+ *    by itself: the user's agent is asked for the text (post_waiting on its next answers),
+ *    and edit_auto_post posts it. Not written by the evening, the work is in the evening
+ *    draft instead, and the todo is cancelled once the day's WIP post goes out.
+ */
+export interface AutoPost {
+  id: string;
+  /** The local day of the work it is about. */
+  date: string;
+  projectId: string;
+  /** The project's name and WIP hashtag (without '#') when it was queued. */
+  project: string;
+  hashtag: string | null;
+  /** What goes to WIP, hashtag included. */
+  text: string;
+  /** The task the work was on, for joining: the same plan item, path step or task title. */
+  task: string;
+  itemId?: string;
+  stepId?: string;
+  /** The sessions and moves it is about. One session or move is in at most one AutoPost. */
+  sessionIds: string[];
+  moveIds: string[];
+  /** When the latest of that work ended. */
+  endedAt: string;
+  postAt: string;
+  state: 'queued' | 'posting' | 'posted' | 'cancelled' | 'failed' | 'offered' | 'skipped' | 'waiting';
+  /** Where the text came from: the session summary or move, the agent's wip_text, or the user's Edit. */
+  textBy: 'summary' | 'agent' | 'user';
+  /** Send attempts so far; a tick retries a failed send a few times. */
+  attempts?: number;
+  createdAt: string;
+  updatedAt: string;
+  postId?: string;
+  url?: string;
+  postedAt?: string;
+  cancelledAt?: string;
+  error?: string;
 }

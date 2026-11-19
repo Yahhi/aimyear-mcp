@@ -1,5 +1,5 @@
 import { DEFAULT_PROFILE, plainOp, type Tx } from '../src/store.js';
-import type { AppliedOp, Block, Commitment, Day, Device, Goal, Mode, Path, Pending, Profile, Routine, Session } from '../src/types.js';
+import type { AppliedOp, Block, Commitment, Day, Device, Goal, Mode, Move, Path, Network, Pending, PostRecord, Profile, Routine, Session, SocialAccount, WeeklyReviewRecord, AutoPost } from '../src/types.js';
 
 /** The Store's interface kept in memory, so service logic can be tested without Firestore. */
 export class FakeStore {
@@ -11,10 +11,15 @@ export class FakeStore {
   routines: Routine[] = [];
   days = new Map<string, Day>();
   sessions = new Map<string, Session>();
+  moves = new Map<string, Move>();
   blocks = new Map<string, Block>();
   devices = new Map<string, Device>();
   pendings = new Map<string, Pending>();
   ops = new Map<string, AppliedOp>();
+  social = new Map<Network, SocialAccount>();
+  posts = new Map<string, PostRecord>();
+  weeklyReviews = new Map<string, WeeklyReviewRecord>();
+  autoPosts = new Map<string, AutoPost>();
   /** Every write that reached the store (sessions, ops, path), so a test can assert "nothing written". */
   writes = 0;
 
@@ -55,15 +60,55 @@ export class FakeStore {
   async getDaysInRange(from: string, to: string) { return [...this.days.values()].filter(d => d.date >= from && d.date <= to).map(d => structuredClone(d)); }
   async saveSession(s: Session) { this.sessions.set(s.id, structuredClone(s)); this.writes++; }
   async getSession(id: string) { const s = this.sessions.get(id); return s ? structuredClone(s) : null; }
+  async findSessionByCalendarEvent(eventId: string) { const s = [...this.sessions.values()].find(x => x.calendarEventId === eventId); return s ? structuredClone(s) : null; }
   async deleteSession(id: string) { this.sessions.delete(id); this.writes++; }
   async getSessionsOverlapping(fromIso: string, toIso: string) {
     return [...this.sessions.values()].filter(s => s.start < toIso && (s.end ?? '9999') > fromIso).map(s => structuredClone(s));
   }
+  async saveMove(m: Move) { this.moves.set(m.id, structuredClone(m)); this.writes++; }
+  async getMove(id: string) { const m = this.moves.get(id); return m ? structuredClone(m) : null; }
+  async deleteMove(id: string) { this.moves.delete(id); this.writes++; }
+  async getMovesInRange(from: string, to: string) { return [...this.moves.values()].filter(m => m.date >= from && m.date <= to).map(m => structuredClone(m)); }
   async getRunningSessions() { return [...this.sessions.values()].filter(s => !s.end).map(s => structuredClone(s)); }
-  async saveDevice(d: Device) { this.devices.set(d.token, d); }
+  // A merge, like Firestore set(..., { merge: true }).
+  async saveDevice(d: Pick<Device, 'token'> & Partial<Device>) { this.devices.set(d.token, { ...this.devices.get(d.token), ...d } as Device); }
   async getDevices() { return [...this.devices.values()]; }
   async removeDevice(t: string) { this.devices.delete(t); }
+  async getPending(id: string) { const p = this.pendings.get(id); return p ? structuredClone(p) : null; }
   async savePending(p: Pending) { this.pendings.set(p.id, p); }
+  async removePending(id: string) { this.pendings.delete(id); }
+  async getSocialAccounts() { return [...this.social.values()].map(a => structuredClone(a)); }
+  async getSocialAccount(n: Network) { const a = this.social.get(n); return a ? structuredClone(a) : null; }
+  async saveSocialAccount(a: SocialAccount) { this.social.set(a.network, structuredClone(a)); }
+  async deleteSocialAccount(n: Network) { this.social.delete(n); }
+  async getPostRecord(id: string) { const r = this.posts.get(id); return r ? structuredClone(r) : null; }
+  async savePostRecord(r: PostRecord) { this.posts.set(r.id, structuredClone(r)); }
+  async getPostRecordsOn(date: string) { return [...this.posts.values()].filter(r => r.date === date).map(r => structuredClone(r)); }
+  async claimPost(r: PostRecord, staleMs: number) {
+    const cur = this.posts.get(r.id);
+    if (cur && (cur.status === 'posted' || (cur.status === 'posting' && Date.parse(r.attemptAt) - Date.parse(cur.attemptAt) < staleMs))) return { claimed: false as const, existing: structuredClone(cur) };
+    this.posts.set(r.id, structuredClone(r));
+    return { claimed: true as const };
+  }
+  async claimWeeklyReview(r: WeeklyReviewRecord) {
+    const cur = this.weeklyReviews.get(r.week);
+    if (cur && cur.status !== 'failed') return { claimed: false as const, existing: structuredClone(cur) };
+    this.weeklyReviews.set(r.week, structuredClone(r));
+    return { claimed: true as const };
+  }
+  async saveWeeklyReview(r: WeeklyReviewRecord) { this.weeklyReviews.set(r.week, structuredClone(r)); }
+  async getAutoPost(id: string) { const a = this.autoPosts.get(id); return a ? structuredClone(a) : null; }
+  async saveAutoPost(a: AutoPost) { this.autoPosts.set(a.id, structuredClone(a)); }
+  async getAutoPostsOn(date: string) { return [...this.autoPosts.values()].filter(a => a.date === date).map(a => structuredClone(a)); }
+  async findAutoPostFor(kind: 'session' | 'move', id: string) { const a = [...this.autoPosts.values()].find(x => (kind === 'session' ? x.sessionIds : x.moveIds).includes(id)); return a ? structuredClone(a) : null; }
+  async updateAutoPost(id: string, fn: (cur: AutoPost) => AutoPost | null) {
+    const cur = this.autoPosts.get(id);
+    if (!cur) return { applied: false, current: null };
+    const next = fn(structuredClone(cur));
+    if (!next) return { applied: false, current: structuredClone(cur) };
+    this.autoPosts.set(id, structuredClone(next));
+    return { applied: true, current: structuredClone(next) };
+  }
   async clearPendings(blockId: string) { for (const [k, p] of this.pendings) if (p.blockId === blockId) this.pendings.delete(k); }
   async saveBlock(b: Block) { this.blocks.set(b.id, structuredClone(b)); }
   async getRunningBlock() { return [...this.blocks.values()].find(b => !b.ended && !b.cancelled) ?? null; }

@@ -15,6 +15,9 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `tools/list` | public | tool names, descriptions and schemas; public in the README |
 | `prompts/list` | public | prompt names and descriptions; public in the README |
 | `prompts/get` | public | fixed prompt text, the same for everyone |
+| `resources/list` | public | resource names; only the public /aim skill is listed |
+| `resources/templates/list` | public | resource templates; none are private |
+| `resources/read` | public | the /aim skill text, the same for everyone and public in the repo |
 | `tools/call` | auth | every tool reads or writes one person's private aim, plan, timer or history |
 
 ## Tools
@@ -29,6 +32,7 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `set_projects` | auth | changes the signed-in person's data |
 | `get_path` | auth | reads the signed-in person's private data |
 | `set_milestones` | auth | changes the signed-in person's data |
+| `set_tracks` | auth | changes the signed-in person's data |
 | `edit_milestone` | auth | changes the signed-in person's data |
 | `add_steps` | auth | changes the signed-in person's data |
 | `edit_step` | auth | changes the signed-in person's data |
@@ -56,21 +60,36 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `delete_session` | auth | changes the signed-in person's data |
 | `list_sessions` | auth | reads the signed-in person's private data |
 | `find_gaps` | auth | reads the signed-in person's private data |
+| `add_move` | auth | changes the signed-in person's data |
+| `list_moves` | auth | reads the signed-in person's private data |
+| `delete_move` | auth | changes the signed-in person's data |
 | `summarize_day` | auth | reads the signed-in person's private data |
 | `summarize_week` | auth | reads the signed-in person's private data |
 | `find_leaks` | auth | reads the signed-in person's private data |
+| `get_insights` | auth | reads the signed-in person's private data |
 | `get_settings` | auth | reads the signed-in person's private data |
 | `set_settings` | auth | changes the signed-in person's data |
 | `add_device` | auth | changes the signed-in person's data |
 | `list_devices` | auth | reads the signed-in person's private data |
 | `delete_device` | auth | changes the signed-in person's data |
+| `list_agents` | auth | reads which agents are connected to the person's account (never their tokens) |
+| `delete_agent` | auth | disconnects one of the person's own agents |
+| `add_social_account` | auth | stores the person's own WIP or Bluesky login, encrypted |
+| `list_social_accounts` | auth | reads which networks the person connected (never the logins) |
+| `delete_social_account` | auth | deletes the person's saved network login |
+| `get_post_draft` | auth | drafts a post from the person's private record and reads their own feed |
+| `add_post` | auth | posts on the person's own WIP or Bluesky account, at their explicit request |
+| `list_wip_projects` | auth | reads the person's own WIP projects with their saved WIP login |
+| `list_auto_posts` | auth | reads the person's automatic WIP todos (queued, posted, cancelled) |
+| `edit_auto_post` | auth | changes the person's automatic WIP todo and posts it on their own WIP account, at their request |
+| `delete_auto_post` | auth | cancels the person's automatic WIP todo before it posts |
 
 ## HTTP routes
 
 | Route | Access | Why |
 |---|---|---|
 | `GET /health` | public | liveness and version |
-| `POST /mcp` | auth | MCP endpoint; methods marked public in METHODS answer without a token |
+| `POST /mcp` | auth | MCP endpoint (Bearer: OAuth access token, static token or the app's Firebase ID token); methods marked public in METHODS answer without a token |
 | `POST /c/:token/mcp` | auth | legacy connector URL with the token in the path |
 | `GET /mcp` | public | 405: the server is stateless, POST only |
 | `DELETE /mcp` | public | 405: the server is stateless, POST only |
@@ -78,7 +97,22 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `DELETE /c/:token/mcp` | public | 405: the server is stateless, POST only |
 | `GET /now/:token` | auth | the person's running timer, for the menu bar app |
 | `POST /pull/:token` | auth | claims the person's desktop reminders |
-| `POST /tick/:token` | admin | scheduler: delivers due reminders for everyone |
+| `POST /social/post` | auth | the Post action of the evening offer: posts the person's day at their explicit request (Bearer token) |
+| `GET /social/auto-posts` | auth | the person's automatic WIP todos of a day, for the app (Bearer token) |
+| `POST /social/auto-posts/:id/cancel` | auth | Cancel on the person's automatic WIP todo: it does not post (Bearer token) |
+| `POST /social/auto-posts/:id/edit` | auth | Edit on the person's automatic WIP todo: their text, posted at once on their WIP (Bearer token, Pro) |
+| `POST /tick/:token` | admin | scheduler: delivers due reminders and automatic WIP todos for everyone |
+| `POST /desktop/reminders` | auth | a desktop app takes the person's due reminders (Bearer token) |
+| `POST /desktop/reminders/action` | auth | Break or Snooze on the person's stand-up reminder (Bearer token) |
+| `POST /devices/live-activity` | auth | the person's iPhone reports its Live Activity tokens for the running timer (Bearer token, Pro) |
+| `POST /account/open-day` | auth | completes the person's today before the app reads it: routines in the plan, Pro status mirrored (Bearer token) |
+| `GET /account/agents` | auth | the agents connected to the person's account (Bearer token) |
+| `DELETE /account/agents/:clientId` | auth | disconnects one of the person's agents (Bearer token) |
+| `GET /account/export` | auth | everything the server keeps about the person, as JSON (Bearer token) |
+| `POST /account/delete` | auth | deletes the person's account and data; the app's Firebase sign-in only, with {"confirm": true} |
+| `GET /email/unsubscribe` | public | the weekly review email's unsubscribe link: a confirm page; the signed token (HMAC of the uid) is the proof, no sign-in |
+| `POST /email/unsubscribe` | public | one-click unsubscribe (RFC 8058): turns off the weekly review email of the uid in the signed token, nothing else |
+| `POST /revenuecat/webhook` | admin | RevenueCat subscription events; the Authorization header must equal REVENUECAT_WEBHOOK_AUTH |
 | `GET /.well-known/oauth-authorization-server` | public | OAuth discovery (RFC 8414) |
 | `GET /.well-known/oauth-protected-resource` | public | OAuth discovery (RFC 9728) |
 | `GET /.well-known/oauth-protected-resource/mcp` | public | OAuth discovery for the /mcp resource |

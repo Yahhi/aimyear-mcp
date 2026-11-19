@@ -2,7 +2,8 @@ import { initializeApp, cert, getApps, applicationDefault } from 'firebase-admin
 import { getFirestore, Firestore, FieldValue } from 'firebase-admin/firestore';
 import { readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import type { Goal, Path, Profile, Day, Block, Session, Mode, Workplace, Commitment, Device, Pending, Direction, Routine, AppliedOp } from './types.js';
+import { TIMER_REMINDERS } from './types.js';
+import type { Goal, Path, Profile, Day, Block, Session, Move, Mode, Workplace, Commitment, Device, Pending, Direction, Routine, AppliedOp, Network, SocialAccount, PostRecord, DesktopReminder, WeeklyReviewRecord, AutoPost } from './types.js';
 
 let dbSingleton: Firestore | null = null;
 export function initFirestore(): Firestore {
@@ -26,6 +27,8 @@ export const newId = () => randomUUID().slice(0, 12);
 
 /** Reminders live in one top-level collection so /tick needs a single-field index only. */
 export const PENDING = 'pending_notifications';
+/** Reminders ready for a desktop app to pull (POST /desktop/reminders), one top-level collection keyed by id. */
+export const DESKTOP_REMINDERS = 'desktop_reminders';
 
 /** Cross-user helpers used by the /tick endpoint. */
 export class Notifications {
@@ -52,19 +55,38 @@ export class Notifications {
   }
 
   /**
-   * Due reminders for one user's desktop, claimed and removed so they fire once.
-   * Filters in memory on purpose: uid + workplace + dueAt would need a composite
-   * index, and a missing index fails the whole endpoint silently.
+   * One user's due timer reminders (any workplace: every device gets them), claimed and
+   * removed so they fire once. Not the evening post offer or the weekly review email:
+   * /tick sends those (TIMER_REMINDERS).
+   * Filters in memory on purpose: uid + dueAt would need a composite index, and a
+   * missing index fails the whole endpoint silently.
    */
   async claimDesktop(uid: string, nowIso: string): Promise<Pending[]> {
     const snap = await this.db.collection(PENDING).where('dueAt', '<=', nowIso).limit(100).get();
     const mine = snap.docs.filter(d => {
       const p = d.data() as Pending;
-      return p.uid === uid && p.workplace === 'desktop';
+      return p.uid === uid && TIMER_REMINDERS.includes(p.kind);
     });
     const rows: Pending[] = [];
     for (const d of mine) if (await this.claim(d.id)) rows.push(d.data() as Pending);
     return rows;
+  }
+  /** Desktop reminders nobody pulled in time (no desktop app open): too old to say, so gone. */
+  async dropStaleDesktopReminders(beforeIso: string, limit = 200): Promise<number> {
+    const snap = await this.db.collection(DESKTOP_REMINDERS).where('dueAt', '<', beforeIso).limit(limit).get();
+    await Promise.all(snap.docs.map(d => d.ref.delete()));
+    return snap.size;
+  }
+  async saveDesktopReminder(r: DesktopReminder) { await this.db.collection(DESKTOP_REMINDERS).doc(r.id).set(r); }
+  /** Takes every reminder waiting for this user's desktop: each one is handed out once. */
+  async takeDesktopReminders(uid: string): Promise<DesktopReminder[]> {
+    const snap = await this.db.collection(DESKTOP_REMINDERS).where('uid', '==', uid).limit(50).get();
+    const out: DesktopReminder[] = [];
+    for (const d of snap.docs) {
+      const got = await this.db.runTransaction(async tx => { const x = await tx.get(d.ref); if (!x.exists) return false; tx.delete(d.ref); return true; });
+      if (got) out.push(d.data() as DesktopReminder);
+    }
+    return out;
   }
   async devicesOf(uid: string): Promise<Device[]> {
     const snap = await this.db.collection('users').doc(uid).collection('devices').get();
@@ -171,6 +193,7 @@ export class Store {
   private aimDoc(name: 'goal' | 'path' | 'profile' | 'commitments' | 'routines') { return this.user().collection('aim').doc(name); }
   private days() { return this.user().collection('days'); }
   private sessions() { return this.user().collection('sessions'); }
+  private moves() { return this.user().collection('moves'); }
   private blocks() { return this.user().collection('blocks'); }
   private ops() { return this.user().collection('ops'); }
 
@@ -262,6 +285,11 @@ export class Store {
     return snap.exists ? (snap.data() as Session) : null;
   }
   async deleteSession(id: string) { await this.sessions().doc(id).delete(); }
+  /** The session logged from this calendar event, if any (docs/calendar-sync.md). */
+  async findSessionByCalendarEvent(eventId: string): Promise<Session | null> {
+    const snap = await this.sessions().where('calendarEventId', '==', eventId).limit(1).get();
+    return snap.empty ? null : (snap.docs[0].data() as Session);
+  }
   /** Sessions overlapping [fromIso, toIso). Running sessions (no end) count as overlapping if they started before toIso. */
   async getSessionsOverlapping(fromIso: string, toIso: string): Promise<Session[]> {
     // Firestore can only range on one field: take everything started before toIso and filter in memory.
@@ -269,6 +297,18 @@ export class Store {
     const lowerBound = new Date(new Date(fromIso).getTime() - 2 * 86400000).toISOString();
     const snap = await this.sessions().where('start', '>=', lowerBound).where('start', '<', toIso).get();
     return snap.docs.map(d => d.data() as Session).filter(s => (s.end ?? '9999') > fromIso);
+  }
+  // --- moves (docs/moves.md) ---
+  async saveMove(m: Move) { await this.moves().doc(m.id).set(m); }
+  async getMove(id: string): Promise<Move | null> {
+    const snap = await this.moves().doc(id).get();
+    return snap.exists ? (snap.data() as Move) : null;
+  }
+  async deleteMove(id: string) { await this.moves().doc(id).delete(); }
+  /** Moves whose local day is within [from, to], both YYYY-MM-DD. */
+  async getMovesInRange(from: string, to: string): Promise<Move[]> {
+    const snap = await this.moves().where('date', '>=', from).where('date', '<=', to).get();
+    return snap.docs.map(d => d.data() as Move);
   }
   async getRunningSessions(): Promise<Session[]> {
     const lowerBound = new Date(Date.now() - 2 * 86400000).toISOString();
@@ -278,7 +318,8 @@ export class Store {
 
   // --- devices ---
   private devices() { return this.user().collection('devices'); }
-  async saveDevice(d: Device) { await this.devices().doc(d.token.slice(-40)).set(d, { merge: true }); }
+  /** A merge: only the fields given are written (src/live.ts, DevicePatch). */
+  async saveDevice(d: Pick<Device, 'token'> & Partial<Device>) { await this.devices().doc(d.token.slice(-40)).set(d, { merge: true }); }
   async getDevices(): Promise<Device[]> {
     const snap = await this.devices().get();
     return snap.docs.map(x => x.data() as Device).filter(x => !!x.token);
@@ -286,11 +327,107 @@ export class Store {
   async removeDevice(token: string) { await this.devices().doc(token.slice(-40)).delete(); }
 
   // --- pending reminders ---
+  async getPending(id: string): Promise<Pending | null> {
+    const snap = await this.db.collection(PENDING).doc(id).get();
+    return snap.exists ? (snap.data() as Pending) : null;
+  }
   async savePending(p: Pending) { await this.db.collection(PENDING).doc(p.id).set(p); }
+  async removePending(id: string) { await this.db.collection(PENDING).doc(id).delete(); }
   async clearPendings(blockId: string) {
     const snap = await this.db.collection(PENDING).where('uid', '==', this.uid).where('blockId', '==', blockId).get();
     await Promise.all(snap.docs.map(d => d.ref.delete()));
   }
+
+  // --- social accounts and the posts AimYear made ---
+  private social() { return this.user().collection('social'); }
+  private posts() { return this.user().collection('posts'); }
+  async getSocialAccounts(): Promise<SocialAccount[]> {
+    const snap = await this.social().get();
+    return snap.docs.map(d => d.data() as SocialAccount);
+  }
+  async getSocialAccount(network: Network): Promise<SocialAccount | null> {
+    const snap = await this.social().doc(network).get();
+    return snap.exists ? (snap.data() as SocialAccount) : null;
+  }
+  async saveSocialAccount(a: SocialAccount) { await this.social().doc(a.network).set(a); }
+  async deleteSocialAccount(network: Network) { await this.social().doc(network).delete(); }
+  async getPostRecord(id: string): Promise<PostRecord | null> {
+    const snap = await this.posts().doc(id).get();
+    return snap.exists ? (snap.data() as PostRecord) : null;
+  }
+  async savePostRecord(r: PostRecord) { await this.posts().doc(r.id).set(r); }
+  /** Every post record of one local day, on any network (a WIP day has one per project). */
+  async getPostRecordsOn(date: string): Promise<PostRecord[]> {
+    return (await this.posts().where('date', '==', date).get()).docs.map(d => d.data() as PostRecord);
+  }
+  /**
+   * Takes the right to post for one day and network, in a transaction. It is refused when
+   * the post is already made, or when another attempt claimed it less than staleMs ago;
+   * a failed or long-stale attempt can be claimed again.
+   */
+  async claimPost(r: PostRecord, staleMs: number): Promise<{ claimed: true } | { claimed: false; existing: PostRecord }> {
+    const ref = this.posts().doc(r.id);
+    return this.db.runTransaction(async tx => {
+      const snap = await tx.get(ref);
+      const cur = snap.exists ? (snap.data() as PostRecord) : null;
+      if (cur && (cur.status === 'posted' || (cur.status === 'posting' && Date.parse(r.attemptAt) - Date.parse(cur.attemptAt) < staleMs))) return { claimed: false as const, existing: cur };
+      tx.set(ref, r);
+      return { claimed: true as const };
+    });
+  }
+
+  // --- automatic WIP todos (docs/public-posting.md, "Work posts to WIP, automatic with undo") ---
+  private autoPosts() { return this.user().collection('auto_posts'); }
+  async getAutoPost(id: string): Promise<AutoPost | null> {
+    const snap = await this.autoPosts().doc(id).get();
+    return snap.exists ? (snap.data() as AutoPost) : null;
+  }
+  async saveAutoPost(a: AutoPost) { await this.autoPosts().doc(a.id).set(a); }
+  /** Every automatic todo about work on one local day. */
+  async getAutoPostsOn(date: string): Promise<AutoPost[]> {
+    return (await this.autoPosts().where('date', '==', date).get()).docs.map(d => d.data() as AutoPost);
+  }
+  /** The automatic todo a session or move is already in, if any: one piece of work, at most one todo. */
+  async findAutoPostFor(kind: 'session' | 'move', id: string): Promise<AutoPost | null> {
+    const snap = await this.autoPosts().where(kind === 'session' ? 'sessionIds' : 'moveIds', 'array-contains', id).limit(1).get();
+    return snap.empty ? null : (snap.docs[0].data() as AutoPost);
+  }
+  /**
+   * Changes one automatic todo in a transaction: `fn` gets it as stored and returns the new
+   * version, or null to leave it. The claim before a send, a cancel and a join all go
+   * through here, so a tick, a tap on Cancel and an Edit never both win.
+   */
+  async updateAutoPost(id: string, fn: (cur: AutoPost) => AutoPost | null): Promise<{ applied: boolean; current: AutoPost | null }> {
+    const ref = this.autoPosts().doc(id);
+    return this.db.runTransaction(async tx => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) return { applied: false, current: null };
+      const cur = snap.data() as AutoPost;
+      const next = fn(structuredClone(cur));
+      if (!next) return { applied: false, current: cur };
+      tx.set(ref, next);
+      return { applied: true, current: next };
+    });
+  }
+
+  // --- the weekly review email (docs/weekly-review.md) ---
+  private weeklyReviews() { return this.user().collection('weekly_reviews'); }
+  /**
+   * Takes the right to send one week's review, in a transaction. Refused when that week
+   * was sent, or is being sent (or died mid-way: never sent twice); a failed attempt can
+   * be claimed again.
+   */
+  async claimWeeklyReview(r: WeeklyReviewRecord): Promise<{ claimed: true } | { claimed: false; existing: WeeklyReviewRecord }> {
+    const ref = this.weeklyReviews().doc(r.week);
+    return this.db.runTransaction(async tx => {
+      const snap = await tx.get(ref);
+      const cur = snap.exists ? (snap.data() as WeeklyReviewRecord) : null;
+      if (cur && cur.status !== 'failed') return { claimed: false as const, existing: cur };
+      tx.set(ref, r);
+      return { claimed: true as const };
+    });
+  }
+  async saveWeeklyReview(r: WeeklyReviewRecord) { await this.weeklyReviews().doc(r.week).set(r); }
 
   // --- blocks ---
   async saveBlock(b: Block) { await this.blocks().doc(b.id).set(b); }

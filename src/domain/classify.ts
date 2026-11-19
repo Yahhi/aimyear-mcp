@@ -1,4 +1,4 @@
-import type { Area, Classification, Day, Goal, Lever, Project, Verdict } from '../types.js';
+import type { Area, Classification, Day, Goal, Lever, PlanItem, Project, Verdict } from '../types.js';
 
 export interface ClassInput { area: Area; projectId?: string; leverId?: string; stepId?: string; itemId?: string; task: string }
 export interface ClassResult { classification: Classification; leverId?: string; projectId?: string; unclassified: boolean; matchedBy: string }
@@ -17,9 +17,31 @@ export function leverFor(work: { title: string; leverId?: string; stepId?: strin
   return (id ? goal.levers.find(l => l.id === id) : undefined) ?? goal.levers.find(l => matches(work.title, l.match, l.name));
 }
 
+/** The plan item work is linked to by item id, when it is not the main step (that one matches as main_step). */
+export function linkedPlanItem(itemId: string | undefined, day: Day | null): PlanItem | undefined {
+  return itemId ? day?.plan.find(p => p.id === itemId && !p.isMainStep) : undefined;
+}
+
+/**
+ * Work linked to a plan item (not the main step) takes the item's own area, project, lever and
+ * step for whatever the caller left out: an explicit field wins. Before 0.12.2 only the main
+ * step's item id counted, so a session on any other item fell through to "nothing matched".
+ */
+export function withPlanItem<T extends { area?: Area; projectId?: string; leverId?: string; stepId?: string; itemId?: string }>(input: T, day: Day | null): T & { area: Area } {
+  const item = linkedPlanItem(input.itemId, day);
+  return {
+    ...input, area: input.area ?? item?.area ?? 'work',
+    projectId: input.projectId ?? item?.projectId, leverId: input.leverId ?? item?.leverId, stepId: input.stepId ?? item?.stepId,
+  };
+}
+
 /** Decide what a session is, from explicit ids first, then from match hints on the task text. */
-export function classify(input: ClassInput, goal: Goal | null, day: Day | null): ClassResult {
+export function classify(raw: ClassInput, goal: Goal | null, day: Day | null): ClassResult {
   const mainItem = day?.plan.find(p => p.isMainStep);
+  const input = withPlanItem(raw, day);
+  // Say so when the deciding field is the linked plan item's own.
+  const item = linkedPlanItem(input.itemId, day);
+  const by = (k: 'area' | 'projectId' | 'leverId' | 'stepId', label: string) => item && item[k] !== undefined && item[k] === input[k] ? `plan item (${label})` : label;
   // Accept the main item's plan id or step id in either field: get_current (now get_now) used to
   // return the plan item id as main_step.id, and agents passed it as stepId.
   if (mainItem) {
@@ -30,7 +52,7 @@ export function classify(input: ClassInput, goal: Goal | null, day: Day | null):
 
   if (input.leverId && goal) {
     const lever = goal.levers.find(l => l.id === input.leverId);
-    if (lever) return { classification: lever.kind === 'hard' ? 'goal_hard' : 'goal_comfortable', leverId: lever.id, unclassified: false, matchedBy: 'lever id' };
+    if (lever) return { classification: lever.kind === 'hard' ? 'goal_hard' : 'goal_comfortable', leverId: lever.id, projectId: input.projectId, unclassified: false, matchedBy: by('leverId', 'lever id') };
   }
 
   // A project says WHICH product; a lever says WHAT KIND of work. They are
@@ -45,17 +67,17 @@ export function classify(input: ClassInput, goal: Goal | null, day: Day | null):
     };
   }
 
-  if (input.stepId) return { classification: 'goal_comfortable', unclassified: false, matchedBy: 'step id (no lever)' };
+  if (input.stepId) return { classification: 'goal_comfortable', projectId: input.projectId, unclassified: false, matchedBy: by('stepId', 'step id (no lever)') };
   if (input.projectId && input.projectId !== 'goal') {
     const proj = goal?.projects.find(p => p.id === input.projectId);
-    return { classification: fromProject(proj?.area ?? input.area), projectId: input.projectId, unclassified: false, matchedBy: `project id${proj ? ` (${proj.area})` : ''}` };
+    return { classification: fromProject(proj?.area ?? input.area), projectId: input.projectId, unclassified: false, matchedBy: by('projectId', `project id${proj ? ` (${proj.area})` : ''}`) };
   }
 
   if (goal) {
     const project: Project | undefined = goal.projects.find(p => matches(input.task, p.match, p.name));
     if (project) return { classification: fromProject(project.area), projectId: project.id, unclassified: false, matchedBy: `project keyword "${project.name}" (${project.area})` };
   }
-  if (input.area !== 'work') return { classification: 'life', unclassified: false, matchedBy: 'area' };
+  if (input.area !== 'work') return { classification: 'life', unclassified: false, matchedBy: by('area', 'area') };
   return { classification: 'other_project', unclassified: true, matchedBy: 'nothing matched; treated as other work' };
 }
 
