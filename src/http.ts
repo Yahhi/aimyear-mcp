@@ -33,16 +33,17 @@ import { pro as realPro, type createPro } from './pro.js';
 import { initFirestore } from './store.js';
 import { realReviewDeps, type ReviewDeps } from './review/deliver.js';
 import { unsubscribeKey, unsubscribePage, verifyUnsubscribeToken } from './review/unsubscribe.js';
+import { checkoutConfig, checkoutCsp, checkoutInfoPage, checkoutPage, newNonce, PLAIN_CSP, proOffer, verifyCheckoutToken, type CheckoutConfig, type ProOffer } from './checkout.js';
 
 /** Who is calling, for the record: the agent's name on sessions, and the OAuth client id. */
-export interface Caller { agent?: () => Promise<string | undefined>; clientId?: string; accountBackend?: AccountBackend; storeFor?: (uid: string) => Store; sendLive?: SendLive }
+export interface Caller { agent?: () => Promise<string | undefined>; clientId?: string; accountBackend?: AccountBackend; storeFor?: (uid: string) => Store; sendLive?: SendLive; proOffer?: ProOffer }
 
 export function buildServer(uid: string | null, clientSessionId: string, workplace: Workplace, socialDeps?: SocialDeps, caller: Caller = {}) {
   const server = new McpServer({ name: 'aimyear', version: VERSION }, { instructions: INSTRUCTIONS });
   if (!uid) { registerTools(server, null, null, null); return server; }
   const store = caller.storeFor ? caller.storeFor(uid) : new Store(uid);
   const svc = new AimService(store, clientSessionId, workplace, caller.agent);
-  registerTools(server, svc, new SocialService(store, svc, socialDeps), new AccountService(caller.accountBackend ?? firestoreAccountBackend(), uid, caller.clientId), () => syncLive(store, { send: caller.sendLive }));
+  registerTools(server, svc, new SocialService(store, svc, socialDeps), new AccountService(caller.accountBackend ?? firestoreAccountBackend(), uid, caller.clientId), () => syncLive(store, { send: caller.sendLive }), caller.proOffer);
   return server;
 }
 
@@ -92,10 +93,16 @@ export interface AppOptions {
   unsubscribeKey?: Buffer | null;
   /** Tests capture the Live Activity pushes; production sends them through FCM. */
   sendLive?: SendLive;
+  /** Pro on the web (src/checkout.ts): tests pass their own; production reads the env. null: no web checkout. */
+  checkout?: CheckoutConfig | null;
+  /** The account's email, prefilled in the checkout; production asks Firebase Auth. */
+  emailOf?: (uid: string) => Promise<string | null>;
 }
 
-export function createApp({ tokens, baseUrl, provider, extraOrigins = [], socialDeps, verifyIdToken = realVerify, accountBackend, pro, notifications = () => new Notifications(), webhookAuth = process.env.REVENUECAT_WEBHOOK_AUTH, storeFor = (uid: string) => new Store(uid), reviews, unsubscribeKey: unsubKey = unsubscribeKey(), sendLive }: AppOptions) {
+export function createApp({ tokens, baseUrl, provider, extraOrigins = [], socialDeps, verifyIdToken = realVerify, accountBackend, pro, notifications = () => new Notifications(), webhookAuth = process.env.REVENUECAT_WEBHOOK_AUTH, storeFor = (uid: string) => new Store(uid), reviews, unsubscribeKey: unsubKey = unsubscribeKey(), sendLive, checkout = checkoutConfig(), emailOf }: AppOptions) {
   const accounts = () => accountBackend ?? firestoreAccountBackend();
+  const proCheck = () => pro ?? realPro();
+  const emailFor = emailOf ?? (async (uid: string) => (await accounts().authUser(uid))?.email ?? null);
   let realReviews: ReviewDeps | null = null;
   const reviewDeps = reviews ?? (() => (realReviews ??= realReviewDeps(baseUrl)));
   const resourceUrl = new URL('/mcp', baseUrl);
@@ -179,6 +186,27 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
     } catch (e) { console.error('[unsubscribe] failed', (e as Error).message); unsubPage(res, 500, unsubscribePage('invalid')); }
   });
 
+  // ---- Pro on the web: the signed checkout link (src/checkout.ts) ----
+  // No sign-in: the link is the proof, and it only buys for the uid inside it. The Paddle
+  // purchase reaches RevenueCat through its Paddle integration, so Pro is checked as before.
+  app.get('/pro/checkout', async (req, res) => {
+    const page = (status: number, html: string, csp = PLAIN_CSP) => {
+      res.status(status).set({
+        'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex',
+        'X-Frame-Options': 'DENY', 'Referrer-Policy': 'strict-origin', 'Content-Security-Policy': csp,
+      }).send(html);
+    };
+    if (!checkout) { page(404, checkoutInfoPage('off')); return; }
+    const uid = verifyCheckoutToken(checkout.key, req.query.t, new Date());
+    if (!uid) { page(400, checkoutInfoPage('invalid')); return; }
+    try {
+      if (await proCheck().isPro(uid)) { page(200, checkoutInfoPage('pro')); return; }
+      const email = await emailFor(uid).catch(() => null);
+      const nonce = newNonce();
+      page(200, checkoutPage(checkout, uid, email, nonce), checkoutCsp(checkout.env, nonce));
+    } catch (e) { console.error('[pro/checkout] failed', (e as Error).message); page(500, checkoutInfoPage('invalid')); }
+  });
+
   // ---- MCP ----
   type Who = { uid: string; via: 'oauth' | 'token' | 'firebase'; client: string; clientId?: string; agent: () => Promise<string | undefined> } | null | 'invalid';
   const identify = async (token: string, userAgent?: string): Promise<Who> => {
@@ -223,7 +251,7 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
     }
     const workplace = (req.header('x-aimyear-workplace') as Workplace) ?? 'mobile';
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    const server = buildServer(signedIn?.uid ?? null, signedIn ? `remote:${signedIn.client}` : 'anonymous', workplace, socialDeps, signedIn ? { agent: signedIn.agent, clientId: signedIn.clientId, accountBackend: accounts(), storeFor, sendLive } : {});
+    const server = buildServer(signedIn?.uid ?? null, signedIn ? `remote:${signedIn.client}` : 'anonymous', workplace, socialDeps, signedIn ? { agent: signedIn.agent, clientId: signedIn.clientId, accountBackend: accounts(), storeFor, sendLive, proOffer: proOffer(signedIn.uid, baseUrl, checkout, uid => proCheck().isPro(uid)) } : {});
     instrument(transport, req.body, ctx);
     res.on('close', () => { transport.close().catch(() => {}); server.close().catch(() => {}); });
     await server.connect(transport);

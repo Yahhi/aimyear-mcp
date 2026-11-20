@@ -2,6 +2,13 @@
 
 What changed for agents and apps that use the server. Newest first.
 
+0.14.0: Pro on the web, for people who use AimYear only through their agent (Paddle sandbox
+for now). `get_pro_link` gives a checkout link for the signed-in account, valid for an hour;
+a Pro refusal (`code: pro_required`) over MCP carries it as `pro_link`. The purchase goes
+through RevenueCat (its Paddle integration, the uid in the checkout's custom data), so it is
+the same Pro as the app's. Without the Paddle settings there is no link and the refusals are
+as before.
+
 0.13.4: tool descriptions use the words users say (aim, gym, forgot the timer, what should
 I work on), and every ID parameter names the tool that returns it.
 

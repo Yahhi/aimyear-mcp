@@ -4,6 +4,7 @@ import { AimService, AimError, ProRequiredError } from './service.js';
 import { AREAS, NETWORKS, TRACKINGS } from './types.js';
 import type { SocialService } from './social/service.js';
 import type { AccountService } from './account.js';
+import type { ProOffer } from './checkout.js';
 import { levelOfTool } from './access.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -24,7 +25,7 @@ type Handler = (args: any) => Promise<unknown>;
 type Kind = 'read' | 'write' | 'idempotent' | 'destructive';
 const READ = ['get_goal', 'check_goal_draft', 'get_path', 'next_steps', 'get_commitments', 'get_capacity', 'get_planning_context', 'get_plan', 'get_routines',
   'get_now', 'list_sessions', 'find_gaps', 'summarize_day', 'summarize_week', 'find_leaks', 'get_settings', 'list_devices', 'list_social_accounts', 'get_post_draft', 'list_wip_projects',
-  'get_insights', 'list_agents', 'list_moves', 'list_auto_posts'];
+  'get_insights', 'list_agents', 'list_moves', 'list_auto_posts', 'get_pro_link'];
 // Replaces a whole list or removes something: an earlier value is gone after the call.
 const DESTRUCTIVE = ['set_goal', 'set_levers', 'set_projects', 'set_milestones', 'set_tracks', 'set_commitments', 'set_routines', 'set_plan',
   'delete_step', 'delete_plan_item', 'delete_session', 'delete_move', 'delete_device', 'stop_timer', 'delete_social_account', 'delete_agent', 'delete_auto_post'];
@@ -56,11 +57,11 @@ export const INSTRUCTIONS = `AimYear keeps one person's big aim for the year, th
 
 Names: get_ reads one thing, list_ reads several, find_ looks for problems, set_ replaces a whole list, add_ / edit_ / delete_ change one entry. A session is one piece of work; the timer runs while sessions run. A move (add_move) is one action toward the aim with no duration, for work that had no timer. The weekly target (days a week toward the aim, set_settings weekly_target) is what AimYear leads with, not a daily streak. When a result has quiet_numbers: true, the user chose not to hear minutes or percentages: speak in words, moves and days only.
 
-Typical flow: get_goal (or check_goal_draft → set_goal), get_path (a path can have up to 3 tracks, set_tracks: different ways to the same aim, each with its own current milestone; the main step can come from any of them), get_planning_context → set_plan with one main step (routines from set_routines are added to each day's plan by the server), start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Hard first: the first step of each stage and each day's main step should be on a hard lever (the work the user puts off: outreach, applications, selling, publishing). Preparation (CV, profile, research, polishing) comes only when it blocks the hard step, and only as much as it blocks; do the hard step with what exists now and improve after the replies. set_plan, add_steps and set_levers warn when this is broken: fix it before moving on. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine. Posting progress in public (WIP, Bluesky; Pro): get_post_draft shows the day's draft from the record; add_post publishes it only when the user explicitly asks, with their edits. The one automatic post: on a project the user marked public (set_projects public), finished work (stop_session with outcome done and a real summary, or add_move) queues a WIP todo that posts 10 minutes later unless cancelled; partial work posts nothing by itself. Work stopped in the app waits for you: when an answer carries post_waiting, ask the user what was done, write the todo with them and post it with edit_auto_post. list_auto_posts, delete_auto_post (cancel) and edit_auto_post (the user's words, posted at once) handle it. get_insights gives the week or month at a glance (aim/other/life minutes, hard share, when hard work happens, comebacks). list_agents shows the agents connected to the account; delete_agent disconnects one, only when the user asks.
+Typical flow: get_goal (or check_goal_draft → set_goal), get_path (a path can have up to 3 tracks, set_tracks: different ways to the same aim, each with its own current milestone; the main step can come from any of them), get_planning_context → set_plan with one main step (routines from set_routines are added to each day's plan by the server), start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Hard first: the first step of each stage and each day's main step should be on a hard lever (the work the user puts off: outreach, applications, selling, publishing). Preparation (CV, profile, research, polishing) comes only when it blocks the hard step, and only as much as it blocks; do the hard step with what exists now and improve after the replies. set_plan, add_steps and set_levers warn when this is broken: fix it before moving on. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine. Posting progress in public (WIP, Bluesky; Pro): get_post_draft shows the day's draft from the record; add_post publishes it only when the user explicitly asks, with their edits. The one automatic post: on a project the user marked public (set_projects public), finished work (stop_session with outcome done and a real summary, or add_move) queues a WIP todo that posts 10 minutes later unless cancelled; partial work posts nothing by itself. Work stopped in the app waits for you: when an answer carries post_waiting, ask the user what was done, write the todo with them and post it with edit_auto_post. list_auto_posts, delete_auto_post (cancel) and edit_auto_post (the user's words, posted at once) handle it. get_insights gives the week or month at a glance (aim/other/life minutes, hard share, when hard work happens, comebacks). list_agents shows the agents connected to the account; delete_agent disconnects one, only when the user asks. A Pro feature refused with code pro_required may carry pro_link: a checkout link for the user's own account on the web; offer it once, and get_pro_link makes one when the user asks how to get Pro.
 
 The method behind these tools (setting a countable aim, stages by readiness, hard first, an honest record, a weekly target) is the prompt "aim", also the resource aimyear://skill/aim. If the client has no /aim skill installed, read it before setting an aim or planning.`;
 
-function wrap(name: string, fn: Handler, signedIn: boolean) {
+function wrap(name: string, fn: Handler, signedIn: boolean, offer?: ProOffer) {
   return async (args: any) => {
     // Second check behind the HTTP gate: no tool runs without a person to act as.
     if (!signedIn && levelOfTool(name) !== 'public') {
@@ -73,7 +74,10 @@ function wrap(name: string, fn: Handler, signedIn: boolean) {
     } catch (e) {
       const msg = e instanceof AimError ? e.message : `${(e as Error).message ?? e}`;
       const code = e instanceof ProRequiredError ? { code: e.code } : {};
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: msg, ...code, speak: msg }) }], isError: true };
+      // Someone who uses AimYear only through an agent can buy Pro on the web (src/checkout.ts).
+      const link = e instanceof ProRequiredError ? offer?.link() ?? null : null;
+      const speak = link ? `${msg} Pro on the web, for your account: ${link.url} (the link works for an hour).` : msg;
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: msg, ...code, ...(link ? { pro_link: link.url } : {}), speak }) }], isError: true };
     }
   };
 }
@@ -87,7 +91,7 @@ export const WAITING_TOOLS = ['get_now', 'get_goal', 'get_planning_context', 'ne
  * svc is null for an anonymous caller: the tools are listed, and every call is refused.
  * onTimer runs after each timer tool that succeeded (the Live Activity sync); it never fails the call.
  */
-export function registerTools(server: McpServer, maybeSvc: AimService | null, maybeSocial: SocialService | null = null, maybeAccount: AccountService | null = null, onTimer?: () => Promise<unknown>) {
+export function registerTools(server: McpServer, maybeSvc: AimService | null, maybeSocial: SocialService | null = null, maybeAccount: AccountService | null = null, onTimer?: () => Promise<unknown>, offer?: ProOffer) {
   const svc = maybeSvc as AimService;
   const social = maybeSocial as SocialService;
   const account = maybeAccount as AccountService;
@@ -112,7 +116,7 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
     return { ...r, post_waiting: w.post_waiting, speak: `${r.speak ?? ''} ${w.speak}`.trim() };
   };
   const t = (name: string, description: string, shape: Record<string, z.ZodTypeAny>, fn: Handler) =>
-    server.registerTool(name, { title: title(name), description, inputSchema: shape, annotations: annotationsFor(name) }, wrap(name, after(name, asksForWords(name, fn)), maybeSvc !== null));
+    server.registerTool(name, { title: title(name), description, inputSchema: shape, annotations: annotationsFor(name) }, wrap(name, after(name, asksForWords(name, fn)), maybeSvc !== null, offer));
 
   /** Work on a project marked public may become an automatic WIP todo: the answer says what happened (docs/public-posting.md). */
   const withAuto = async <R extends { speak?: string }>(r: R, work: { sessions?: string[]; moves?: string[]; wipText?: string }) => {
@@ -278,6 +282,17 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
   // ---- connected agents ----
   t('list_agents', 'Agents connected to this AimYear account (Claude, ChatGPT, Claude Code, the AimYear app…): name, client_id, when it connected and when it was last active. current marks the one calling.', {}, () => account.listAgents());
   t('delete_agent', 'Disconnect one agent: its sign-in for this account is deleted and it can no longer read or change anything until it connects again. Only on the user\'s explicit request. client_id from list_agents.', { client_id: z.string().min(1).max(200) }, a => account.disconnectAgent(a.client_id));
+
+  // ---- Pro on the web (src/checkout.ts) ----
+  t('get_pro_link', 'A link where the user buys AimYear Pro on the web, yearly or monthly, without the app: for someone who uses AimYear only through an agent. Use it when the user asks how to get or pay for Pro, or after a tool answered pro_required. The link opens a checkout for this account only and works for an hour; the purchase is the same Pro as in the app, on every device. When the user already has Pro, it says so and gives no link. Changes nothing.', {}, async () => {
+    if (offer && await offer.isPro()) return { pro: true, url: null, speak: 'You already have AimYear Pro: nothing to buy.' };
+    const link = offer?.link() ?? null;
+    if (!link) return { pro: false, url: null, speak: 'Pro is not sold on the web yet. Get AimYear Pro in the AimYear app (App Store or Google Play).' };
+    return {
+      pro: false, url: link.url, expires_at: link.expires_at, test_mode: link.test_mode,
+      speak: `Open this link to get AimYear Pro for your account, yearly or monthly: ${link.url}. It works for an hour; ask again for a new one.${link.test_mode ? ' Test mode: no real money is taken (card 4242 4242 4242 4242).' : ''} Once paid, Pro turns on here and in the app within a minute or two.`,
+    };
+  });
 
   // ---- posting progress in public (Pro) ----
   t('add_social_account', 'Connect WIP (wip.co) or Bluesky so AimYear can post the day\'s progress there when the user says Post (Pro). WIP: api_key from wip.co settings. Bluesky: handle and an app password (Settings → Privacy and security → App passwords), never the account password. The login is checked, stored encrypted and never shown again. The app\'s connect screen usually calls this; if the user pastes a key into the chat, use it once and do not repeat it.', {

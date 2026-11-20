@@ -50,8 +50,54 @@ All take the same Bearer as `/mcp` (the app sends its Firebase ID token); JSON i
 | `GET /account/export` | Everything the server keeps about the person, as one JSON download: `{ format: "aimyear-export", version, exported_at, uid, account, data: { "aim/goal": …, "sessions/<id>": … }, server_rows, agents }`. Saved WIP and Bluesky logins are left out. |
 | `POST /account/delete` | `{ confirm: true }`, and only with the app's Firebase sign-in (an agent's or a static token is refused with 403). Deletes `users/{uid}` with everything under it, the person's reminders, OAuth tokens and codes, the OAuth clients only they used, and the Firebase Auth user. It does not cancel a store subscription, and says so. |
 | `POST /revenuecat/webhook` | RevenueCat's webhook. The `Authorization` header must equal `REVENUECAT_WEBHOOK_AUTH`. |
+| `GET /pro/checkout?t=…` | No sign-in: the token is `<uid>.<expiry>.<HMAC>`, made by `get_pro_link` and valid for an hour. Shows the Pro checkout (Paddle.js, overlay) for that uid only; an expired or changed link, an account that already has Pro, or no web checkout set up get a plain page. See "Pro on the web" below. |
 | `GET /email/unsubscribe?t=…` | No sign-in: the token is the uid with an HMAC. Shows a page with one button; opening the link changes nothing. |
 | `POST /email/unsubscribe?t=…` | One-click unsubscribe (RFC 8058, body `List-Unsubscribe=One-Click`) and the page's button: turns `weekly_review_email` off. |
+
+## Pro on the web (Paddle, through RevenueCat)
+
+Someone who uses AimYear only through an agent buys Pro on the web (docs/pricing.md in the
+AimYear project, "Where Pro is bought"). The purchase is kept by RevenueCat, like the app's:
+
+1. `get_pro_link` (or a Pro refusal over MCP, as `pro_link`) gives the agent
+   `https://<base>/pro/checkout?t=<uid>.<expiry>.<HMAC>`, valid for an hour.
+2. The page loads Paddle.js and opens the overlay checkout for the yearly (preselected) or
+   monthly price, with `customData: { <PADDLE_APP_USER_ID_FIELD>: <uid> }` and the account's
+   email prefilled. Prices on the page come from Paddle (`PricePreview`), never from the server.
+3. Paddle notifies RevenueCat; RevenueCat's Paddle integration reads the uid from the custom
+   data ("Metadata field key"), so the purchase lands on the same RevenueCat customer as the
+   app's. `src/pro.ts` then sees it through the REST check and `POST /revenuecat/webhook`
+   (`store: PADDLE`), with no Paddle code on the server and no Paddle webhook of our own.
+
+Only `/pro/checkout` sends a Content-Security-Policy that allows Paddle: `script-src` with
+the response's nonce and `https://cdn.paddle.com`, `frame-src` the environment's
+`sandbox-buy.paddle.com` or `buy.paddle.com`, `connect-src https://*.paddle.com`.
+
+Never set `PADDLE_ENV=sandbox` on the production service: sandbox purchases are real
+RevenueCat purchases in the sandbox environment and give Pro for a test card.
+
+Sandbox setup (sandbox-vendors.paddle.com, and the RevenueCat project the server's
+`REVENUECAT_SECRET_KEY` belongs to):
+
+- Paddle → Catalog → Products: one product "AimYear Pro" (tax category: Standard digital
+  goods), with two prices: $49.99 USD recurring every 1 year and $7.99 USD recurring
+  every 1 month, no trial. Their `pri_…` ids go to `PADDLE_PRICE_YEARLY` and `PADDLE_PRICE_MONTHLY`.
+- Paddle → Checkout → Checkout settings: a default payment link (sandbox accepts any URL, e.g.
+  the server's base URL). Sandbox approves checkout domains by itself.
+- Paddle → Developer tools → Authentication: a client-side token (`test_…`) for
+  `PADDLE_CLIENT_TOKEN`, and an API key for RevenueCat with the permissions RevenueCat's
+  Paddle guide lists (Customer portal sessions write; Transactions, Client-side tokens and
+  Notification settings read and write; Subscriptions, Products, Prices, Customers and
+  Notifications read), not expiring.
+- RevenueCat → Web → Paddle: a sandbox config with that API key; purchase tracking
+  "Track new purchases from server-to-server notifications" on; Metadata field key
+  `app_user_id` (or whatever `PADDLE_APP_USER_ID_FIELD` says); Webhook Configuration → Apply in
+  Paddle, then check that Paddle → Developer tools → Notifications lists RevenueCat's destination.
+  The server needs no Paddle notification of its own.
+- RevenueCat → Product catalog → Products → Import from Paddle: both prices; attach them to the
+  `AimYear Pro` entitlement (and to an offering if the app should list them).
+- Test with card 4242 4242 4242 4242 and a real-looking email domain (RevenueCat ignores
+  `.test`, `.invalid` and `.localhost`); Paddle's webhook simulator is ignored by RevenueCat.
 
 ## How it is built
 
@@ -64,6 +110,7 @@ All take the same Bearer as `/mcp` (the app sends its Firebase ID token); JSON i
 | `src/tools.ts` | Tool registration, annotations (read-only / destructive / idempotent) and the server instructions. |
 | `src/service.ts`, `src/domain/` | The rules: goal rubric, classification, attention, plans, sessions. |
 | `src/social/` | Posting progress: the draft (`draft.ts`), the WIP and Bluesky clients (`clients.ts`), credential sealing (`crypto.ts`), connect / check / post / evening offer (`service.ts`). |
+| `src/checkout.ts` | Pro on the web: the env switch, the signed checkout link, the checkout page (Paddle.js) and its Content-Security-Policy. |
 | `src/pro.ts` | The one Pro check point: `AIMYEAR_PRO_UIDS` (by hand) → RevenueCat REST (cached a minute) → the webhook-fed `users/{uid}/aim/pro`. The webhook handler too. |
 | `src/account.ts` | Connected agents (list, disconnect), export and delete of the whole account. |
 | `src/review/` | The weekly review email: the builder (`build.ts`: record → facts → subject, text, HTML), when it is due (`schedule.ts`), sending through SES once a week (`deliver.ts`, called by `/tick`), the signed unsubscribe link (`unsubscribe.ts`). `npx tsx scripts/weekly-review-preview.ts` renders two made-up weeks into `tmp/`. |
@@ -101,7 +148,12 @@ issuer), `AIMYEAR_ALLOWED_ORIGINS` (extra browser origins), `AIMYEAR_WORKPLACE`,
 without it connecting a network refuses), `AIMYEAR_PRO_UIDS` (comma-separated uids that always
 have Pro), `REVENUECAT_SECRET_KEY` (a RevenueCat secret API key, for the REST check; a secret),
 `REVENUECAT_ENTITLEMENT` (default `AimYear Pro`), `REVENUECAT_WEBHOOK_AUTH` (the Authorization
-value set on the RevenueCat webhook; a secret; unset refuses every webhook call). The weekly
+value set on the RevenueCat webhook; a secret; unset refuses every webhook call). Pro on the web
+(all five, or there is no web checkout and nothing changes): `PADDLE_ENV` (`sandbox` or
+`production`, no default), `PADDLE_CLIENT_TOKEN` (Paddle's client-side token, `test_…` in sandbox,
+`live_…` in production; public by design), `PADDLE_PRICE_YEARLY` and `PADDLE_PRICE_MONTHLY`
+(`pri_…`), `CHECKOUT_LINK_SECRET` (32+ characters, the HMAC key for the links; a secret), and
+optionally `PADDLE_APP_USER_ID_FIELD` (default `app_user_id`). The weekly
 review email: `AWS_ROLE_ARN` (the role whose short-lived credentials the server gets for its
 Google identity token; without it, the standard `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`),
 `AWS_REGION` (default `us-east-1`) for Amazon SES; `AIMYEAR_REVIEW_FROM` (default `AimYear <review@aimyear.com>`);

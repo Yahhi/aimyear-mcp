@@ -68,6 +68,7 @@ for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change 
 | Reviews | `summarize_day`, `summarize_week`, `find_leaks`, `get_insights` |
 | Settings and devices | `get_settings`, `set_settings`, `add_device`, `list_devices`, `delete_device` |
 | Connected agents | `list_agents`, `delete_agent` |
+| Pro on the web | `get_pro_link` |
 | Posting progress (Pro) | `add_social_account`, `list_social_accounts`, `delete_social_account`, `get_post_draft`, `add_post`, `list_wip_projects`, `list_auto_posts`, `edit_auto_post`, `delete_auto_post` |
 
 Your agent always sees the current list through `tools/list`. What changed between versions

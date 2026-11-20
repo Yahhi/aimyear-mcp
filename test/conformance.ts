@@ -118,6 +118,7 @@ try {
     await use('summarize_week');
     await use('find_leaks');
     await use('list_sessions', { from: today, to: today });
+    await use('get_pro_link');
   }
   const expected = remote ? READ_ONLY : tools.map(t => t.name);
   const missed = expected.filter(n => !called.has(n));

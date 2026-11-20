@@ -60,6 +60,7 @@ export const TOOLS: Record<string, Entry> = {
   list_auto_posts: auth('reads the person\'s automatic WIP todos (queued, posted, cancelled)'),
   edit_auto_post: auth('changes the person\'s automatic WIP todo and posts it on their own WIP account, at their request'),
   delete_auto_post: auth('cancels the person\'s automatic WIP todo before it posts'),
+  get_pro_link: auth('makes a short-lived checkout link for the signed-in person\'s own account; changes nothing'),
 };
 
 /** HTTP routes, "VERB /path". */
@@ -88,6 +89,7 @@ export const ROUTES: Record<string, Entry> = {
   'POST /account/delete': auth('deletes the person\'s account and data; the app\'s Firebase sign-in only, with {"confirm": true}'),
   'GET /email/unsubscribe': pub('the weekly review email\'s unsubscribe link: a confirm page; the signed token (HMAC of the uid) is the proof, no sign-in'),
   'POST /email/unsubscribe': pub('one-click unsubscribe (RFC 8058): turns off the weekly review email of the uid in the signed token, nothing else'),
+  'GET /pro/checkout': pub('the web checkout for Pro: the signed link (HMAC of the uid and an expiry an hour ahead) is the proof, no sign-in; it only buys for that uid and shows that account\'s email'),
   'POST /revenuecat/webhook': admin('RevenueCat subscription events; the Authorization header must equal REVENUECAT_WEBHOOK_AUTH'),
   'GET /.well-known/oauth-authorization-server': pub('OAuth discovery (RFC 8414)'),
   'GET /.well-known/oauth-protected-resource': pub('OAuth discovery (RFC 9728)'),
