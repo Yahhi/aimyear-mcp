@@ -132,7 +132,7 @@ function shell(title: string, body: string, head = ''): string {
 }
 
 const PRO_IS = 'Pro is AimYear working for you: notifications and reminders, the weekly review it writes from your record, and posting your progress to WIP and Bluesky.';
-const LEGAL = '<p class="small">By paying you agree to the <a href="https://aimyear.com/terms.html">terms</a>. <a href="https://aimyear.com/privacy.html">Privacy</a>. Paddle handles the payment and sends the receipt.</p>';
+const LEGAL = '<p class="small">By paying you agree to the <a href="https://aimyear.com/terms.html">terms</a>. <a href="https://aimyear.com/privacy.html">Privacy</a>. <a href="https://aimyear.com/refunds.html">Refunds</a>: 30 days, any reason. Paddle handles the payment and sends the receipt.</p>';
 
 /** The pages without a checkout: a link that does not work, an account that already has Pro, no web checkout set up. */
 export function checkoutInfoPage(kind: 'invalid' | 'pro' | 'off'): string {
