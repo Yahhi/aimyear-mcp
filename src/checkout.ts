@@ -3,8 +3,8 @@
  * "Where Pro is bought"): a Paddle checkout behind a short-lived signed link.
  *
  * The purchase is kept by RevenueCat, like the app's: RevenueCat's Paddle integration
- * (Web → Paddle, "Track new purchases from server-to-server notifications", "Metadata field
- * key" = PADDLE_APP_USER_ID_FIELD) reads the RevenueCat app user id from the transaction's
+ * (Web → Paddle: tracking Automatic, App user ID matching "Use a custom field" =
+ * PADDLE_APP_USER_ID_FIELD) reads the RevenueCat app user id from the transaction's
  * custom data. The checkout puts the Firebase uid there, so the purchase lands on the same
  * RevenueCat customer as the app's, and src/pro.ts needs no new source: the REST check and
  * POST /revenuecat/webhook see it like any store purchase.
@@ -22,7 +22,8 @@
  *  PADDLE_PRICE_MONTHLY  pri_… of Pro monthly
  *  CHECKOUT_LINK_SECRET  32+ characters, the HMAC key for the links (a secret)
  *  PADDLE_APP_USER_ID_FIELD  optional, default app_user_id: the custom data key, the same
- *                        text as RevenueCat's "Metadata field key"
+ *                        text as RevenueCat's custom field (Paddle config →
+ *                        App user ID matching → Use a custom field)
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { usableUid } from './pro.js';
