@@ -90,6 +90,7 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | Route | Access | Why |
 |---|---|---|
 | `GET /health` | public | liveness and version |
+| `GET /` | public | redirects to https://aimyear.com/ |
 | `POST /mcp` | auth | MCP endpoint (Bearer: OAuth access token, static token or the app's Firebase ID token); methods marked public in METHODS answer without a token |
 | `POST /c/:token/mcp` | auth | legacy connector URL with the token in the path |
 | `GET /mcp` | public | 405: the server is stateless, POST only |
@@ -114,6 +115,7 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `GET /email/unsubscribe` | public | the weekly review email's unsubscribe link: a confirm page; the signed token (HMAC of the uid) is the proof, no sign-in |
 | `POST /email/unsubscribe` | public | one-click unsubscribe (RFC 8058): turns off the weekly review email of the uid in the signed token, nothing else |
 | `GET /pro/checkout` | public | the web checkout for Pro: the signed link (HMAC of the uid and an expiry an hour ahead) is the proof, no sign-in; it only buys for that uid and shows that account's email |
+| `POST /paddle/webhook` | public | Paddle notifications (transaction.completed): Paddle's HMAC signature with PADDLE_WEBHOOK_SECRET is the proof; a paid AimYear Pro transaction is posted to RevenueCat, anything else is ignored |
 | `POST /revenuecat/webhook` | admin | RevenueCat subscription events; the Authorization header must equal REVENUECAT_WEBHOOK_AUTH |
 | `GET /.well-known/oauth-authorization-server` | public | OAuth discovery (RFC 8414) |
 | `GET /.well-known/oauth-protected-resource` | public | OAuth discovery (RFC 9728) |

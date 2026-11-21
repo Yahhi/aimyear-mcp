@@ -2,12 +2,13 @@
  * Pro on the web, for someone who uses AimYear only through their agent (docs/pricing.md,
  * "Where Pro is bought"): a Paddle checkout behind a short-lived signed link.
  *
- * The purchase is kept by RevenueCat, like the app's: RevenueCat's Paddle integration
- * (Web → Paddle: tracking Automatic, App user ID matching "Use a custom field" =
- * PADDLE_APP_USER_ID_FIELD) reads the RevenueCat app user id from the transaction's
- * custom data. The checkout puts the Firebase uid there, so the purchase lands on the same
- * RevenueCat customer as the app's, and src/pro.ts needs no new source: the REST check and
- * POST /revenuecat/webhook see it like any store purchase.
+ * The purchase is kept by RevenueCat, like the app's. The checkout puts the Firebase uid in
+ * the transaction's custom data (PADDLE_APP_USER_ID_FIELD); src/paddle.ts reads it from
+ * Paddle's transaction.completed and posts the purchase to RevenueCat for that uid
+ * (RevenueCat's Paddle config uses Manual tracking: the Paddle account also sells other
+ * products). So the purchase lands on the same RevenueCat customer as the app's, and
+ * src/pro.ts needs no new source: the REST check and POST /revenuecat/webhook see it like
+ * any store purchase.
  *
  * The link: GET /pro/checkout?t=<uid>.<expiry, unix seconds>.<HMAC>, made by get_pro_link
  * (and added to an MCP Pro refusal as pro_link). The page loads Paddle.js and opens the
@@ -21,9 +22,8 @@
  *  PADDLE_PRICE_YEARLY   pri_… of Pro yearly
  *  PADDLE_PRICE_MONTHLY  pri_… of Pro monthly
  *  CHECKOUT_LINK_SECRET  32+ characters, the HMAC key for the links (a secret)
- *  PADDLE_APP_USER_ID_FIELD  optional, default app_user_id: the custom data key, the same
- *                        text as RevenueCat's custom field (Paddle config →
- *                        App user ID matching → Use a custom field)
+ *  PADDLE_APP_USER_ID_FIELD  optional, default app_user_id: the custom data key that
+ *                        carries the uid (src/paddle.ts reads the same key)
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { usableUid } from './pro.js';

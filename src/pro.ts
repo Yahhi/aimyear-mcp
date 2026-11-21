@@ -15,8 +15,8 @@
  *
  * Anything missing or failing is "not Pro": the check fails closed.
  *
- * Pro bought on the web (src/checkout.ts, Paddle) is a RevenueCat purchase too: RevenueCat's
- * Paddle integration attaches it to the uid from the transaction's custom data, and then
+ * Pro bought on the web (src/checkout.ts, Paddle) is a RevenueCat purchase too: src/paddle.ts
+ * posts it to RevenueCat for the uid from the transaction's custom data, and then
  * 2 and 3 see it like an App Store or Google Play purchase (webhook events with store PADDLE).
  */
 import { initFirestore } from './store.js';

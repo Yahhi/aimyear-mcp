@@ -33,6 +33,7 @@ import { pro as realPro, type createPro } from './pro.js';
 import { initFirestore } from './store.js';
 import { realReviewDeps, type ReviewDeps } from './review/deliver.js';
 import { unsubscribeKey, unsubscribePage, verifyUnsubscribeToken } from './review/unsubscribe.js';
+import { paddleWebhookConfig, postReceipt, proPurchase, verifyPaddleSignature, type PaddleWebhookConfig } from './paddle.js';
 import { checkoutConfig, checkoutCsp, checkoutInfoPage, checkoutPage, newNonce, PLAIN_CSP, proOffer, verifyCheckoutToken, type CheckoutConfig, type ProOffer } from './checkout.js';
 
 /** Who is calling, for the record: the agent's name on sessions, and the OAuth client id. */
@@ -97,9 +98,13 @@ export interface AppOptions {
   checkout?: CheckoutConfig | null;
   /** The account's email, prefilled in the checkout; production asks Firebase Auth. */
   emailOf?: (uid: string) => Promise<string | null>;
+  /** Paddle's notifications to us (src/paddle.ts): tests pass their own; production reads the env. null: off. */
+  paddleWebhook?: PaddleWebhookConfig | null;
+  /** RevenueCat calls from the Paddle webhook; tests pass a fake. */
+  fetchFn?: typeof fetch;
 }
 
-export function createApp({ tokens, baseUrl, provider, extraOrigins = [], socialDeps, verifyIdToken = realVerify, accountBackend, pro, notifications = () => new Notifications(), webhookAuth = process.env.REVENUECAT_WEBHOOK_AUTH, storeFor = (uid: string) => new Store(uid), reviews, unsubscribeKey: unsubKey = unsubscribeKey(), sendLive, checkout = checkoutConfig(), emailOf }: AppOptions) {
+export function createApp({ tokens, baseUrl, provider, extraOrigins = [], socialDeps, verifyIdToken = realVerify, accountBackend, pro, notifications = () => new Notifications(), webhookAuth = process.env.REVENUECAT_WEBHOOK_AUTH, storeFor = (uid: string) => new Store(uid), reviews, unsubscribeKey: unsubKey = unsubscribeKey(), sendLive, checkout = checkoutConfig(), emailOf, paddleWebhook = paddleWebhookConfig(), fetchFn = (...a) => fetch(...a) }: AppOptions) {
   const accounts = () => accountBackend ?? firestoreAccountBackend();
   const proCheck = () => pro ?? realPro();
   const emailFor = emailOf ?? (async (uid: string) => (await accounts().authUser(uid))?.email ?? null);
@@ -113,6 +118,8 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
   app.disable('x-powered-by');
 
   app.get('/health', (_req, res) => { res.json({ ok: true, version: VERSION }); });
+  // The server's own address shows the product, not an error page (Paddle's domain review opens it).
+  app.get('/', (_req, res) => { res.redirect(302, 'https://aimyear.com/'); });
 
   // ---- OAuth: the consent page's decision, then the SDK router for the protocol ----
   app.post('/authorize/approve', express.json({ limit: '16kb' }), (req, res) => {
@@ -122,6 +129,24 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
     provider: oauth, issuerUrl: baseUrl, resourceServerUrl: resourceUrl, scopesSupported: [SCOPE],
     resourceName: 'AimYear', serviceDocumentationUrl: new URL('https://aimyear.com'),
   }));
+
+  // ---- Paddle: a paid AimYear Pro transaction goes to RevenueCat (src/paddle.ts) ----
+  // Before express.json: the signature is over the raw body. Not ours or not Pro: 200, ignored.
+  app.post('/paddle/webhook', express.raw({ type: () => true, limit: '1mb' }), async (req, res) => {
+    if (!paddleWebhook || !checkout) { res.status(404).json({ error: 'not set up' }); return; }
+    const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    if (!verifyPaddleSignature(paddleWebhook.secret, req.header('paddle-signature'), raw, new Date())) { res.status(401).json({ error: 'bad signature' }); return; }
+    let event: unknown;
+    try { event = JSON.parse(raw.toString('utf8')); } catch { res.status(400).json({ error: 'not JSON' }); return; }
+    const p = proPurchase(event, checkout);
+    if (!p) { res.json({ ok: true, ignored: true }); return; }
+    try {
+      await postReceipt(fetchFn, paddleWebhook.rcKey, p);
+      proCheck().forget(p.uid);
+      console.log(`[paddle] ${p.txn} posted to RevenueCat`);
+      res.json({ ok: true });
+    } catch (e) { console.error(`[paddle] ${p.txn} not posted`, (e as Error).message); res.status(500).json({ error: 'try again' }); }
+  });
 
   app.use(express.json({ limit: '1mb' }));
 
@@ -188,7 +213,7 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
 
   // ---- Pro on the web: the signed checkout link (src/checkout.ts) ----
   // No sign-in: the link is the proof, and it only buys for the uid inside it. The Paddle
-  // purchase reaches RevenueCat through its Paddle integration, so Pro is checked as before.
+  // purchase reaches RevenueCat through POST /paddle/webhook, so Pro is checked as before.
   app.get('/pro/checkout', async (req, res) => {
     const page = (status: number, html: string, csp = PLAIN_CSP) => {
       res.status(status).set({

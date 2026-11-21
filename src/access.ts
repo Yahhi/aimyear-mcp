@@ -66,6 +66,7 @@ export const TOOLS: Record<string, Entry> = {
 /** HTTP routes, "VERB /path". */
 export const ROUTES: Record<string, Entry> = {
   'GET /health': pub('liveness and version'),
+  'GET /': pub('redirects to https://aimyear.com/'),
   'POST /mcp': auth('MCP endpoint (Bearer: OAuth access token, static token or the app\'s Firebase ID token); methods marked public in METHODS answer without a token'),
   'POST /c/:token/mcp': auth('legacy connector URL with the token in the path'),
   'GET /mcp': pub('405: the server is stateless, POST only'),
@@ -90,6 +91,7 @@ export const ROUTES: Record<string, Entry> = {
   'GET /email/unsubscribe': pub('the weekly review email\'s unsubscribe link: a confirm page; the signed token (HMAC of the uid) is the proof, no sign-in'),
   'POST /email/unsubscribe': pub('one-click unsubscribe (RFC 8058): turns off the weekly review email of the uid in the signed token, nothing else'),
   'GET /pro/checkout': pub('the web checkout for Pro: the signed link (HMAC of the uid and an expiry an hour ahead) is the proof, no sign-in; it only buys for that uid and shows that account\'s email'),
+  'POST /paddle/webhook': pub('Paddle notifications (transaction.completed): Paddle\'s HMAC signature with PADDLE_WEBHOOK_SECRET is the proof; a paid AimYear Pro transaction is posted to RevenueCat, anything else is ignored'),
   'POST /revenuecat/webhook': admin('RevenueCat subscription events; the Authorization header must equal REVENUECAT_WEBHOOK_AUTH'),
   'GET /.well-known/oauth-authorization-server': pub('OAuth discovery (RFC 8414)'),
   'GET /.well-known/oauth-protected-resource': pub('OAuth discovery (RFC 9728)'),
