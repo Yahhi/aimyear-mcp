@@ -74,4 +74,4 @@ No automatic resolution, no notification, no change to the end-time rule, no cha
 
 ## 9. Deploy
 
-Same as every release: `npm test`, `npm run surface-lock`, commit, `gcloud run deploy aimyear-mcp --source . --project aimyear-app --region us-central1`, then the remote read-only conformance check (`test/conformance.ts`) against the live URL, and check `/health` reports the new version.
+Same as every release: `npm test`, `npm run surface-lock`, commit, `gcloud run deploy aimyear-mcp --source . --project aimyear-app --region europe-west1`, then the remote read-only conformance check (`test/conformance.ts`) against the live URL, and check `/health` reports the new version.

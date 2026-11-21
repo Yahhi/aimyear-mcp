@@ -204,9 +204,13 @@ When you add a tool: give it an entry in `src/access.ts` (`npm test` fails witho
 ## Hosted (Cloud Run)
 
 ```bash
-gcloud run deploy aimyear-mcp --source . --project aimyear-app --region us-central1 \
+gcloud run deploy aimyear-mcp --source . --project aimyear-app --region europe-west1 \
   --service-account aimyear-mcp@aimyear-app.iam.gserviceaccount.com --quiet
 ```
+
+Production is the `europe-west1` service (moved 2026-11-20, next to Firestore `eur3`; `mcp.aimyear.com`
+and the `aimyear-tick` scheduler job point there). An older copy still runs in `us-central1` for
+mac-timer's `/pull` poll on its run.app URL; never deploy releases there.
 
 The service runs as its own Google service account `aimyear-mcp@aimyear-app.iam.gserviceaccount.com`
 (2026-11-07; before, the shared Compute default account with Editor): Firestore
