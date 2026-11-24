@@ -24,6 +24,7 @@ import { reportLive, syncLive, type SendLive } from './live.js';
 import { isPublicBody } from './access.js';
 import { FirestoreOAuthProvider, SCOPE } from './oauth.js';
 import { instrument, logRefused, type CallContext } from './calllog.js';
+import * as problems from './problems.js';
 import { VERSION } from './version.js';
 import { ConflictError, NotFoundError, SocialService, type SocialDeps } from './social/service.js';
 import { NETWORKS, type Network } from './types.js';
@@ -44,7 +45,7 @@ export function buildServer(uid: string | null, clientSessionId: string, workpla
   if (!uid) { registerTools(server, null, null, null); return server; }
   const store = caller.storeFor ? caller.storeFor(uid) : new Store(uid);
   const svc = new AimService(store, clientSessionId, workplace, caller.agent);
-  registerTools(server, svc, new SocialService(store, svc, socialDeps), new AccountService(caller.accountBackend ?? firestoreAccountBackend(), uid, caller.clientId), () => syncLive(store, { send: caller.sendLive }), caller.proOffer);
+  registerTools(server, svc, new SocialService(store, svc, socialDeps), new AccountService(caller.accountBackend ?? firestoreAccountBackend(), uid, caller.clientId), () => syncLive(store, { send: caller.sendLive }), caller.proOffer, uid);
   return server;
 }
 
@@ -182,12 +183,20 @@ export function createApp({ tokens, baseUrl, provider, extraOrigins = [], social
     } catch (e) { console.error('[pull] failed', e); res.status(500).json({ error: (e as Error).message }); }
   });
 
+  // problems.dev reporting (src/problems.ts): the Firestore outbox, only with a key.
+  if (problems.enabled()) problems.useOutbox(problems.firestoreOutbox(initFirestore));
+
   // Cloud Scheduler polls this every minute. The secret lives in the path.
   app.post('/tick/:token', async (req, res) => {
     if (!tokens.has(String(req.params.token))) { res.status(401).json({ error: 'unauthorized' }); return; }
     try {
       const result = await tick(notifications(), new Date(), undefined, { reviews: reviewDeps });
       if (result.processed) console.error('[tick]', JSON.stringify(result));
+      // Send what waits for problems.dev. Its own try: reporting never fails the tick.
+      try {
+        const sent = await problems.drain();
+        if (sent) console.log(JSON.stringify({ severity: 'INFO', evt: 'problems_drain', ...sent }));
+      } catch (e) { console.error('[problems] drain failed', (e as Error).message); }
       res.json(result);
     } catch (e) { console.error('[tick] failed', e); res.status(500).json({ error: (e as Error).message }); }
   });

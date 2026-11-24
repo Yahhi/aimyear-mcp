@@ -2,6 +2,15 @@
 
 What changed for agents and apps that use the server. Newest first.
 
+0.15.0: `send_feedback`, and error reports to problems.dev. An agent can tell the AimYear
+maintainers when a tool was missing, broken or confusing (`task`, `kind`, `impact`,
+`description`, optional `tool_name`), at most once per task; the tool is ported from
+`@problemsdev/sdk` 0.0.5 and its description says where the text goes. Each tool call is
+reported as its name and success or a fixed error kind (never the text, arguments, results
+or who called), through a Firestore outbox sent by the minute tick, so no call waits on
+problems.dev. An unexpected error now carries one more line pointing to `send_feedback`.
+Off without the key.
+
 0.14.0: Pro on the web, for people who use AimYear only through their agent.
 `get_pro_link` gives a checkout link (Paddle) for the signed-in account, valid for an hour;
 a Pro refusal (`code: pro_required`) over MCP carries it as `pro_link`. The server passes the

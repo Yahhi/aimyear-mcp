@@ -84,6 +84,7 @@ aim, plan, timer or history needs a sign-in. Anything not listed needs a sign-in
 | `edit_auto_post` | auth | changes the person's automatic WIP todo and posts it on their own WIP account, at their request |
 | `delete_auto_post` | auth | cancels the person's automatic WIP todo before it posts |
 | `get_pro_link` | auth | makes a short-lived checkout link for the signed-in person's own account; changes nothing |
+| `send_feedback` | auth | sends the agent's note about the tools to the AimYear maintainers through problems.dev, masked for secrets and emails and not tied to the person; reads and changes none of their data |
 
 ## HTTP routes
 

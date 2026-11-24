@@ -49,7 +49,8 @@ your record, and posting your progress to WIP and Bluesky. Prices are on
 The server stores what your agent saves through the tools (aim, path, plans, sessions and
 their summaries) in Google Cloud Firestore. Your conversation stays with your agent's
 provider; AimYear only receives the tool calls. Logs keep the tool name, success and timing,
-never argument values. To delete your account and data, email privacy@aimyear.com. Details
+never argument values. Each tool call is also reported to problems.dev (error monitoring) as
+the tool name and success or a fixed error kind, never its text, arguments or who called. To delete your account and data, email privacy@aimyear.com. Details
 are in the [privacy policy](https://aimyear.com/privacy.html).
 
 ## Tools
@@ -69,6 +70,7 @@ for problems, `set_` replaces a whole list, `add_` / `edit_` / `delete_` change 
 | Settings and devices | `get_settings`, `set_settings`, `add_device`, `list_devices`, `delete_device` |
 | Connected agents | `list_agents`, `delete_agent` |
 | Pro on the web | `get_pro_link` |
+| Feedback to the maintainers | `send_feedback` (goes to problems.dev, masked; see the privacy policy) |
 | Posting progress (Pro) | `add_social_account`, `list_social_accounts`, `delete_social_account`, `get_post_draft`, `add_post`, `list_wip_projects`, `list_auto_posts`, `edit_auto_post`, `delete_auto_post` |
 
 Your agent always sees the current list through `tools/list`. What changed between versions

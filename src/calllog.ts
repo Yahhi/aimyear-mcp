@@ -13,6 +13,7 @@
  */
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
+import { recordCall } from './problems.js';
 
 export interface CallContext { user: string; client: string; req: string; auth: 'oauth' | 'token' | 'firebase' | 'none'; app?: string }
 interface Started { method: string; tool: string | null; args: { keys: string[]; len: number } | null; t0: number; seq: number }
@@ -72,6 +73,9 @@ export function instrument(transport: Transport, body: unknown, ctx: CallContext
             err = /Sign in to AimYear/.test(text) ? 'not_signed_in' : /Input validation error/.test(text) ? 'invalid_arguments' : 'tool_error';
           }
           emit({ ...ctx, method: s.method, tool: s.tool, args: s.args, ok: !error && !toolError, err, ms: Date.now() - s.t0, seq: s.seq });
+          // problems.dev (src/problems.ts): into the outbox before the answer leaves, bounded,
+          // so an instance that freezes after the response loses nothing. Only the error class.
+          if (s.method === 'tools/call') await recordCall(s.tool, !error && !toolError, err);
         }
       } catch { /* never fail the response */ }
       return send(msg, opts);

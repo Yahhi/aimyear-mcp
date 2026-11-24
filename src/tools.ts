@@ -6,6 +6,7 @@ import type { SocialService } from './social/service.js';
 import type { AccountService } from './account.js';
 import type { ProOffer } from './checkout.js';
 import { levelOfTool } from './access.js';
+import * as problems from './problems.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -59,6 +60,8 @@ Names: get_ reads one thing, list_ reads several, find_ looks for problems, set_
 
 Typical flow: get_goal (or check_goal_draft → set_goal), get_path (a path can have up to 3 tracks, set_tracks: different ways to the same aim, each with its own current milestone; the main step can come from any of them), get_planning_context → set_plan with one main step (routines from set_routines are added to each day's plan by the server), start_session before work (honor its verdict: ok, plan_first or stop), stop_session with a real summary, summarize_day / summarize_week / find_leaks for reviews. To fix a record, use edit_session or delete_session. Hard first: the first step of each stage and each day's main step should be on a hard lever (the work the user puts off: outreach, applications, selling, publishing). Preparation (CV, profile, research, polishing) comes only when it blocks the hard step, and only as much as it blocks; do the hard step with what exists now and improve after the replies. set_plan, add_steps and set_levers warn when this is broken: fix it before moving on. Every result has a "speak" field: say it to the user in your own words. Start or stop the timer only when the user asks; adding past time with add_session is always fine. Posting progress in public (WIP, Bluesky; Pro): get_post_draft shows the day's draft from the record; add_post publishes it only when the user explicitly asks, with their edits. The one automatic post: on a project the user marked public (set_projects public), finished work (stop_session with outcome done and a real summary, or add_move) queues a WIP todo that posts 10 minutes later unless cancelled; partial work posts nothing by itself. Work stopped in the app waits for you: when an answer carries post_waiting, ask the user what was done, write the todo with them and post it with edit_auto_post. list_auto_posts, delete_auto_post (cancel) and edit_auto_post (the user's words, posted at once) handle it. get_insights gives the week or month at a glance (aim/other/life minutes, hard share, when hard work happens, comebacks). list_agents shows the agents connected to the account; delete_agent disconnects one, only when the user asks. A Pro feature refused with code pro_required may carry pro_link: a checkout link for the user's own account on the web; offer it once, and get_pro_link makes one when the user asks how to get Pro.
 
+${problems.INSTRUCTIONS}
+
 The method behind these tools (setting a countable aim, stages by readiness, hard first, an honest record, a weekly target) is the prompt "aim", also the resource aimyear://skill/aim. If the client has no /aim skill installed, read it before setting an aim or planning.`;
 
 function wrap(name: string, fn: Handler, signedIn: boolean, offer?: ProOffer) {
@@ -72,12 +75,17 @@ function wrap(name: string, fn: Handler, signedIn: boolean, offer?: ProOffer) {
       const result = await fn(args ?? {});
       return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
     } catch (e) {
+      if (e instanceof problems.FeedbackRefused) return { content: [{ type: 'text' as const, text: JSON.stringify({ error: e.message, speak: e.message }) }], isError: true };
       const msg = e instanceof AimError ? e.message : `${(e as Error).message ?? e}`;
       const code = e instanceof ProRequiredError ? { code: e.code } : {};
       // Someone who uses AimYear only through an agent can buy Pro on the web (src/checkout.ts).
       const link = e instanceof ProRequiredError ? offer?.link() ?? null : null;
       const speak = link ? `${msg} Pro on the web, for your account: ${link.url} (the link works for an hour).` : msg;
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ error: msg, ...code, ...(link ? { pro_link: link.url } : {}), speak }) }], isError: true };
+      const content = [{ type: 'text' as const, text: JSON.stringify({ error: msg, ...code, ...(link ? { pro_link: link.url } : {}), speak }) }];
+      // The SDK's nudge: an unexpected error (not one of AimYear's own refusals) points the
+      // agent to send_feedback, only where feedback can be delivered.
+      if (!(e instanceof AimError) && problems.enabled()) content.push({ type: 'text' as const, text: problems.NUDGE });
+      return { content, isError: true };
     }
   };
 }
@@ -91,7 +99,7 @@ export const WAITING_TOOLS = ['get_now', 'get_goal', 'get_planning_context', 'ne
  * svc is null for an anonymous caller: the tools are listed, and every call is refused.
  * onTimer runs after each timer tool that succeeded (the Live Activity sync); it never fails the call.
  */
-export function registerTools(server: McpServer, maybeSvc: AimService | null, maybeSocial: SocialService | null = null, maybeAccount: AccountService | null = null, onTimer?: () => Promise<unknown>, offer?: ProOffer) {
+export function registerTools(server: McpServer, maybeSvc: AimService | null, maybeSocial: SocialService | null = null, maybeAccount: AccountService | null = null, onTimer?: () => Promise<unknown>, offer?: ProOffer, who = '') {
   const svc = maybeSvc as AimService;
   const social = maybeSocial as SocialService;
   const account = maybeAccount as AccountService;
@@ -311,6 +319,18 @@ export function registerTools(server: McpServer, maybeSvc: AimService | null, ma
   }, a => social.editAutoPost(a.id, a.text));
   t('delete_auto_post', 'Cancel an automatic WIP todo before it posts (the user said not to post it). A todo already on WIP stays there: the answer says so, with its link.', { id: z.string().min(1).max(64).describe('from list_auto_posts or the stop_session answer') }, a => social.cancelAutoPost(a.id));
   t('list_wip_projects', 'The user\'s own WIP (wip.co) projects with their hashtags, read through their saved WIP login, and which AimYear project or lever carries each hashtag; plus the AimYear projects and levers without one. Use it once WIP is connected to attach the hashtags (set_projects / set_levers, wip_hashtag), asking the user only when unsure. Posts nothing. Pro.', {}, () => social.listWipProjects());
+
+  // ---- feedback to the maintainers (src/problems.ts, ported from @problemsdev/sdk 0.0.5) ----
+  server.registerTool(problems.FEEDBACK_TOOL, {
+    title: problems.TITLE, description: problems.DESCRIPTION, annotations: problems.ANNOTATIONS,
+    inputSchema: {
+      task: z.string().min(1).max(200).describe('A short phrase naming what the user asked you to do.'),
+      kind: z.enum(problems.KINDS).describe('missing: no tool or argument could do it; broken: a tool failed or returned something wrong; confusing: a tool, its description or an error was unclear; idea: a suggestion.'),
+      impact: z.enum(problems.IMPACTS).describe("blocked: you couldn't finish; worked_around: you finished another way; friction: you finished, but it was harder than it should be."),
+      description: z.string().min(10).max(4096).describe('What you tried, including the tool calls and any error, and what you expected.'),
+      tool_name: z.string().max(100).describe('The AimYear tool this is about, if any.').optional(),
+    },
+  }, wrap(problems.FEEDBACK_TOOL, a => problems.sendFeedback(a, who), maybeSvc !== null, offer));
 
   // ---- prompts ----
   server.registerPrompt('plan-tomorrow', { description: 'Plan tomorrow: one main step toward the goal, then the rest of life.' }, () => ({

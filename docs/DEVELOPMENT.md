@@ -238,5 +238,14 @@ The RevenueCat webhook URL is `https://mcp.aimyear.com/revenuecat/webhook`. `mcp
 (CNAME to `ghs.googlehosted.com` in Route 53) and is in Firebase Auth's authorized domains.
 Health: `/health`. The legacy URL `https://<service>/c/<token>/mcp` still works.
 
+**problems.dev** (2026-11-24, `src/problems.ts`; the facts are in the AimYear project's
+`docs/server-error-reports.md`): each tool call (tool name, success or the call log's error
+class, never text) and each `send_feedback` item goes into the Firestore collection
+`problems_outbox` before the answer leaves (capped at 500 ms), and `/tick` sends the outbox to
+problems.dev every minute. The key is the Secret Manager secret `PROBLEMS_PUBLIC_KEY`
+(`--update-secrets PROBLEMS_PUBLIC_KEY=PROBLEMS_PUBLIC_KEY:latest`, accessor granted to the
+service account); without it nothing is queued or sent. `PROBLEMS_REPORTING=off` turns it off.
+The drain logs `evt: problems_drain` with the HTTP statuses.
+
 Call analytics: `scripts/mcp-calls.sh [1d]` prints calls per tool and the call sequences
 per person and client.
